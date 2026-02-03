@@ -10,7 +10,7 @@ Lazy Blacktea is a desktop console for Android device automation. This edition u
 - APK installer page (single, multi, split bundles with flags + launch)
 - Screenshot and screen recording with configurable settings
 - Logcat streaming with filters, presets, search, and export
-- Device file browsing, pull, and preview
+- Device file browsing, pull, upload, rename/delete, and preview
 - UI hierarchy capture with screenshot + XML/HTML export
 - Wireless ADB pairing helper (QR/pairing code flow)
 - App management (list, uninstall, force stop, clear data, enable/disable, open info)
@@ -20,10 +20,10 @@ Lazy Blacktea is a desktop console for Android device automation. This edition u
 
 ## Requirements
 
-- `adb` available in PATH
+- `adb` available in PATH (or configure a full path in Settings)
 - Node.js + npm
 - Rust toolchain (latest stable)
-- macOS or Linux
+- macOS, Linux, or Windows
 - Optional: `scrcpy` for device mirroring
 
 ## Quick Start
@@ -44,9 +44,11 @@ cargo test --all --all-features
 
 ## Notes
 
-- Configuration is stored at `~/.lazy_blacktea_config.json`.
+- Configuration is stored at `~/.lazy_blacktea_config.json` (or `%USERPROFILE%\\.lazy_blacktea_config.json` on Windows). Override with `LAZY_BLACKTEA_CONFIG_PATH`.
 - Logs are JSON-formatted in release builds.
 - Default output paths can be configured in Settings.
+- Task Center keeps the last 50 tasks and persists across restarts.
+- File transfers report progress in Task Center when the installed `adb` supports `-p` (falls back automatically).
 - App shell + routing are implemented in `src/App.tsx` with `HashRouter` in `src/main.tsx`.
 - UI layout uses compact density, grouped sidebar navigation, and a device status top bar.
 - Active device auto-selects the first online device after refresh; the top bar selector includes a Manage shortcut.

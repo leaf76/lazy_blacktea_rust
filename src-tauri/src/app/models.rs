@@ -59,6 +59,14 @@ pub struct HostCommandResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdbInfo {
+    pub available: bool,
+    pub version_output: String,
+    pub command_path: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiHierarchyCaptureResult {
     pub html: String,
     pub xml: String,

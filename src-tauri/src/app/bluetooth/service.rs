@@ -36,6 +36,7 @@ pub fn start_bluetooth_monitor(
     app: AppHandle,
     serial: String,
     trace_id: String,
+    adb_program: String,
 ) -> BluetoothMonitorHandle {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::new();
@@ -50,6 +51,8 @@ pub fn start_bluetooth_monitor(
     let parser_logcat = Arc::clone(&parser);
     let trace_snapshot = trace_id.clone();
     let trace_logcat = trace_id.clone();
+    let adb_program_snapshot = adb_program.clone();
+    let adb_program_logcat = adb_program;
 
     threads.push(thread::spawn(move || {
         let mut machine = BluetoothStateMachine::new(3.0, 3.0);
@@ -67,7 +70,7 @@ pub fn start_bluetooth_monitor(
                 "dumpsys bluetooth_manager && echo '---SEPARATOR---' && dumpsys bluetooth_adapter".to_string(),
             ];
             let output = run_command_with_timeout(
-                "adb",
+                &adb_program_snapshot,
                 &snapshot_cmd,
                 Duration::from_secs(5),
                 &trace_snapshot,
@@ -109,7 +112,7 @@ pub fn start_bluetooth_monitor(
             "-b".to_string(),
             "all".to_string(),
         ];
-        let mut child = match std::process::Command::new("adb")
+        let mut child = match std::process::Command::new(&adb_program_logcat)
             .args(&args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

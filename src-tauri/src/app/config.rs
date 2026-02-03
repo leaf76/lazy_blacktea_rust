@@ -75,6 +75,19 @@ impl Default for CommandSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdbSettings {
+    pub command_path: String,
+}
+
+impl Default for AdbSettings {
+    fn default() -> Self {
+        Self {
+            command_path: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LoggingSettings {
     pub log_level: String,
     pub log_to_file: bool,
@@ -236,6 +249,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub command: CommandSettings,
     #[serde(default)]
+    pub adb: AdbSettings,
+    #[serde(default)]
     pub logging: LoggingSettings,
     #[serde(default)]
     pub logcat: LogcatSettings,
@@ -267,6 +282,7 @@ impl Default for AppConfig {
             ui: UiSettings::default(),
             device: DeviceSettings::default(),
             command: CommandSettings::default(),
+            adb: AdbSettings::default(),
             logging: LoggingSettings::default(),
             logcat: LogcatSettings::default(),
             scrcpy: ScrcpySettings::default(),
@@ -287,12 +303,26 @@ pub fn config_path() -> PathBuf {
     if let Ok(path) = std::env::var("LAZY_BLACKTEA_CONFIG_PATH") {
         return PathBuf::from(path);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .or_else(|_| {
+            let drive = std::env::var("HOMEDRIVE")?;
+            let path = std::env::var("HOMEPATH")?;
+            Ok::<String, std::env::VarError>(format!("{drive}{path}"))
+        })
+        .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".lazy_blacktea_config.json")
 }
 
 pub fn backup_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .or_else(|_| {
+            let drive = std::env::var("HOMEDRIVE")?;
+            let path = std::env::var("HOMEPATH")?;
+            Ok::<String, std::env::VarError>(format!("{drive}{path}"))
+        })
+        .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".lazy_blacktea_config.backup.json")
 }
 

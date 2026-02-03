@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AdbInfo,
   ApkBatchInstallResult,
   AppConfig,
   AppInfo,
@@ -22,6 +23,16 @@ export const getConfig = async () => {
   return invoke<CommandResponse<AppConfig>>("get_config", {
     trace_id: createTraceId(),
   });
+};
+
+export const checkAdb = async (commandPath?: string) => {
+  const payload: Record<string, unknown> = {
+    trace_id: createTraceId(),
+  };
+  if (commandPath && commandPath.trim()) {
+    payload.command_path = commandPath;
+  }
+  return invoke<CommandResponse<AdbInfo>>("check_adb", payload);
 };
 
 export const saveConfig = async (config: AppConfig) => {
@@ -152,12 +163,63 @@ export const pullDeviceFile = async (
   serial: string,
   devicePath: string,
   outputDir: string,
+  traceId?: string,
 ) => {
   return invoke<CommandResponse<string>>("pull_device_file", {
     serial,
     device_path: devicePath,
     output_dir: outputDir,
-    trace_id: createTraceId(),
+    trace_id: traceId ?? createTraceId(),
+  });
+};
+
+export const pushDeviceFile = async (
+  serial: string,
+  localPath: string,
+  devicePath: string,
+  traceId?: string,
+) => {
+  return invoke<CommandResponse<string>>("push_device_file", {
+    serial,
+    local_path: localPath,
+    device_path: devicePath,
+    trace_id: traceId ?? createTraceId(),
+  });
+};
+
+export const mkdirDeviceDir = async (serial: string, devicePath: string, traceId?: string) => {
+  return invoke<CommandResponse<string>>("mkdir_device_dir", {
+    serial,
+    device_path: devicePath,
+    trace_id: traceId ?? createTraceId(),
+  });
+};
+
+export const renameDevicePath = async (
+  serial: string,
+  fromPath: string,
+  toPath: string,
+  traceId?: string,
+) => {
+  return invoke<CommandResponse<string>>("rename_device_path", {
+    serial,
+    from_path: fromPath,
+    to_path: toPath,
+    trace_id: traceId ?? createTraceId(),
+  });
+};
+
+export const deleteDevicePath = async (
+  serial: string,
+  devicePath: string,
+  recursive: boolean,
+  traceId?: string,
+) => {
+  return invoke<CommandResponse<string>>("delete_device_path", {
+    serial,
+    device_path: devicePath,
+    recursive,
+    trace_id: traceId ?? createTraceId(),
   });
 };
 

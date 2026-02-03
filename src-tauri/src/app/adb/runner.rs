@@ -60,6 +60,6 @@ pub fn run_command_with_timeout(
     })
 }
 
-pub fn run_adb(args: &[String], trace_id: &str) -> Result<CommandOutput, AppError> {
-    run_command("adb", args, trace_id)
+pub fn run_adb(program: &str, args: &[String], trace_id: &str) -> Result<CommandOutput, AppError> {
+    run_command(program, args, trace_id)
 }

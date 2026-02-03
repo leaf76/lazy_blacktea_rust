@@ -56,9 +56,12 @@ lazy_blacktea_rust/
 
 - Commands return `{ trace_id, data }`. Errors return `{ error, code, trace_id }`.
 - Always include a trace_id in logs.
-- Use system `adb` (no bundled binary).
+- Use system `adb` (no bundled binary). Users can also set a full ADB executable path in Settings.
+- File Explorer uses `adb ls/pull/push` plus `mkdir/mv/rm` for browsing, download/upload, and basic file management.
+- Task Center keeps the last 50 tasks and persists across restarts.
+- File transfers emit progress events when the installed `adb` supports `-p` (fallback is automatic).
 - Avoid blocking UI: long tasks are handled in Rust threads.
-- Config stored at `~/.lazy_blacktea_config.json` with legacy compatibility.
+- Config stored at `~/.lazy_blacktea_config.json` (or `%USERPROFILE%\\.lazy_blacktea_config.json` on Windows) with legacy compatibility.
 - Tauri plugins in use: opener, dialog, clipboard-manager.
 
 ## COMMANDS

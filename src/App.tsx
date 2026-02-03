@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
+  AdbInfo,
   AppConfig,
   AppInfo,
   BugreportResult,
@@ -21,6 +23,7 @@ import {
   cancelBugreport,
   captureScreenshot,
   captureUiHierarchy,
+  checkAdb,
   checkScrcpy,
   clearAppData,
   clearLogcat,
@@ -32,12 +35,16 @@ import {
   installApkBatch,
   launchApp,
   launchScrcpy,
+  mkdirDeviceDir,
+  deleteDevicePath,
   listApps,
   listDeviceFiles,
   listDevices,
   openAppInfo,
   previewLocalFile,
   pullDeviceFile,
+  pushDeviceFile,
+  renameDevicePath,
   rebootDevices,
   resetConfig,
   runShell,
@@ -68,10 +75,25 @@ import {
   parseAdbPairOutput,
   parseQrPayload,
 } from "./pairing";
+import {
+  createInitialTaskState,
+  createTask,
+  summarizeTask,
+  tasksReducer,
+  type TaskItem,
+  type TaskKind,
+} from "./tasks";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
 type BugreportProgress = { serial: string; progress: number; trace_id: string };
+type FileTransferProgress = {
+  serial: string;
+  direction: string;
+  progress?: number | null;
+  message?: string | null;
+  trace_id: string;
+};
 type QuickActionId =
   | "screenshot"
   | "reboot"
@@ -118,6 +140,16 @@ function App() {
   const [filesPath, setFilesPath] = useState("/sdcard");
   const [files, setFiles] = useState<DeviceFileEntry[]>([]);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
+  const [filesSelectedPaths, setFilesSelectedPaths] = useState<string[]>([]);
+  const [filesOverwriteEnabled, setFilesOverwriteEnabled] = useState(true);
+  const [filesDropActive, setFilesDropActive] = useState(false);
+  const [filesModal, setFilesModal] = useState<
+    | null
+    | { type: "mkdir"; name: string }
+    | { type: "rename"; entry: DeviceFileEntry; newName: string }
+    | { type: "delete"; entry: DeviceFileEntry; recursive: boolean; confirm: string }
+    | { type: "delete_many"; entries: DeviceFileEntry[]; recursive: boolean; confirm: string }
+  >(null);
   const [uiHtml, setUiHtml] = useState("");
   const [uiXml, setUiXml] = useState("");
   const [uiScreenshotPath, setUiScreenshotPath] = useState("");
@@ -153,16 +185,61 @@ function App() {
   const [bluetoothEvents, setBluetoothEvents] = useState<string[]>([]);
   const [bluetoothState, setBluetoothStateText] = useState<string>("");
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
+  const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [pairingState, dispatchPairing] = useReducer(pairingReducer, initialPairingState);
   const [actionForm, setActionForm] = useState<ActionFormState>(initialActionFormState);
+  const [taskState, dispatchTasks] = useReducer(tasksReducer, undefined, () => {
+    const initial = createInitialTaskState(50);
+    try {
+      const raw = localStorage.getItem("lazy_blacktea_tasks_v1");
+      if (!raw) {
+        return initial;
+      }
+      const parsed = JSON.parse(raw) as { items?: unknown; max_items?: unknown };
+      if (!Array.isArray(parsed.items)) {
+        return initial;
+      }
+      const isTaskItem = (value: unknown): value is TaskItem => {
+        if (!value || typeof value !== "object") {
+          return false;
+        }
+        const record = value as Record<string, unknown>;
+        return (
+          typeof record.id === "string" &&
+          typeof record.title === "string" &&
+          typeof record.kind === "string" &&
+          typeof record.status === "string" &&
+          typeof record.started_at === "number" &&
+          record.devices != null &&
+          typeof record.devices === "object"
+        );
+      };
+      const maxItems = typeof parsed.max_items === "number" ? parsed.max_items : initial.max_items;
+      const items = parsed.items.filter(isTaskItem).slice(0, maxItems);
+      return { ...initial, max_items: maxItems, items };
+    } catch (error) {
+      console.warn("Failed to load Task Center state from storage.", error);
+      return initial;
+    }
+  });
   const [actionOutputDir, setActionOutputDir] = useState("");
   const [actionRebootMode, setActionRebootMode] = useState("normal");
   const [actionDraftConfig, setActionDraftConfig] = useState<AppConfig | null>(null);
   const [logcatMatchIndex, setLogcatMatchIndex] = useState(0);
   const logcatOutputRef = useRef<HTMLDivElement | null>(null);
   const lastSelectedIndexRef = useRef<number | null>(null);
+  const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
+  const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
+  const filesDragContextRef = useRef<{
+    pathname: string;
+    serial: string;
+    path: string;
+    overwrite: boolean;
+    existingNames: string[];
+  }>({ pathname: "/", serial: "", path: "/sdcard", overwrite: true, existingNames: [] });
 
+  const location = useLocation();
   const navigate = useNavigate();
   const activeSerial = selectedSerials[0];
   const activeDevice = useMemo(
@@ -199,6 +276,27 @@ function App() {
     }
     return "warn";
   }, [activeSerial, deviceStatus]);
+
+  useEffect(() => {
+    filesDragContextRef.current = {
+      pathname: location.pathname,
+      serial: activeSerial ?? "",
+      path: filesPath,
+      overwrite: filesOverwriteEnabled,
+      existingNames: files.map((entry) => entry.name),
+    };
+  }, [activeSerial, files, filesOverwriteEnabled, filesPath, location.pathname]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "lazy_blacktea_tasks_v1",
+        JSON.stringify({ max_items: taskState.max_items, items: taskState.items }),
+      );
+    } catch (error) {
+      console.warn("Failed to persist Task Center state to storage.", error);
+    }
+  }, [taskState.items, taskState.max_items]);
 
   const rawLogcatLines = useMemo(
     () => (activeSerial ? logcatLines[activeSerial] ?? [] : []),
@@ -240,6 +338,11 @@ function App() {
   const selectedLogcatPreset = useMemo(
     () => logcatPresets.find((preset) => preset.name === logcatPresetSelected) ?? null,
     [logcatPresets, logcatPresetSelected],
+  );
+
+  const runningTaskCount = useMemo(
+    () => taskState.items.filter((task) => task.status === "running").length,
+    [taskState.items],
   );
 
   useEffect(() => {
@@ -338,9 +441,30 @@ function App() {
     }, 4000);
   };
 
+  const beginTask = (params: { kind: TaskKind; title: string; serials: string[] }) => {
+    const id = crypto.randomUUID();
+    dispatchTasks({
+      type: "TASK_ADD",
+      task: createTask({
+        id,
+        kind: params.kind,
+        title: params.title,
+        serials: params.serials,
+      }),
+    });
+    return id;
+  };
+
   const refreshDevices = async () => {
     setBusy(true);
     try {
+      const adbResponse = await checkAdb();
+      setAdbInfo(adbResponse.data);
+      if (!adbResponse.data.available) {
+        setDevices([]);
+        setSelectedSerials([]);
+        return;
+      }
       const response = await listDevices(true);
       setDevices(response.data);
       setSelectedSerials((prev) =>
@@ -431,9 +555,11 @@ function App() {
   };
 
   useEffect(() => {
-    refreshDevices();
-    loadConfig();
-    void checkScrcpy().then((response) => setScrcpyInfo(response.data)).catch(() => null);
+    void (async () => {
+      await loadConfig();
+      await refreshDevices();
+      void checkScrcpy().then((response) => setScrcpyInfo(response.data)).catch(() => null);
+    })();
   }, []);
 
   useEffect(() => {
@@ -515,18 +641,85 @@ function App() {
         setBluetoothEvents((prev) => [payload.event?.message ?? "", ...prev].slice(0, 200));
       }
     });
+    const unlistenFileTransferProgress = listen<FileTransferProgress>("file-transfer-progress", (event) => {
+      const payload = event.payload;
+      const taskId = fileTransferTaskByTraceIdRef.current[payload.trace_id];
+      if (!taskId) {
+        return;
+      }
+      const progress = payload.progress ?? null;
+      const patch = {
+        progress,
+        ...(progress != null && progress < 100 ? { message: payload.message ?? null } : {}),
+      };
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: payload.serial,
+        patch,
+      });
+    });
     const unlistenBugreportProgress = listen<BugreportProgress>("bugreport-progress", (event) => {
       const payload = event.payload;
       if (!activeSerial || payload.serial === activeSerial) {
         setBugreportProgress(payload.progress);
       }
+      const taskId = bugreportTaskBySerialRef.current[payload.serial];
+      if (taskId) {
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: payload.trace_id });
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial: payload.serial,
+          patch: {
+            status: "running",
+            progress: payload.progress,
+            message: "Generating bugreport…",
+          },
+        });
+      }
     });
     const unlistenBugreportComplete = listen("bugreport-complete", (event) => {
-      const payload = event.payload as { result?: BugreportResult };
+      const payload = event.payload as { trace_id?: string; result?: BugreportResult };
       if (payload?.result) {
         setBugreportResult(payload.result);
         setBugreportProgress(payload.result.progress ?? null);
       }
+      const serial = payload?.result?.serial;
+      if (!serial) {
+        return;
+      }
+      const taskId = bugreportTaskBySerialRef.current[serial];
+      if (!taskId || !payload.result) {
+        return;
+      }
+
+      if (payload.trace_id) {
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: payload.trace_id });
+      }
+      const errorText = payload.result.error?.trim() ?? "";
+      const cancelled = errorText.toLowerCase().includes("cancel");
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: {
+          status: payload.result.success ? "success" : cancelled ? "cancelled" : "error",
+          progress: payload.result.progress ?? null,
+          output_path: payload.result.output_path ?? null,
+          message: payload.result.success
+            ? "Bugreport completed."
+            : cancelled
+              ? "Bugreport cancelled."
+              : payload.result.error ?? "Bugreport failed.",
+        },
+      });
+      dispatchTasks({
+        type: "TASK_SET_STATUS",
+        id: taskId,
+        status: payload.result.success ? "success" : cancelled ? "cancelled" : "error",
+      });
+      delete bugreportTaskBySerialRef.current[serial];
     });
 
     return () => {
@@ -534,6 +727,7 @@ function App() {
       void unlistenBluetoothSnapshot.then((unlisten) => unlisten());
       void unlistenBluetoothState.then((unlisten) => unlisten());
       void unlistenBluetoothEvent.then((unlisten) => unlisten());
+      void unlistenFileTransferProgress.then((unlisten) => unlisten());
       void unlistenBugreportProgress.then((unlisten) => unlisten());
       void unlistenBugreportComplete.then((unlisten) => unlisten());
     };
@@ -624,30 +818,63 @@ function App() {
     pushToast(trimmed ? `Assigned ${trimmed}.` : "Cleared group assignment.", "info");
   };
 
-  const handleRunShell = async () => {
-    if (!shellCommand.trim()) {
-      pushToast("Please enter a shell command.", "error");
-      return;
-    }
-    if (!selectedSerials.length) {
-      pushToast("Select at least one device.", "error");
-      return;
-    }
-    setBusy(true);
-    try {
-      const response = await runShell(selectedSerials, shellCommand, config?.command.parallel_execution);
-      const output = response.data.map(
-        (result) =>
-          `${result.serial} (${result.exit_code ?? "?"}):\n${result.stdout || result.stderr || ""}`,
-      );
-      setShellOutput(output);
-      pushToast("Shell command completed.", "info");
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
+	  const handleRunShell = async () => {
+	    if (!shellCommand.trim()) {
+	      pushToast("Please enter a shell command.", "error");
+	      return;
+	    }
+	    if (!selectedSerials.length) {
+	      pushToast("Select at least one device.", "error");
+	      return;
+	    }
+	    const shortCommand = shellCommand.trim().slice(0, 80);
+	    const taskId = beginTask({
+	      kind: "shell",
+	      title: `Shell: ${shortCommand}${shellCommand.trim().length > 80 ? "…" : ""}`,
+	      serials: selectedSerials,
+	    });
+	    setBusy(true);
+	    try {
+	      const response = await runShell(selectedSerials, shellCommand, config?.command.parallel_execution);
+	      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+	      const output = response.data.map(
+	        (result) =>
+	          `${result.serial} (${result.exit_code ?? "?"}):\n${result.stdout || result.stderr || ""}`,
+	      );
+	      setShellOutput(output);
+	      response.data.forEach((result) => {
+	        const combined = (result.stdout || result.stderr || "").trim();
+	        dispatchTasks({
+	          type: "TASK_UPDATE_DEVICE",
+	          id: taskId,
+	          serial: result.serial,
+	          patch: {
+	            status: result.exit_code === 0 ? "success" : "error",
+	            exit_code: result.exit_code ?? null,
+	            stdout: result.stdout ?? null,
+	            stderr: result.stderr ?? null,
+	            message: combined ? combined.split("\n")[0].slice(0, 160) : "No output.",
+	          },
+	        });
+	      });
+	      const hasError = response.data.some((item) => item.exit_code !== 0);
+	      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
+	      pushToast("Shell command completed.", "info");
+	    } catch (error) {
+	      selectedSerials.forEach((serial) => {
+	        dispatchTasks({
+	          type: "TASK_UPDATE_DEVICE",
+	          id: taskId,
+	          serial,
+	          patch: { status: "error", message: formatError(error) },
+	        });
+	      });
+	      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+	      pushToast(formatError(error), "error");
+	    } finally {
+	      setBusy(false);
+	    }
+	  };
 
   const handleReboot = async (mode?: string) => {
     if (!selectedSerials.length) {
@@ -755,26 +982,59 @@ function App() {
       return;
     }
 
-    setApkInstallSummary([]);
-    setBusy(true);
-    try {
-      const summaries: string[] = [];
-      for (const path of paths) {
-        const response = await installApkBatch(
-          selectedSerials,
-          path,
-          apkReplace,
-          apkAllowDowngrade,
-          apkGrant,
-          apkAllowTest,
-          apkExtraArgs,
-        );
-        const results = Object.values(response.data.results || {});
-        const successCount = results.filter((item) => item.success).length;
-        summaries.push(`${path}: Installed ${successCount}/${results.length} device(s)`);
-      }
-      setApkInstallSummary(summaries);
-      pushToast("APK install completed.", "info");
+	    setApkInstallSummary([]);
+	    setBusy(true);
+	    try {
+	      const summaries: string[] = [];
+	      for (const path of paths) {
+	        const name = path.split(/[/\\\\]/).pop() ?? path;
+	        const taskId = beginTask({
+	          kind: "apk_install",
+	          title: `APK Install: ${name}`,
+	          serials: selectedSerials,
+	        });
+	        try {
+	          const response = await installApkBatch(
+	            selectedSerials,
+	            path,
+	            apkReplace,
+	            apkAllowDowngrade,
+	            apkGrant,
+	            apkAllowTest,
+	            apkExtraArgs,
+	          );
+	          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+	          const results = Object.values(response.data.results || {});
+	          const successCount = results.filter((item) => item.success).length;
+	          summaries.push(`${path}: Installed ${successCount}/${results.length} device(s)`);
+	          results.forEach((item) => {
+	            dispatchTasks({
+	              type: "TASK_UPDATE_DEVICE",
+	              id: taskId,
+	              serial: item.serial,
+	              patch: {
+	                status: item.success ? "success" : "error",
+	                message: item.success ? "Installed." : item.raw_output || item.error_code,
+	              },
+	            });
+	          });
+	          const hasError = results.some((item) => !item.success);
+	          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
+	        } catch (error) {
+	          selectedSerials.forEach((serial) => {
+	            dispatchTasks({
+	              type: "TASK_UPDATE_DEVICE",
+	              id: taskId,
+	              serial,
+	              patch: { status: "error", message: formatError(error) },
+	            });
+	          });
+	          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+	          throw error;
+	        }
+	      }
+	      setApkInstallSummary(summaries);
+	      pushToast("APK install completed.", "info");
 
       if (apkLaunchAfterInstall) {
         const error = validatePackageName(apkLaunchPackage);
@@ -793,13 +1053,13 @@ function App() {
     }
   };
 
-  const handleBugreport = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for bugreport.", "error");
-      return;
-    }
-    let outputDir = config?.output_path || "";
-    if (!outputDir) {
+	  const handleBugreport = async () => {
+	    if (!activeSerial) {
+	      pushToast("Select one device for bugreport.", "error");
+	      return;
+	    }
+	    let outputDir = config?.output_path || "";
+	    if (!outputDir) {
       const selected = await openDialog({
         title: "Select output folder",
         directory: true,
@@ -807,37 +1067,68 @@ function App() {
       });
       if (!selected || Array.isArray(selected)) {
         return;
-      }
-      outputDir = selected;
-    }
-    setBusy(true);
-    setBugreportProgress(0);
-    try {
-      const response = await generateBugreport(activeSerial, outputDir);
-      setBugreportResult(response.data);
-      if (response.data.success) {
-        pushToast(`Bugreport saved to ${response.data.output_path}`, "info");
-      } else {
-        pushToast(response.data.error || "Bugreport failed", "error");
-      }
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
+	      }
+	      outputDir = selected;
+	    }
+	    const taskId = beginTask({
+	      kind: "bugreport",
+	      title: `Bugreport: ${activeSerial}`,
+	      serials: [activeSerial],
+	    });
+	    bugreportTaskBySerialRef.current[activeSerial] = taskId;
+	    dispatchTasks({
+	      type: "TASK_UPDATE_DEVICE",
+	      id: taskId,
+	      serial: activeSerial,
+	      patch: { status: "running", progress: 0, message: "Starting bugreport…" },
+	    });
+	    setBusy(true);
+	    setBugreportProgress(0);
+	    try {
+	      const response = await generateBugreport(activeSerial, outputDir);
+	      setBugreportResult(response.data);
+	      // Task status is finalized via the bugreport-complete event.
+	      if (response.data.success) {
+	        pushToast(`Bugreport saved to ${response.data.output_path}`, "info");
+	      } else {
+	        pushToast(response.data.error || "Bugreport failed", "error");
+	      }
+	    } catch (error) {
+	      dispatchTasks({
+	        type: "TASK_UPDATE_DEVICE",
+	        id: taskId,
+	        serial: activeSerial,
+	        patch: { status: "error", message: formatError(error) },
+	      });
+	      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+	      delete bugreportTaskBySerialRef.current[activeSerial];
+	      pushToast(formatError(error), "error");
+	    } finally {
+	      setBusy(false);
+	    }
+	  };
 
-  const handleCancelBugreport = async () => {
-    if (!activeSerial) {
-      return;
-    }
-    try {
-      await cancelBugreport(activeSerial);
-      pushToast("Bugreport cancelled.", "info");
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    }
-  };
+	  const handleCancelBugreport = async () => {
+	    if (!activeSerial) {
+	      return;
+	    }
+	    try {
+	      await cancelBugreport(activeSerial);
+	      const taskId = bugreportTaskBySerialRef.current[activeSerial];
+	      if (taskId) {
+	        dispatchTasks({
+	          type: "TASK_UPDATE_DEVICE",
+	          id: taskId,
+	          serial: activeSerial,
+	          patch: { status: "cancelled", message: "Bugreport cancel requested." },
+	        });
+	        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "cancelled" });
+	      }
+	      pushToast("Bugreport cancelled.", "info");
+	    } catch (error) {
+	      pushToast(formatError(error), "error");
+	    }
+	  };
 
   const addActiveLogcatFilter = () => {
     const value = logcatLiveFilter.trim();
@@ -1068,16 +1359,82 @@ function App() {
     scrollToLogcatMatch(prevIndex);
   };
 
-  const handleFilesRefresh = async () => {
+  const basenameFromHostPath = (value: string) => {
+    const normalized = value.replaceAll("\\", "/");
+    const parts = normalized.split("/").filter(Boolean);
+    return parts[parts.length - 1] ?? "upload";
+  };
+
+  const normalizeDeviceDir = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "";
+    }
+    if (trimmed === "/") {
+      return "/";
+    }
+    return trimmed.replace(/\/+$/g, "");
+  };
+
+  const deviceJoin = (dir: string, name: string) => {
+    const base = normalizeDeviceDir(dir);
+    if (!base) {
+      return `/${name}`;
+    }
+    if (base === "/") {
+      return `/${name}`;
+    }
+    return `${base}/${name}`;
+  };
+
+  const deviceParentDir = (value: string) => {
+    const trimmed = normalizeDeviceDir(value);
+    if (!trimmed || trimmed === "/") {
+      return "/";
+    }
+    const lastSlash = trimmed.lastIndexOf("/");
+    if (lastSlash <= 0) {
+      return "/";
+    }
+    return trimmed.slice(0, lastSlash) || "/";
+  };
+
+  const refreshFilesList = async (targetPath: string) => {
+    if (!activeSerial) {
+      return;
+    }
+    const trimmed = targetPath.trim();
+    if (!trimmed || !trimmed.startsWith("/")) {
+      return;
+    }
+    try {
+      const response = await listDeviceFiles(activeSerial, trimmed);
+      setFilesPath(trimmed);
+      setFiles(response.data);
+      setFilePreview(null);
+      setFilesSelectedPaths([]);
+    } catch (error) {
+      pushToast(`Refresh failed: ${formatError(error)}`, "error");
+    }
+  };
+
+  const handleFilesRefresh = async (pathOverride?: string) => {
     if (!activeSerial) {
       pushToast("Select one device for file browse.", "error");
       return;
     }
+    const targetPath = (pathOverride ?? filesPath).trim();
+    if (!targetPath.startsWith("/")) {
+      pushToast("Device path must start with '/'.", "error");
+      return;
+    }
     setBusy(true);
     try {
-      const response = await listDeviceFiles(activeSerial, filesPath);
+      const response = await listDeviceFiles(activeSerial, targetPath);
+      setFilesPath(targetPath);
       setFiles(response.data);
       setFilePreview(null);
+      setFilesSelectedPaths([]);
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -1085,35 +1442,535 @@ function App() {
     }
   };
 
-  const handleFilePull = async (entry: DeviceFileEntry) => {
+  const handleFilesGoUp = async () => {
+    await handleFilesRefresh(deviceParentDir(filesPath));
+  };
+
+  const openFilesMkdirModal = () => {
+    setFilesModal({ type: "mkdir", name: "" });
+  };
+
+  const openFilesRenameModal = (entry: DeviceFileEntry) => {
+    setFilesModal({ type: "rename", entry, newName: entry.name });
+  };
+
+  const openFilesDeleteModal = (entry: DeviceFileEntry) => {
+    setFilesModal({ type: "delete", entry, recursive: false, confirm: "" });
+  };
+
+  const openFilesDeleteSelectedModal = () => {
+    const selected = new Set(filesSelectedPaths);
+    const entries = files.filter((entry) => selected.has(entry.path));
+    if (!entries.length) {
+      pushToast("Select files or folders to delete.", "error");
+      return;
+    }
+    setFilesModal({ type: "delete_many", entries, recursive: false, confirm: "" });
+  };
+
+  const closeFilesModal = () => setFilesModal(null);
+
+  const validateDeviceEntryName = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "Name is required.";
+    }
+    if (trimmed.includes("/")) {
+      return "Name must not include '/'.";
+    }
+    if (trimmed === "." || trimmed === "..") {
+      return "Name is invalid.";
+    }
+    return null;
+  };
+
+  const isFileSelected = (path: string) => filesSelectedPaths.includes(path);
+
+  const toggleFileSelected = (path: string, selected: boolean) => {
+    setFilesSelectedPaths((prev) => {
+      if (selected) {
+        return prev.includes(path) ? prev : [path, ...prev];
+      }
+      return prev.filter((item) => item !== path);
+    });
+  };
+
+  const handleFilesPullSelected = async () => {
     if (!activeSerial) {
       pushToast("Select one device for file pull.", "error");
       return;
     }
+    const selected = new Set(filesSelectedPaths);
+    const entries = files.filter((entry) => selected.has(entry.path));
+    const filesOnly = entries.filter((entry) => !entry.is_dir);
+    if (!filesOnly.length) {
+      pushToast("Select files to pull.", "error");
+      return;
+    }
+
     let outputDir = config?.file_gen_output_path || config?.output_path || "";
     if (!outputDir) {
-      const selected = await openDialog({
+      const selectedDir = await openDialog({
         title: "Select output folder",
         directory: true,
         multiple: false,
       });
-      if (!selected || Array.isArray(selected)) {
+      if (!selectedDir || Array.isArray(selectedDir)) {
         return;
       }
-      outputDir = selected;
+      outputDir = selectedDir;
     }
+
     setBusy(true);
     try {
-      const response = await pullDeviceFile(activeSerial, entry.path, outputDir);
-      pushToast(`Pulled to ${response.data}`, "info");
-      const preview = await previewLocalFile(response.data);
-      setFilePreview(preview.data);
+      for (const entry of filesOnly) {
+        const taskId = beginTask({
+          kind: "file_pull",
+          title: `Pull File: ${entry.name}`,
+          serials: [activeSerial],
+        });
+        const traceId = crypto.randomUUID();
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
+        fileTransferTaskByTraceIdRef.current[traceId] = taskId;
+        try {
+          const response = await pullDeviceFile(activeSerial, entry.path, outputDir, traceId);
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: activeSerial,
+            patch: {
+              status: "success",
+              progress: 100,
+              output_path: response.data,
+              message: `Pulled to ${response.data}`,
+            },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+        } catch (error) {
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: activeSerial,
+            patch: { status: "error", message: formatError(error), progress: null },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+        } finally {
+          delete fileTransferTaskByTraceIdRef.current[traceId];
+        }
+      }
+      pushToast("Pull completed.", "info");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleFilesMkdirSubmit = async () => {
+    if (!activeSerial) {
+      pushToast("Select one device for folder create.", "error");
+      return;
+    }
+    if (!filesModal || filesModal.type !== "mkdir") {
+      return;
+    }
+    const error = validateDeviceEntryName(filesModal.name);
+    if (error) {
+      pushToast(error, "error");
+      return;
+    }
+    const targetDir = deviceJoin(filesPath, filesModal.name.trim());
+    const taskId = beginTask({
+      kind: "file_mkdir",
+      title: `New Folder: ${filesModal.name.trim()}`,
+      serials: [activeSerial],
+    });
+    setBusy(true);
+    try {
+      const response = await mkdirDeviceDir(activeSerial, targetDir);
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "success", message: `Created ${response.data}` },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+      pushToast(`Created ${response.data}`, "info");
+      closeFilesModal();
+      await refreshFilesList(filesPath);
     } catch (error) {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "error", message: formatError(error) },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
     }
   };
+
+  const handleFilesRenameSubmit = async () => {
+    if (!activeSerial) {
+      pushToast("Select one device for rename.", "error");
+      return;
+    }
+    if (!filesModal || filesModal.type !== "rename") {
+      return;
+    }
+    const error = validateDeviceEntryName(filesModal.newName);
+    if (error) {
+      pushToast(error, "error");
+      return;
+    }
+    const fromPath = filesModal.entry.path;
+    const targetDir = deviceParentDir(fromPath);
+    const toPath = deviceJoin(targetDir, filesModal.newName.trim());
+    const taskId = beginTask({
+      kind: "file_rename",
+      title: `Rename: ${filesModal.entry.name}`,
+      serials: [activeSerial],
+    });
+    setBusy(true);
+    try {
+      const response = await renameDevicePath(activeSerial, fromPath, toPath);
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "success", message: `Renamed to ${response.data}` },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+      pushToast(`Renamed to ${response.data}`, "info");
+      closeFilesModal();
+      await refreshFilesList(filesPath);
+    } catch (error) {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "error", message: formatError(error) },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleFilesDeleteSubmit = async () => {
+    if (!activeSerial) {
+      pushToast("Select one device for delete.", "error");
+      return;
+    }
+    if (!filesModal || filesModal.type !== "delete") {
+      return;
+    }
+    if (filesModal.confirm.trim() !== "DELETE") {
+      pushToast("Type DELETE to confirm.", "error");
+      return;
+    }
+    if (filesModal.entry.is_dir && !filesModal.recursive) {
+      pushToast("Enable recursive delete for directories.", "error");
+      return;
+    }
+    const taskId = beginTask({
+      kind: "file_delete",
+      title: `Delete: ${filesModal.entry.name}`,
+      serials: [activeSerial],
+    });
+    setBusy(true);
+    try {
+      const response = await deleteDevicePath(activeSerial, filesModal.entry.path, filesModal.recursive);
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "success", message: `Deleted ${response.data}` },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+      pushToast(`Deleted ${response.data}`, "info");
+      closeFilesModal();
+      await refreshFilesList(filesPath);
+    } catch (error) {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "error", message: formatError(error) },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleFilesDeleteManySubmit = async () => {
+    if (!activeSerial) {
+      pushToast("Select one device for delete.", "error");
+      return;
+    }
+    if (!filesModal || filesModal.type !== "delete_many") {
+      return;
+    }
+    if (filesModal.confirm.trim() !== "DELETE") {
+      pushToast("Type DELETE to confirm.", "error");
+      return;
+    }
+    const hasDirectory = filesModal.entries.some((entry) => entry.is_dir);
+    if (hasDirectory && !filesModal.recursive) {
+      pushToast("Enable recursive delete to delete directories.", "error");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      for (const entry of filesModal.entries) {
+        const taskId = beginTask({
+          kind: "file_delete",
+          title: `Delete: ${entry.name}`,
+          serials: [activeSerial],
+        });
+        try {
+          const response = await deleteDevicePath(activeSerial, entry.path, filesModal.recursive);
+          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: activeSerial,
+            patch: { status: "success", message: `Deleted ${response.data}` },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+        } catch (error) {
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: activeSerial,
+            patch: { status: "error", message: formatError(error) },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+        }
+      }
+      closeFilesModal();
+      await refreshFilesList(filesPath);
+      pushToast("Delete completed.", "info");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleFileUpload = async () => {
+    if (!activeSerial) {
+      pushToast("Select one device for file upload.", "error");
+      return;
+    }
+
+    const selected = await openDialog({
+      title: "Select file to upload",
+      directory: false,
+      multiple: false,
+    });
+    if (!selected || Array.isArray(selected)) {
+      return;
+    }
+
+    const filename = basenameFromHostPath(selected);
+    const remotePath = deviceJoin(filesPath, filename);
+    if (!filesOverwriteEnabled && files.some((entry) => entry.name === filename)) {
+      pushToast(`Upload blocked: ${filename} already exists.`, "error");
+      return;
+    }
+    const traceId = crypto.randomUUID();
+    const taskId = beginTask({
+      kind: "file_push",
+      title: `Upload File: ${filename}`,
+      serials: [activeSerial],
+    });
+    dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
+    fileTransferTaskByTraceIdRef.current[traceId] = taskId;
+    setBusy(true);
+    try {
+      const response = await pushDeviceFile(activeSerial, selected, remotePath, traceId);
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "success", progress: 100, message: `Uploaded to ${response.data}` },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+      pushToast(`Uploaded to ${response.data}`, "info");
+      try {
+        const listResponse = await listDeviceFiles(activeSerial, filesPath.trim());
+        setFiles(listResponse.data);
+        setFilePreview(null);
+      } catch (error) {
+        pushToast(`Uploaded. Refresh failed: ${formatError(error)}`, "error");
+      }
+    } catch (error) {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial: activeSerial,
+        patch: { status: "error", message: formatError(error), progress: null },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+      pushToast(formatError(error), "error");
+    } finally {
+      delete fileTransferTaskByTraceIdRef.current[traceId];
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const unlistenPromise = getCurrentWindow().onDragDropEvent((event) => {
+      const ctx = filesDragContextRef.current;
+      if (ctx.pathname !== "/files") {
+        return;
+      }
+      if (event.type === "enter" || event.type === "over") {
+        setFilesDropActive(true);
+        return;
+      }
+      if (event.type === "leave") {
+        setFilesDropActive(false);
+        return;
+      }
+      if (event.type !== "drop") {
+        return;
+      }
+      setFilesDropActive(false);
+      if (!event.paths.length) {
+        return;
+      }
+      if (!ctx.serial) {
+        pushToast("Select one device for file upload.", "error");
+        return;
+      }
+      const existing = new Set(ctx.existingNames);
+      const uploadDroppedFiles = async () => {
+        setBusy(true);
+        try {
+          for (const path of event.paths) {
+            const filename = basenameFromHostPath(path);
+            if (!ctx.overwrite && existing.has(filename)) {
+              pushToast(`Upload blocked: ${filename} already exists.`, "error");
+              continue;
+            }
+	            const remotePath = deviceJoin(ctx.path, filename);
+	            const taskId = beginTask({
+	              kind: "file_push",
+	              title: `Upload File: ${filename}`,
+	              serials: [ctx.serial],
+	            });
+	            const traceId = crypto.randomUUID();
+	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
+	            fileTransferTaskByTraceIdRef.current[traceId] = taskId;
+	            try {
+	              const response = await pushDeviceFile(ctx.serial, path, remotePath, traceId);
+	              dispatchTasks({
+	                type: "TASK_UPDATE_DEVICE",
+	                id: taskId,
+	                serial: ctx.serial,
+	                patch: { status: "success", progress: 100, message: `Uploaded to ${response.data}` },
+	              });
+	              dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+	              existing.add(filename);
+	            } catch (error) {
+	              dispatchTasks({
+	                type: "TASK_UPDATE_DEVICE",
+	                id: taskId,
+	                serial: ctx.serial,
+	                patch: { status: "error", message: formatError(error), progress: null },
+	              });
+	              dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+	              pushToast(`Upload failed: ${filename} (${formatError(error)})`, "error");
+	            } finally {
+	              delete fileTransferTaskByTraceIdRef.current[traceId];
+	            }
+	          }
+	          await refreshFilesList(ctx.path);
+	        } finally {
+          setBusy(false);
+        }
+      };
+      void uploadDroppedFiles();
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+		  const handleFilePull = async (entry: DeviceFileEntry) => {
+		    if (!activeSerial) {
+		      pushToast("Select one device for file pull.", "error");
+		      return;
+		    }
+		    let outputDir = config?.file_gen_output_path || config?.output_path || "";
+		    if (!outputDir) {
+		      const selected = await openDialog({
+		        title: "Select output folder",
+	        directory: true,
+	        multiple: false,
+	      });
+	      if (!selected || Array.isArray(selected)) {
+	        return;
+		      }
+		      outputDir = selected;
+		    }
+		    const traceId = crypto.randomUUID();
+		    const taskId = beginTask({
+		      kind: "file_pull",
+		      title: `Pull File: ${entry.name}`,
+		      serials: [activeSerial],
+		    });
+		    dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
+		    fileTransferTaskByTraceIdRef.current[traceId] = taskId;
+		    setBusy(true);
+		    try {
+		      const response = await pullDeviceFile(activeSerial, entry.path, outputDir, traceId);
+		      dispatchTasks({
+		        type: "TASK_UPDATE_DEVICE",
+		        id: taskId,
+		        serial: activeSerial,
+		        patch: {
+		          status: "success",
+		          output_path: response.data,
+		          progress: 100,
+		          message: `Pulled to ${response.data}`,
+		        },
+		      });
+		      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+		      pushToast(`Pulled to ${response.data}`, "info");
+		      try {
+		        const preview = await previewLocalFile(response.data);
+	        setFilePreview(preview.data);
+	      } catch (error) {
+	        dispatchTasks({
+	          type: "TASK_UPDATE_DEVICE",
+	          id: taskId,
+	          serial: activeSerial,
+	          patch: { message: `Pulled. Preview failed: ${formatError(error)}` },
+	        });
+	      }
+		    } catch (error) {
+		      dispatchTasks({
+		        type: "TASK_UPDATE_DEVICE",
+		        id: taskId,
+		        serial: activeSerial,
+		        patch: { status: "error", message: formatError(error), progress: null },
+		      });
+		      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+		      pushToast(formatError(error), "error");
+		    } finally {
+		      delete fileTransferTaskByTraceIdRef.current[traceId];
+		      setBusy(false);
+		    }
+		  };
 
   const handleUiInspect = async () => {
     if (!activeSerial) {
@@ -1307,21 +2164,73 @@ function App() {
         pushToast(`Screenshot saved to ${response.data}`, "info");
       } else if (actionForm.actionId === "reboot") {
         await handleReboot(actionRebootMode === "normal" ? undefined : actionRebootMode);
-      } else if (actionForm.actionId === "record") {
-        await persistActionConfig();
-        if (screenRecordRemote) {
-          const outputDir = await resolveOutputDir(actionOutputDir);
-          if (!outputDir) {
-            return;
-          }
-          const response = await stopScreenRecord(activeSerial!, outputDir);
-          setScreenRecordRemote(null);
-          pushToast(response.data ? `Recording saved to ${response.data}` : "Screen recording stopped.", "info");
-        } else {
-          const response = await startScreenRecord(activeSerial!);
-          setScreenRecordRemote(response.data);
-          pushToast("Screen recording started.", "info");
-        }
+	      } else if (actionForm.actionId === "record") {
+	        await persistActionConfig();
+	        if (screenRecordRemote) {
+	          const outputDir = await resolveOutputDir(actionOutputDir);
+	          if (!outputDir) {
+	            return;
+	          }
+	          const taskId = beginTask({
+	            kind: "screen_record_stop",
+	            title: `Screen Record Stop: ${activeSerial!}`,
+	            serials: [activeSerial!],
+	          });
+	          try {
+	            const response = await stopScreenRecord(activeSerial!, outputDir);
+	            setScreenRecordRemote(null);
+	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+	            dispatchTasks({
+	              type: "TASK_UPDATE_DEVICE",
+	              id: taskId,
+	              serial: activeSerial!,
+	              patch: {
+	                status: "success",
+	                output_path: response.data || null,
+	                message: response.data ? `Saved to ${response.data}` : "Stopped.",
+	              },
+	            });
+	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+	            pushToast(response.data ? `Recording saved to ${response.data}` : "Screen recording stopped.", "info");
+	          } catch (error) {
+	            dispatchTasks({
+	              type: "TASK_UPDATE_DEVICE",
+	              id: taskId,
+	              serial: activeSerial!,
+	              patch: { status: "error", message: formatError(error) },
+	            });
+	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+	            throw error;
+	          }
+	        } else {
+	          const taskId = beginTask({
+	            kind: "screen_record_start",
+	            title: `Screen Record Start: ${activeSerial!}`,
+	            serials: [activeSerial!],
+	          });
+	          try {
+	            const response = await startScreenRecord(activeSerial!);
+	            setScreenRecordRemote(response.data);
+	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+	            dispatchTasks({
+	              type: "TASK_UPDATE_DEVICE",
+	              id: taskId,
+	              serial: activeSerial!,
+	              patch: { status: "success", message: `Remote: ${response.data}` },
+	            });
+	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+	            pushToast("Screen recording started.", "info");
+	          } catch (error) {
+	            dispatchTasks({
+	              type: "TASK_UPDATE_DEVICE",
+	              id: taskId,
+	              serial: activeSerial!,
+	              patch: { status: "error", message: formatError(error) },
+	            });
+	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+	            throw error;
+	          }
+	        }
       } else if (actionForm.actionId === "logcat-clear") {
         await clearLogcat(activeSerial!);
         setLogcatLines((prev) => ({ ...prev, [activeSerial!]: [] }));
@@ -1398,7 +2307,41 @@ function App() {
       setApkReplace(response.data.apk_install.replace_existing);
       setApkGrant(response.data.apk_install.grant_permissions);
       setApkAllowTest(response.data.apk_install.allow_test_packages);
+      setAdbInfo(null);
       pushToast("Settings reset.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBrowseAdbPath = async () => {
+    try {
+      const selected = await openDialog({
+        title: "Select ADB executable",
+        multiple: false,
+        directory: false,
+      });
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+      setConfig((prev) => (prev ? { ...prev, adb: { ...prev.adb, command_path: selected } } : prev));
+      setAdbInfo(null);
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleCheckAdb = async () => {
+    if (!config) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await checkAdb(config.adb.command_path);
+      setAdbInfo(response.data);
+      pushToast(response.data.available ? "ADB is available." : "ADB is not available.", response.data.available ? "info" : "error");
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -1501,6 +2444,40 @@ function App() {
       detail?.wifi_is_on == null ? "Unknown" : detail.wifi_is_on ? "On" : "Off";
     const btState =
       detail?.bt_is_on == null ? "Unknown" : detail.bt_is_on ? "On" : "Off";
+
+    if (adbInfo && !adbInfo.available) {
+      return (
+        <div className="page-section">
+          <div className="page-header">
+            <div>
+              <h1>Dashboard</h1>
+              <p className="muted">ADB is required to connect and manage devices.</p>
+            </div>
+          </div>
+          <section className="panel empty-state">
+            <div className="inline-alert error">
+              <strong>ADB not available</strong>
+              <span>
+                Configure the full path to the ADB executable in Settings or install Android Platform
+                Tools and ensure <code>adb</code> is on your PATH.
+              </span>
+              <span className="muted">
+                Current command: <code>{adbInfo.command_path || "adb"}</code>
+              </span>
+              {adbInfo.error && <span className="muted">Error: {adbInfo.error}</span>}
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={() => navigate("/settings")} disabled={busy}>
+                Open Settings
+              </button>
+              <button onClick={refreshDevices} disabled={busy}>
+                Retry
+              </button>
+            </div>
+          </section>
+        </div>
+      );
+    }
 
     if (!hasDevices) {
       return (
@@ -1624,11 +2601,17 @@ function App() {
             <div className="status-list">
               <div>
                 <span className="muted">ADB Status</span>
-                <strong>{busy ? "Working" : "Ready"}</strong>
+                <strong>
+                  {adbInfo == null ? "Checking..." : adbInfo.available ? "Available" : "Not available"}
+                </strong>
               </div>
               <div>
                 <span className="muted">Devices Connected</span>
                 <strong>{devices.length}</strong>
+              </div>
+              <div>
+                <span className="muted">Tasks</span>
+                <strong>{runningTaskCount > 0 ? `${runningTaskCount} running` : "Idle"}</strong>
               </div>
               <div>
                 <span className="muted">scrcpy</span>
@@ -1714,7 +2697,7 @@ function App() {
             <span className="nav-title">Debug</span>
             <NavLink to="/logcat">Logcat</NavLink>
             <NavLink to="/ui-inspector">UI Inspector</NavLink>
-            <NavLink to="/bugreport">Bug Report</NavLink>
+            <NavLink to="/bugreport">Bugreport</NavLink>
           </div>
           <div className="nav-group">
             <span className="nav-title">Manage</span>
@@ -1725,6 +2708,7 @@ function App() {
           </div>
           <div className="nav-group">
             <span className="nav-title">System</span>
+            <NavLink to="/tasks">Task Center</NavLink>
             <NavLink to="/settings">Settings</NavLink>
           </div>
         </nav>
@@ -1737,7 +2721,13 @@ function App() {
           </button>
           <div className="sidebar-status">
             <span className={`status-dot ${hasDevices ? "ok" : "warn"}`} />
-            <span>{hasDevices ? `${devices.length} devices` : "No devices"}</span>
+            <span>
+              {runningTaskCount > 0
+                ? `${runningTaskCount} tasks running`
+                : hasDevices
+                  ? `${devices.length} devices`
+                  : "No devices"}
+            </span>
           </div>
         </div>
       </aside>
@@ -1794,6 +2784,120 @@ function App() {
         <main className="page">
           <Routes>
             <Route path="/" element={<DashboardView />} />
+            <Route
+              path="/tasks"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>Task Center</h1>
+                      <p className="muted">Recent operations with per-device results.</p>
+                    </div>
+                    <div className="page-actions">
+                      <button
+                        className="ghost"
+                        onClick={() => dispatchTasks({ type: "TASK_CLEAR_COMPLETED" })}
+                        disabled={taskState.items.every((task) => task.status === "running")}
+                      >
+                        Clear completed
+                      </button>
+                    </div>
+                  </div>
+
+                  {taskState.items.length === 0 ? (
+                    <section className="panel empty-state">
+                      <div>
+                        <h2>No tasks yet</h2>
+                        <p className="muted">Run an operation to see progress and results here.</p>
+                      </div>
+                      <div className="button-row">
+                        <button className="ghost" onClick={() => navigate("/devices")}>
+                          Go to Device Manager
+                        </button>
+                      </div>
+                    </section>
+                  ) : (
+                    <div className="stack">
+                      {taskState.items.map((task) => {
+                        const summary = summarizeTask(task);
+                        const statusTone =
+                          task.status === "running"
+                            ? "busy"
+                            : task.status === "success"
+                              ? "ok"
+                              : task.status === "cancelled"
+                                ? "warn"
+                                : "error";
+                        return (
+                          <section key={task.id} className="panel card task-card">
+                            <div className="card-header">
+                              <div>
+                                <h2>{task.title}</h2>
+                                <p className="muted">
+                                  {new Date(task.started_at).toLocaleString()} • {task.kind}
+                                  {task.trace_id ? ` • ${task.trace_id}` : ""}
+                                </p>
+                              </div>
+                              <span className={`status-pill ${statusTone}`}>{task.status}</span>
+                            </div>
+                            <div className="task-summary">
+                              <span className="badge">{summary.serials.length} devices</span>
+                              {summary.counts.running > 0 && (
+                                <span className="badge">{summary.counts.running} running</span>
+                              )}
+                              {summary.counts.success > 0 && (
+                                <span className="badge">{summary.counts.success} success</span>
+                              )}
+                              {summary.counts.error > 0 && (
+                                <span className="badge">{summary.counts.error} error</span>
+                              )}
+                              {summary.counts.cancelled > 0 && (
+                                <span className="badge">{summary.counts.cancelled} cancelled</span>
+                              )}
+                            </div>
+                            <div className="task-devices">
+                              {summary.serials.map((serial) => {
+                                const entry = task.devices[serial];
+                                const entryTone =
+                                  entry.status === "running"
+                                    ? "busy"
+                                    : entry.status === "success"
+                                      ? "ok"
+                                      : entry.status === "cancelled"
+                                        ? "warn"
+                                        : "error";
+                                return (
+                                  <div key={serial} className="task-device-row">
+                                    <div className="task-device-main">
+                                      <strong>{serial}</strong>
+                                      <span className={`status-pill ${entryTone}`}>{entry.status}</span>
+                                      {entry.exit_code != null && (
+                                        <span className="muted">exit {entry.exit_code}</span>
+                                      )}
+                                      {entry.progress != null && (
+                                        <span className="muted">{Math.round(entry.progress)}%</span>
+                                      )}
+                                      {entry.message && <span className="muted">{entry.message}</span>}
+                                    </div>
+                                    <div className="task-device-meta">
+                                      {entry.output_path && (
+                                        <button className="ghost" onClick={() => openPath(entry.output_path!)}>
+                                          Open output
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </section>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              }
+            />
             <Route
               path="/devices"
               element={
@@ -2246,51 +3350,123 @@ function App() {
                 </div>
               }
             />
-            <Route
-              path="/files"
-              element={
-                <div className="page-section">
-                  <div className="page-header">
-                    <div>
-                      <h1>File Explorer</h1>
-                      <p className="muted">Browse device storage and pull files.</p>
-                    </div>
-                  </div>
-                  <section className="panel">
-                    <div className="panel-header">
-                      <h2>Device Files</h2>
-                      <span>{activeSerial ?? "No device selected"}</span>
-                    </div>
-                    <div className="form-row">
-                      <label>Path</label>
-                      <input value={filesPath} onChange={(event) => setFilesPath(event.target.value)} />
-                      <button onClick={handleFilesRefresh} disabled={busy}>
-                        Load
-                      </button>
-                    </div>
-                    <div className="split">
-                      <div className="file-list">
-                        {files.length === 0 ? (
-                          <p className="muted">No files loaded.</p>
-                        ) : (
-                          files.map((entry) => (
-                            <div key={entry.path} className="file-row">
-                              <div>
-                                <strong>{entry.name}</strong>
-                                <p className="muted">
-                                  {entry.is_dir ? "Directory" : "File"} · {entry.size_bytes ?? "--"} bytes
-                                </p>
-                              </div>
-                              {!entry.is_dir && (
-                                <button onClick={() => handleFilePull(entry)} disabled={busy}>
-                                  Pull
-                                </button>
-                              )}
-                            </div>
-                          ))
-                        )}
-                      </div>
-                      <div className="preview-panel">
+	            <Route
+	              path="/files"
+	              element={
+	                <div className="page-section">
+	                  {filesDropActive && (
+	                    <div className="file-drop-overlay">
+	                      <div className="file-drop-overlay-inner">
+	                        <strong>Drop files to upload</strong>
+	                        <span className="muted">Target: {filesPath}</span>
+	                      </div>
+	                    </div>
+	                  )}
+	                  <div className="page-header">
+	                    <div>
+	                      <h1>File Explorer</h1>
+	                      <p className="muted">Browse device storage, pull files, and upload files.</p>
+	                    </div>
+	                  </div>
+	                  <section className="panel">
+	                    <div className="panel-header">
+	                      <h2>Device Files</h2>
+	                      <span>{activeSerial ?? "No device selected"}</span>
+	                    </div>
+	                    <div className="form-row">
+	                      <label>Path</label>
+	                      <input value={filesPath} onChange={(event) => setFilesPath(event.target.value)} />
+	                      <button className="ghost" onClick={handleFilesGoUp} disabled={busy}>
+	                        Up
+	                      </button>
+	                      <button onClick={() => void handleFilesRefresh()} disabled={busy}>
+	                        Load
+	                      </button>
+	                      <button className="ghost" onClick={openFilesMkdirModal} disabled={busy}>
+	                        New folder
+	                      </button>
+	                      <button onClick={handleFileUpload} disabled={busy}>
+	                        Upload
+	                      </button>
+	                      <label className="toggle">
+	                        <input
+	                          type="checkbox"
+	                          checked={filesOverwriteEnabled}
+	                          onChange={(event) => setFilesOverwriteEnabled(event.target.checked)}
+	                        />
+	                        Overwrite
+	                      </label>
+	                    </div>
+	                    <div className="file-toolbar">
+	                      <span className="muted">
+	                        {filesSelectedPaths.length ? `${filesSelectedPaths.length} selected` : "No selection"}
+	                      </span>
+	                      <div className="file-toolbar-actions">
+	                        <button
+	                          className="ghost"
+	                          onClick={() => setFilesSelectedPaths([])}
+	                          disabled={busy || filesSelectedPaths.length === 0}
+	                        >
+	                          Clear
+	                        </button>
+	                        <button onClick={handleFilesPullSelected} disabled={busy || filesSelectedPaths.length === 0}>
+	                          Pull selected
+	                        </button>
+	                        <button
+	                          className="danger"
+	                          onClick={openFilesDeleteSelectedModal}
+	                          disabled={busy || filesSelectedPaths.length === 0}
+	                        >
+	                          Delete selected
+	                        </button>
+	                      </div>
+	                    </div>
+	                    <div className="split">
+	                      <div className="file-list">
+	                        {files.length === 0 ? (
+	                          <p className="muted">No files loaded.</p>
+	                        ) : (
+	                          files.map((entry) => (
+	                            <div key={entry.path} className="file-row">
+	                              <input
+	                                type="checkbox"
+	                                checked={isFileSelected(entry.path)}
+	                                onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
+	                                disabled={busy}
+	                                aria-label={`Select ${entry.name}`}
+	                              />
+	                              <div className="file-row-main">
+	                                <strong>{entry.name}</strong>
+	                                <p className="muted">
+	                                  {entry.is_dir ? "Directory" : "File"} · {entry.size_bytes ?? "--"} bytes
+	                                </p>
+	                              </div>
+	                              <div className="file-row-actions">
+	                                {entry.is_dir ? (
+	                                  <button
+	                                    className="ghost"
+	                                    onClick={() => void handleFilesRefresh(entry.path)}
+	                                    disabled={busy}
+	                                  >
+	                                    Open
+	                                  </button>
+	                                ) : (
+	                                  <button onClick={() => handleFilePull(entry)} disabled={busy}>
+	                                    Pull
+	                                  </button>
+	                                )}
+	                                <button className="ghost" onClick={() => openFilesRenameModal(entry)} disabled={busy}>
+	                                  Rename
+	                                </button>
+	                                <button className="danger" onClick={() => openFilesDeleteModal(entry)} disabled={busy}>
+	                                  Delete
+	                                </button>
+	                              </div>
+	                            </div>
+	                          ))
+	                        )}
+	                      </div>
+	                      <div className="preview-panel">
                         <h3>Preview</h3>
                         {filePreview?.is_text && filePreview.preview_text ? (
                           <pre>{filePreview.preview_text}</pre>
@@ -2845,7 +4021,7 @@ function App() {
                 <div className="page-section">
                   <div className="page-header">
                     <div>
-                      <h1>Bug Report</h1>
+                      <h1>Bugreport</h1>
                       <p className="muted">Generate bugreports with progress tracking.</p>
                     </div>
                   </div>
@@ -2933,6 +4109,44 @@ function App() {
                         <span>Saved locally</span>
                       </div>
                       <div className="settings-grid">
+                        <div>
+                          <h3>ADB</h3>
+                          <label>
+                            ADB executable path
+                            <input
+                              placeholder="/path/to/platform-tools/adb or C:\\Android\\platform-tools\\adb.exe"
+                              value={config.adb.command_path}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev ? { ...prev, adb: { ...prev.adb, command_path: event.target.value } } : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <div className="button-row">
+                            <button type="button" className="ghost" onClick={handleBrowseAdbPath} disabled={busy}>
+                              Browse
+                            </button>
+                            <button type="button" className="ghost" onClick={handleCheckAdb} disabled={busy}>
+                              Test
+                            </button>
+                          </div>
+                          {adbInfo && (
+                            <div className={`inline-alert ${adbInfo.available ? "info" : "error"}`}>
+                              <strong>{adbInfo.available ? "ADB available" : "ADB not available"}</strong>
+                              <span>
+                                Command: <code>{adbInfo.command_path}</code>
+                              </span>
+                              {adbInfo.version_output && (
+                                <span className="muted">
+                                  <code>{adbInfo.version_output}</code>
+                                </span>
+                              )}
+                              {adbInfo.error && <span className="muted">Error: {adbInfo.error}</span>}
+                              <span className="muted">Save Settings to apply this path globally.</span>
+                            </div>
+                          )}
+                        </div>
                         <div>
                           <h3>Output Paths</h3>
                           <label>
@@ -3655,6 +4869,183 @@ function App() {
                 {pairingState.error ?? pairingState.message}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {filesModal && (
+        <div className="modal-backdrop" onClick={closeFilesModal}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>
+                {filesModal.type === "mkdir"
+                  ? "New Folder"
+                  : filesModal.type === "rename"
+                    ? "Rename"
+                    : "Delete"}
+              </h3>
+              <button className="ghost" onClick={closeFilesModal}>
+                Close
+              </button>
+            </div>
+
+            {filesModal.type === "mkdir" && (
+              <div className="stack">
+                <p className="muted">Create a directory under {filesPath}.</p>
+                <label>
+                  Folder name
+                  <input
+                    value={filesModal.name}
+                    onChange={(event) =>
+                      setFilesModal((prev) =>
+                        prev && prev.type === "mkdir" ? { ...prev, name: event.target.value } : prev,
+                      )
+                    }
+                    placeholder="e.g. logs"
+                  />
+                </label>
+              </div>
+            )}
+
+            {filesModal.type === "rename" && (
+              <div className="stack">
+                <p className="muted">{filesModal.entry.path}</p>
+                <label>
+                  New name
+                  <input
+                    value={filesModal.newName}
+                    onChange={(event) =>
+                      setFilesModal((prev) =>
+                        prev && prev.type === "rename"
+                          ? { ...prev, newName: event.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder={filesModal.entry.name}
+                  />
+                </label>
+              </div>
+            )}
+
+            {filesModal.type === "delete" && (
+              <div className="stack">
+                <div className="inline-alert error">
+                  <strong>Danger zone</strong>
+                  <span className="muted">This action cannot be undone.</span>
+                </div>
+                <p className="muted">{filesModal.entry.path}</p>
+                {filesModal.entry.is_dir && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={filesModal.recursive}
+                      onChange={(event) =>
+                        setFilesModal((prev) =>
+                          prev && prev.type === "delete"
+                            ? { ...prev, recursive: event.target.checked }
+                            : prev,
+                        )
+                      }
+                    />
+                    Recursive delete (required for directories)
+                  </label>
+                )}
+                <label>
+                  Confirm
+                  <input
+                    value={filesModal.confirm}
+                    onChange={(event) =>
+                      setFilesModal((prev) =>
+                        prev && prev.type === "delete" ? { ...prev, confirm: event.target.value } : prev,
+                      )
+                    }
+                    placeholder='Type "DELETE" to confirm'
+                  />
+                </label>
+              </div>
+            )}
+
+            {filesModal.type === "delete_many" && (
+              <div className="stack">
+                <div className="inline-alert error">
+                  <strong>Danger zone</strong>
+                  <span className="muted">This action cannot be undone.</span>
+                </div>
+                <p className="muted">Selected: {filesModal.entries.length} items</p>
+                {filesModal.entries.some((entry) => entry.is_dir) && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={filesModal.recursive}
+                      onChange={(event) =>
+                        setFilesModal((prev) =>
+                          prev && prev.type === "delete_many"
+                            ? { ...prev, recursive: event.target.checked }
+                            : prev,
+                        )
+                      }
+                    />
+                    Recursive delete (required for directories)
+                  </label>
+                )}
+                <label>
+                  Confirm
+                  <input
+                    value={filesModal.confirm}
+                    onChange={(event) =>
+                      setFilesModal((prev) =>
+                        prev && prev.type === "delete_many"
+                          ? { ...prev, confirm: event.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder='Type "DELETE" to confirm'
+                  />
+                </label>
+              </div>
+            )}
+
+            <div className="button-row">
+              {filesModal.type === "mkdir" && (
+                <button onClick={handleFilesMkdirSubmit} disabled={busy}>
+                  Create
+                </button>
+              )}
+              {filesModal.type === "rename" && (
+                <button onClick={handleFilesRenameSubmit} disabled={busy}>
+                  Rename
+                </button>
+              )}
+              {filesModal.type === "delete" && (
+                <button
+                  className="danger"
+                  onClick={handleFilesDeleteSubmit}
+                  disabled={
+                    busy ||
+                    filesModal.confirm.trim() !== "DELETE" ||
+                    (filesModal.entry.is_dir && !filesModal.recursive)
+                  }
+                >
+                  Delete
+                </button>
+              )}
+              {filesModal.type === "delete_many" && (
+                <button
+                  className="danger"
+                  onClick={handleFilesDeleteManySubmit}
+                  disabled={
+                    busy ||
+                    filesModal.confirm.trim() !== "DELETE" ||
+                    (filesModal.entries.some((entry) => entry.is_dir) && !filesModal.recursive)
+                  }
+                >
+                  Delete
+                </button>
+              )}
+              <button className="ghost" onClick={closeFilesModal} disabled={busy}>
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

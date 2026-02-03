@@ -49,6 +49,13 @@ export type HostCommandResult = {
   exit_code?: number | null;
 };
 
+export type AdbInfo = {
+  available: boolean;
+  version_output: string;
+  command_path: string;
+  error?: string | null;
+};
+
 export type UiHierarchyCaptureResult = {
   html: string;
   xml: string;
@@ -180,6 +187,10 @@ export type CommandSettings = {
   parallel_execution: boolean;
 };
 
+export type AdbSettings = {
+  command_path: string;
+};
+
 export type LoggingSettings = {
   log_level: string;
   log_to_file: boolean;
@@ -243,6 +254,7 @@ export type AppConfig = {
   ui: UiSettings;
   device: DeviceSettings;
   command: CommandSettings;
+  adb: AdbSettings;
   logging: LoggingSettings;
   logcat: LogcatSettings;
   scrcpy: ScrcpySettings;
