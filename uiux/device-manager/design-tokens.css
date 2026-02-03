@@ -1,0 +1,24 @@
+/* Fallback token export (prefer design_tokens.css_variables from Gemini). */
+:root {
+  --colors-color-bg-canvas: #ffffff;
+  --colors-color-bg-surface: #f3f4f6;
+  --colors-color-bg-selected: #e0e7ff;
+  --colors-color-border-subtle: #e5e7eb;
+  --colors-color-border-focus: #6366f1;
+  --colors-color-text-primary: #111827;
+  --colors-color-text-secondary: #6b7280;
+  --colors-color-text-mono: #374151;
+  --colors-color-status-online: #10b981;
+  --colors-color-status-offline: #9ca3af;
+  --colors-color-status-error: #ef4444;
+  --typography-font-family-sans: Inter, system-ui, sans-serif;
+  --typography-font-family-mono: 'JetBrains Mono', 'Roboto Mono', monospace;
+  --typography-font-size-xs: 0.75rem;
+  --typography-font-size-sm: 0.875rem;
+  --typography-font-weight-medium: 500;
+  --typography-font-weight-bold: 600;
+  --spacing-spacing-xs: 4px;
+  --spacing-spacing-sm: 8px;
+  --spacing-spacing-md: 16px;
+  --spacing-spacing-lg: 24px;
+}

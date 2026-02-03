@@ -37,7 +37,18 @@ lazy_blacktea_rust/
 | Frontend API | `src/api.ts` | Tauri invoke wrappers |
 | Frontend UI | `src/App.tsx` | Device console layout |
 | App shell + routing | `src/App.tsx`, `src/App.css`, `src/main.tsx` | Sidebar, dashboard, HashRouter |
+| Active device selector | `src/App.tsx`, `src/App.css` | Auto-selects first online device after refresh, top bar switcher |
+| Device Manager layout | `src/App.tsx`, `src/App.css` | Filter toolbar, grid device rows, sticky command bar, Shift/Ctrl selection |
 | Layout tokens | `src/App.css` | Compact density, page-section/page-header styles, system theme variables |
+| Logcat layout | `src/App.tsx`, `src/App.css` | Compact advanced panel with scroll to preserve log viewport |
+| Logcat toolbar | `src/App.tsx`, `src/App.css` | Grouped primary/secondary actions, compact spacing |
+| Logcat filters | `src/App.tsx`, `src/App.css` | Live filters always visible, presets via dropdown + save row |
+| Logcat filter layout | `src/App.tsx`, `src/App.css` | Inline filter rows + ultra-compact presets |
+| Logcat filter UX | `src/App.tsx`, `src/App.css` | Active filters collapsed with expand toggle |
+| Logcat compact layout | `src/App.tsx`, `src/App.css` | Tightened spacing + inline labels to reduce height |
+| APK installer | `src/App.tsx` | Single/multi/bundle install flow + launch |
+| Logcat helpers | `src/logcat.ts` | Filter/regex/search utilities |
+| UI inspector export | `src-tauri/src/app/commands.rs` | capture/export UI hierarchy + screenshot |
 | Wireless pairing | `src-tauri/src/app/commands.rs`, `src/api.ts`, `src/App.tsx` | adb pair/connect flow |
 | Pairing helpers | `src/pairing.ts` | QR/pair output parsing + reducer |
 
@@ -72,4 +83,5 @@ cargo test --all --all-features
 
 - `brief.md`: Redesign brief and assumptions.
 - `uiux/`: UI/UX audit, plan, tokens, and backlog for the redesign.
+- `uiux/device-manager/`: Device Manager optimization artifacts (Gemini CLI).
 - Decisions: wireless ADB pairing and live UI inspector mirror support.

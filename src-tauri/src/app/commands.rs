@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +32,7 @@ use crate::app::error::AppError;
 use crate::app::models::{
     ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppInfo, BugreportResult,
     CommandResponse, CommandResult, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult,
-    ScrcpyInfo,
+    LogcatExportResult, ScrcpyInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
 use crate::app::state::{AppState, BugreportHandle, LogcatHandle, RecordingHandle};
 use crate::app::ui_xml::render_device_ui_html;
@@ -1033,7 +1033,7 @@ pub fn preview_local_file(
     let mut file = fs::File::open(&path)
         .map_err(|err| AppError::system(format!("Failed to open file: {err}"), &trace_id))?;
     let mut buffer = Vec::new();
-    file.by_ref()
+    std::io::Read::by_ref(&mut file)
         .take((MAX_PREVIEW_BYTES + 1) as u64)
         .read_to_end(&mut buffer)
         .map_err(|err| AppError::system(format!("Failed to read file: {err}"), &trace_id))?;
@@ -1313,6 +1313,47 @@ pub fn open_app_info(
 }
 
 #[tauri::command]
+pub fn launch_app(
+    serials: Vec<String>,
+    package_name: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&package_name, "package_name", &trace_id)?;
+    if serials.is_empty() {
+        return Err(AppError::validation("serials is required", &trace_id));
+    }
+
+    let mut results = Vec::with_capacity(serials.len());
+    for serial in serials {
+        ensure_non_empty(&serial, "serial", &trace_id)?;
+        let args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "shell".to_string(),
+            "monkey".to_string(),
+            "-p".to_string(),
+            package_name.clone(),
+            "-c".to_string(),
+            "android.intent.category.LAUNCHER".to_string(),
+            "1".to_string(),
+        ];
+        let output = run_command_with_timeout("adb", &args, Duration::from_secs(10), &trace_id)?;
+        results.push(CommandResult {
+            serial,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_code: output.exit_code,
+        });
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
+}
+
+#[tauri::command]
 pub fn check_scrcpy(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<ScrcpyInfo>, AppError> {
@@ -1380,7 +1421,7 @@ pub fn launch_scrcpy(
 pub fn capture_ui_hierarchy(
     serial: String,
     trace_id: Option<String>,
-) -> Result<CommandResponse<String>, AppError> {
+) -> Result<CommandResponse<UiHierarchyCaptureResult>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
@@ -1396,13 +1437,107 @@ pub fn capture_ui_hierarchy(
         ));
     }
 
-    let xml = String::from_utf8_lossy(&output.stdout);
+    let xml = String::from_utf8_lossy(&output.stdout).to_string();
     let html = render_device_ui_html(&xml)
         .map_err(|err| AppError::system(format!("Failed to render HTML: {err}"), &trace_id))?;
 
     Ok(CommandResponse {
         trace_id,
-        data: html,
+        data: UiHierarchyCaptureResult { html, xml },
+    })
+}
+
+#[tauri::command]
+pub fn export_ui_hierarchy(
+    serial: String,
+    output_dir: Option<String>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<UiHierarchyExportResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let config = load_config().unwrap_or_default();
+    let resolved_dir = output_dir
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if !config.file_gen_output_path.trim().is_empty() {
+                config.file_gen_output_path.clone()
+            } else {
+                config.output_path.clone()
+            }
+        });
+    ensure_non_empty(&resolved_dir, "output_dir", &trace_id)?;
+    fs::create_dir_all(&resolved_dir)
+        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+    let xml_path = PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.xml", serial, timestamp));
+    let html_path = PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.html", serial, timestamp));
+    let screenshot_path =
+        PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.png", serial, timestamp));
+
+    let output = Command::new("adb")
+        .args(["-s", &serial, "exec-out", "uiautomator", "dump", "/dev/tty"])
+        .output()
+        .map_err(|err| AppError::dependency(format!("Failed to run uiautomator: {err}"), &trace_id))?;
+
+    if !output.status.success() {
+        return Err(AppError::dependency(
+            format!("UI dump failed: {}", String::from_utf8_lossy(&output.stderr)),
+            &trace_id,
+        ));
+    }
+
+    let xml = String::from_utf8_lossy(&output.stdout).to_string();
+    let html = render_device_ui_html(&xml)
+        .map_err(|err| AppError::system(format!("Failed to render HTML: {err}"), &trace_id))?;
+
+    fs::write(&xml_path, xml)
+        .map_err(|err| AppError::system(format!("Failed to write XML: {err}"), &trace_id))?;
+    fs::write(&html_path, html)
+        .map_err(|err| AppError::system(format!("Failed to write HTML: {err}"), &trace_id))?;
+
+    let mut screenshot_args = vec![
+        "-s".to_string(),
+        serial.clone(),
+        "exec-out".to_string(),
+        "screencap".to_string(),
+        "-p".to_string(),
+    ];
+    if config.screenshot.display_id >= 0 {
+        screenshot_args.push("-d".to_string());
+        screenshot_args.push(config.screenshot.display_id.to_string());
+    }
+    if !config.screenshot.extra_args.trim().is_empty() {
+        screenshot_args.extend(
+            config
+                .screenshot
+                .extra_args
+                .split_whitespace()
+                .map(|item| item.to_string()),
+        );
+    }
+    let screenshot_output = run_adb(&screenshot_args, &trace_id)?;
+    if screenshot_output.exit_code.unwrap_or_default() != 0 {
+        return Err(AppError::dependency(
+            format!("Failed to capture screenshot: {}", screenshot_output.stderr),
+            &trace_id,
+        ));
+    }
+    let mut screenshot_file = fs::File::create(&screenshot_path)
+        .map_err(|err| AppError::system(format!("Failed to create screenshot: {err}"), &trace_id))?;
+    screenshot_file
+        .write_all(screenshot_output.stdout.as_bytes())
+        .map_err(|err| AppError::system(format!("Failed to write screenshot: {err}"), &trace_id))?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: UiHierarchyExportResult {
+            serial,
+            xml_path: xml_path.to_string_lossy().to_string(),
+            html_path: html_path.to_string_lossy().to_string(),
+            screenshot_path: screenshot_path.to_string_lossy().to_string(),
+        },
     })
 }
 
@@ -1455,10 +1590,17 @@ pub fn start_logcat(
 
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line_result in reader.lines() {
             if stop_flag_stdout.load(Ordering::Relaxed) {
                 break;
             }
+            let line = match line_result {
+                Ok(line) => line,
+                Err(err) => {
+                    warn!(trace_id = %trace_stdout, error = %err, "failed to read logcat stdout");
+                    break;
+                }
+            };
             if let Err(err) = app_stdout.emit(
                 "logcat-line",
                 LogcatEvent {
@@ -1477,10 +1619,17 @@ pub fn start_logcat(
     let trace_stderr = trace_id.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
+        for line_result in reader.lines() {
             if stop_flag_stderr.load(Ordering::Relaxed) {
                 break;
             }
+            let line = match line_result {
+                Ok(line) => line,
+                Err(err) => {
+                    warn!(trace_id = %trace_stderr, error = %err, "failed to read logcat stderr");
+                    break;
+                }
+            };
             if let Err(err) = app_stderr.emit(
                 "logcat-line",
                 LogcatEvent {
@@ -1562,6 +1711,48 @@ pub fn clear_logcat(
     Ok(CommandResponse {
         trace_id,
         data: true,
+    })
+}
+
+#[tauri::command]
+pub fn export_logcat(
+    serial: String,
+    lines: Vec<String>,
+    output_dir: Option<String>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<LogcatExportResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let config = load_config().unwrap_or_default();
+    let resolved_dir = output_dir
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if !config.output_path.trim().is_empty() {
+                config.output_path.clone()
+            } else {
+                config.file_gen_output_path.clone()
+            }
+        });
+    ensure_non_empty(&resolved_dir, "output_dir", &trace_id)?;
+
+    fs::create_dir_all(&resolved_dir)
+        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+    let output_path = PathBuf::from(&resolved_dir)
+        .join(format!("logcat_{}_{}.txt", serial, timestamp));
+    let payload = lines.join("\n");
+    fs::write(&output_path, payload)
+        .map_err(|err| AppError::system(format!("Failed to write logcat file: {err}"), &trace_id))?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: LogcatExportResult {
+            serial,
+            output_path: output_path.to_string_lossy().to_string(),
+            line_count: lines.len(),
+        },
     })
 }
 

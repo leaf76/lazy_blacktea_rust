@@ -10,7 +10,10 @@ import type {
   DeviceInfo,
   FilePreview,
   HostCommandResult,
+  LogcatExportResult,
   ScrcpyInfo,
+  UiHierarchyCaptureResult,
+  UiHierarchyExportResult,
 } from "./types";
 
 const createTraceId = () => crypto.randomUUID();
@@ -166,8 +169,16 @@ export const previewLocalFile = async (localPath: string) => {
 };
 
 export const captureUiHierarchy = async (serial: string) => {
-  return invoke<CommandResponse<string>>("capture_ui_hierarchy", {
+  return invoke<CommandResponse<UiHierarchyCaptureResult>>("capture_ui_hierarchy", {
     serial,
+    trace_id: createTraceId(),
+  });
+};
+
+export const exportUiHierarchy = async (serial: string, outputDir?: string) => {
+  return invoke<CommandResponse<UiHierarchyExportResult>>("export_ui_hierarchy", {
+    serial,
+    output_dir: outputDir,
     trace_id: createTraceId(),
   });
 };
@@ -190,6 +201,19 @@ export const stopLogcat = async (serial: string) => {
 export const clearLogcat = async (serial: string) => {
   return invoke<CommandResponse<boolean>>("clear_logcat", {
     serial,
+    trace_id: createTraceId(),
+  });
+};
+
+export const exportLogcat = async (
+  serial: string,
+  lines: string[],
+  outputDir?: string,
+) => {
+  return invoke<CommandResponse<LogcatExportResult>>("export_logcat", {
+    serial,
+    lines,
+    output_dir: outputDir,
     trace_id: createTraceId(),
   });
 };
@@ -254,6 +278,14 @@ export const setAppEnabled = async (
 export const openAppInfo = async (serial: string, packageName: string) => {
   return invoke<CommandResponse<boolean>>("open_app_info", {
     serial,
+    package_name: packageName,
+    trace_id: createTraceId(),
+  });
+};
+
+export const launchApp = async (serials: string[], packageName: string) => {
+  return invoke<CommandResponse<CommandResult[]>>("launch_app", {
+    serials,
     package_name: packageName,
     trace_id: createTraceId(),
   });

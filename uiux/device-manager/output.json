@@ -1,0 +1,260 @@
+{
+  "version": "1.0.0",
+  "mode": "audit_and_optimization",
+  "assumptions": [
+    "Users are technical professionals who prefer keyboard shortcuts and high information density over ease of use.",
+    "Dark mode is the primary interface for many QA/Engineers, requiring high contrast borders/separators.",
+    "'Active' device refers to a single focused device for detailed inspection, while 'Selected' devices are targets for bulk actions.",
+    "The window size is variable, but the layout must be responsive down to a minimum width (e.g., 800px).",
+    "Device connectivity status (online/offline) is the most critical metadata for immediate triage."
+  ],
+  "open_questions": [
+    "Are there specific keyboard shortcuts currently implemented for selection (e.g., Shift+Click, Ctrl+A)?",
+    "Does 'Assign Group' apply to the currently selected devices or is it a drag-and-drop interaction?",
+    "What is the maximum number of devices expected to be displayed? (Pagination vs. Infinite Scroll vs. Virtualized List)",
+    "Do distinct icons exist for specific Android versions or manufacturers to aid quick visual identification?"
+  ],
+  "ux_goals": [
+    "Eliminate ambiguity between 'selected' (checked) and 'active' (focused) states.",
+    "Reduce cognitive load by grouping related actions (Filtering vs. Bulk Operations).",
+    "Improve data scanability using tabular alignment and distinct status visual indicators.",
+    "Ensure 'Compact Density' does not compromise touch target size or click accuracy."
+  ],
+  "information_architecture": {
+    "zones": [
+      {
+        "id": "global_toolbar",
+        "contents": [
+          "Page Title",
+          "Refresh Button",
+          "Global Settings Trigger"
+        ]
+      },
+      {
+        "id": "filter_control_bar",
+        "contents": [
+          "Search Input",
+          "Group Filter Dropdown",
+          "Select Visible/Clear Toggles",
+          "Selection Counter"
+        ]
+      },
+      {
+        "id": "device_list_area",
+        "contents": [
+          "ColumnHeaders",
+          "Scrollable Device Rows"
+        ]
+      },
+      {
+        "id": "contextual_action_bar",
+        "contents": [
+          "Group Assignment Input/Button",
+          "Power Actions Group",
+          "Connectivity Actions Group",
+          "Utility Actions"
+        ],
+        "behavior": "Sticky bottom or top, distinct visual container"
+      }
+    ]
+  },
+  "user_flows": {
+    "bulk_action_flow": [
+      "User filters list by Group or Search term.",
+      "User clicks 'Select Visible' or manually checks specific rows.",
+      "Contextual Action Bar updates to show 'X devices selected'.",
+      "User clicks 'Reboot'.",
+      "System prompts confirmation (optional config).",
+      "System executes command and shows toast feedback."
+    ],
+    "quick_triage_flow": [
+      "User scans list for 'Offline' status indicator.",
+      "User hovers over offline device row.",
+      "Row highlights distinctively.",
+      "User clicks 'Reboot Recovery' from inline or context menu actions."
+    ]
+  },
+  "screens": {
+    "device_manager_main": {
+      "states": {
+        "empty": {
+          "description": "No devices connected.",
+          "ui_elements": [
+            "Placeholder illustration (USB cable)",
+            "Instruction text: 'Connect a device via USB or Enable ADB over WiFi'",
+            "Button: 'Refresh Devices'"
+          ]
+        },
+        "loading": {
+          "description": "Fetching device list via ADB.",
+          "ui_elements": [
+            "Skeleton loader rows",
+            "Spinner in header"
+          ]
+        },
+        "populated_default": {
+          "description": "List of devices, none selected.",
+          "ui_elements": [
+            "Search active",
+            "Action buttons disabled/dimmed"
+          ]
+        },
+        "selection_active": {
+          "description": "One or more devices selected.",
+          "ui_elements": [
+            "Row checkboxes checked",
+            "Background color change on rows",
+            "Action buttons enabled and high-contrast"
+          ]
+        },
+        "error": {
+          "description": "ADB server not responding.",
+          "ui_elements": [
+            "Banner alert: 'ADB Server unavailable'",
+            "Button: 'Restart ADB Server'"
+          ]
+        }
+      },
+      "layout_changes": "Move 'Assign Group' and 'Action Buttons' to a unified 'Command Bar' at the bottom of the viewport to separate 'viewing' from 'acting'."
+    }
+  },
+  "issues": [
+    {
+      "id": "ambiguous_selection",
+      "severity": "High",
+      "description": "Users confuse the highlighted row (focus) with the checked row (selection).",
+      "proposed_fix": "Use distinct visual treatments: 'Border+Highlight' for Focus, 'Checkbox+Background Tint' for Selection."
+    },
+    {
+      "id": "scattered_controls",
+      "severity": "Medium",
+      "description": "Selection tools (top right), grouping (top left), and actions (bottom) force excessive mouse travel.",
+      "proposed_fix": "Consolidate 'Selection' helpers next to the filter bar. Move 'Assign' to the Action Bar."
+    },
+    {
+      "id": "scanability",
+      "severity": "Medium",
+      "description": "Inline text details (WiFi/BT) create noise.",
+      "proposed_fix": "Replace text status with icon columns (filled/colored for active, outlined/gray for inactive)."
+    }
+  ],
+  "backlog": [
+    {
+      "id": "feat-layout-restructure",
+      "priority": "P0",
+      "task": "Implement 'Command Bar' pattern: Move all action buttons (Reboot, WiFi, etc.) to a fixed footer."
+    },
+    {
+      "id": "feat-visual-hierarchy",
+      "priority": "P0",
+      "task": "Redesign Device Row: Implement CSS Grid layout. Use Monospace font for Serial/Model. Implement distinct Checkbox column."
+    },
+    {
+      "id": "feat-selection-model",
+      "priority": "P1",
+      "task": "Implement 'Shift+Click' for range select and 'Ctrl/Cmd+Click' for toggle select. Sync 'Select Visible' button with current filter results."
+    },
+    {
+      "id": "feat-status-icons",
+      "priority": "P1",
+      "task": "Replace text status (WiFi: On) with icons using semantic colors (Green for On, Gray for Off)."
+    },
+    {
+      "id": "feat-group-management",
+      "priority": "P2",
+      "task": "Convert 'Assign Group' input to a combobox in the Command Bar allowing selection of existing groups or creation of new ones."
+    }
+  ],
+  "components": [
+    {
+      "name": "DeviceRow",
+      "props": [
+        "deviceData",
+        "isSelected",
+        "isFocused",
+        "onToggle",
+        "onAction"
+      ],
+      "notes": "Must support keyboard navigation."
+    },
+    {
+      "name": "CommandBar",
+      "props": [
+        "selectedCount",
+        "actions",
+        "isSticky"
+      ],
+      "notes": "Container for all bulk operations."
+    },
+    {
+      "name": "StatusBadge",
+      "props": [
+        "status",
+        "type (connection|battery|gms)"
+      ],
+      "notes": "Small, pill-shaped or icon-only."
+    },
+    {
+      "name": "FilterToolbar",
+      "props": [
+        "searchTerm",
+        "groupFilter",
+        "onSearchChange",
+        "onFilterChange"
+      ],
+      "notes": "Contains search and dropdowns."
+    }
+  ],
+  "design_tokens": {
+    "colors": {
+      "--color-bg-canvas": "#ffffff",
+      "--color-bg-surface": "#f3f4f6",
+      "--color-bg-selected": "#e0e7ff",
+      "--color-border-subtle": "#e5e7eb",
+      "--color-border-focus": "#6366f1",
+      "--color-text-primary": "#111827",
+      "--color-text-secondary": "#6b7280",
+      "--color-text-mono": "#374151",
+      "--color-status-online": "#10b981",
+      "--color-status-offline": "#9ca3af",
+      "--color-status-error": "#ef4444"
+    },
+    "typography": {
+      "--font-family-sans": "Inter, system-ui, sans-serif",
+      "--font-family-mono": "'JetBrains Mono', 'Roboto Mono', monospace",
+      "--font-size-xs": "0.75rem",
+      "--font-size-sm": "0.875rem",
+      "--font-weight-medium": "500",
+      "--font-weight-bold": "600"
+    },
+    "spacing": {
+      "--spacing-xs": "4px",
+      "--spacing-sm": "8px",
+      "--spacing-md": "16px",
+      "--spacing-lg": "24px"
+    },
+    "layout": {
+      "--row-height-compact": "40px",
+      "--row-height-default": "48px",
+      "--sidebar-width": "250px"
+    }
+  },
+  "microcopy": {
+    "search_placeholder": "Search by Serial, Model...",
+    "select_visible": "Select All Visible",
+    "clear_selection": "Deselect All",
+    "assign_btn": "Move to Group",
+    "refresh_tooltip": "Refresh device list (ADB)",
+    "no_devices_title": "No Devices Detected",
+    "no_devices_subtitle": "Connect a device via USB to get started."
+  },
+  "rollout": {
+    "phase_1": "Structure: Implement FilterToolbar and CommandBar components to establish zones.",
+    "phase_2": "Visuals: Update DeviceRow with grid layout, monospace fonts, and status icons.",
+    "phase_3": "Interaction: Refine multi-select logic, keyboard shortcuts, and 'Select Visible' behavior."
+  },
+  "experiments": {
+    "split_test_a": "Sticky Command Bar at Bottom vs. Sticky Toolbar at Top.",
+    "feedback_loop": "Add a '?' tooltip on status icons to verify if users understand the icon-only approach."
+  }
+}

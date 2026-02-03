@@ -1,0 +1,27 @@
+[
+  {
+    "id": "feat-layout-restructure",
+    "priority": "P0",
+    "task": "Implement 'Command Bar' pattern: Move all action buttons (Reboot, WiFi, etc.) to a fixed footer."
+  },
+  {
+    "id": "feat-visual-hierarchy",
+    "priority": "P0",
+    "task": "Redesign Device Row: Implement CSS Grid layout. Use Monospace font for Serial/Model. Implement distinct Checkbox column."
+  },
+  {
+    "id": "feat-selection-model",
+    "priority": "P1",
+    "task": "Implement 'Shift+Click' for range select and 'Ctrl/Cmd+Click' for toggle select. Sync 'Select Visible' button with current filter results."
+  },
+  {
+    "id": "feat-status-icons",
+    "priority": "P1",
+    "task": "Replace text status (WiFi: On) with icons using semantic colors (Green for On, Gray for Off)."
+  },
+  {
+    "id": "feat-group-management",
+    "priority": "P2",
+    "task": "Convert 'Assign Group' input to a combobox in the Command Bar allowing selection of existing groups or creation of new ones."
+  }
+]

@@ -59,6 +59,27 @@ pub struct HostCommandResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiHierarchyCaptureResult {
+    pub html: String,
+    pub xml: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiHierarchyExportResult {
+    pub serial: String,
+    pub xml_path: String,
+    pub html_path: String,
+    pub screenshot_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogcatExportResult {
+    pub serial: String,
+    pub output_path: String,
+    pub line_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandResponse<T> {
     pub trace_id: String,
     pub data: T,

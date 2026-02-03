@@ -49,6 +49,24 @@ export type HostCommandResult = {
   exit_code?: number | null;
 };
 
+export type UiHierarchyCaptureResult = {
+  html: string;
+  xml: string;
+};
+
+export type UiHierarchyExportResult = {
+  serial: string;
+  xml_path: string;
+  html_path: string;
+  screenshot_path: string;
+};
+
+export type LogcatExportResult = {
+  serial: string;
+  output_path: string;
+  line_count: number;
+};
+
 export type CommandResponse<T> = {
   trace_id: string;
   data: T;

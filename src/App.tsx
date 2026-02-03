@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -23,10 +24,13 @@ import {
   checkScrcpy,
   clearAppData,
   clearLogcat,
+  exportLogcat,
+  exportUiHierarchy,
   forceStopApp,
   generateBugreport,
   getConfig,
   installApkBatch,
+  launchApp,
   launchScrcpy,
   listApps,
   listDeviceFiles,
@@ -50,6 +54,15 @@ import {
   uninstallApp,
 } from "./api";
 import {
+  buildLogcatFilter,
+  buildSearchRegex,
+  defaultLogcatLevels,
+  filterLogcatLines,
+  parsePidOutput,
+  type LogcatLevelsState,
+  type LogcatSourceMode,
+} from "./logcat";
+import {
   initialPairingState,
   pairingReducer,
   parseAdbPairOutput,
@@ -64,7 +77,6 @@ type QuickActionId =
   | "reboot"
   | "record"
   | "logcat-clear"
-  | "install-apk"
   | "mirror";
 type ActionFormState = {
   isOpen: boolean;
@@ -84,23 +96,52 @@ function App() {
   const [shellCommand, setShellCommand] = useState("");
   const [shellOutput, setShellOutput] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [logcatFilter, setLogcatFilter] = useState("");
   const [logcatLines, setLogcatLines] = useState<Record<string, string[]>>({});
+  const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
+  const [logcatSourceValue, setLogcatSourceValue] = useState("");
+  const [logcatLevels, setLogcatLevels] = useState<LogcatLevelsState>(defaultLogcatLevels);
+  const [logcatLiveFilter, setLogcatLiveFilter] = useState("");
+  const [logcatActiveFilters, setLogcatActiveFilters] = useState<string[]>([]);
+  const [logcatPresetName, setLogcatPresetName] = useState("");
+  const [logcatPresets, setLogcatPresets] = useState<{ name: string; patterns: string[] }[]>([]);
+  const [logcatPresetSelected, setLogcatPresetSelected] = useState("");
+  const [logcatFiltersExpanded, setLogcatFiltersExpanded] = useState(false);
+  const [logcatSearchTerm, setLogcatSearchTerm] = useState("");
+  const [logcatSearchRegex, setLogcatSearchRegex] = useState(false);
+  const [logcatSearchCaseSensitive, setLogcatSearchCaseSensitive] = useState(false);
+  const [logcatSearchOnly, setLogcatSearchOnly] = useState(false);
+  const [logcatSearchOpen, setLogcatSearchOpen] = useState(false);
+  const [logcatAutoScroll, setLogcatAutoScroll] = useState(true);
+  const [logcatActiveFilterSummary, setLogcatActiveFilterSummary] = useState("");
+  const [logcatLastExport, setLogcatLastExport] = useState("");
+  const [logcatAdvancedOpen, setLogcatAdvancedOpen] = useState(false);
   const [filesPath, setFilesPath] = useState("/sdcard");
   const [files, setFiles] = useState<DeviceFileEntry[]>([]);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [uiHtml, setUiHtml] = useState("");
+  const [uiXml, setUiXml] = useState("");
+  const [uiScreenshotPath, setUiScreenshotPath] = useState("");
+  const [uiInspectorTab, setUiInspectorTab] = useState<"hierarchy" | "xml">("hierarchy");
+  const [uiInspectorSearch, setUiInspectorSearch] = useState("");
+  const [uiExportResult, setUiExportResult] = useState("");
+  const [uiZoom, setUiZoom] = useState(1);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [groupMap, setGroupMap] = useState<Record<string, string>>({});
   const [groupName, setGroupName] = useState("");
   const [groupFilter, setGroupFilter] = useState("all");
   const [searchText, setSearchText] = useState("");
   const [apkPath, setApkPath] = useState("");
+  const [apkBundlePath, setApkBundlePath] = useState("");
+  const [apkPaths, setApkPaths] = useState<string[]>([]);
+  const [apkInstallMode, setApkInstallMode] = useState<"single" | "multiple" | "bundle">("single");
   const [apkExtraArgs, setApkExtraArgs] = useState("");
   const [apkAllowDowngrade, setApkAllowDowngrade] = useState(true);
   const [apkReplace, setApkReplace] = useState(true);
   const [apkGrant, setApkGrant] = useState(true);
   const [apkAllowTest, setApkAllowTest] = useState(false);
+  const [apkLaunchAfterInstall, setApkLaunchAfterInstall] = useState(false);
+  const [apkLaunchPackage, setApkLaunchPackage] = useState("");
+  const [apkInstallSummary, setApkInstallSummary] = useState<string[]>([]);
   const [screenRecordRemote, setScreenRecordRemote] = useState<string | null>(null);
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [appsFilter, setAppsFilter] = useState("");
@@ -118,6 +159,9 @@ function App() {
   const [actionOutputDir, setActionOutputDir] = useState("");
   const [actionRebootMode, setActionRebootMode] = useState("normal");
   const [actionDraftConfig, setActionDraftConfig] = useState<AppConfig | null>(null);
+  const [logcatMatchIndex, setLogcatMatchIndex] = useState(0);
+  const logcatOutputRef = useRef<HTMLDivElement | null>(null);
+  const lastSelectedIndexRef = useRef<number | null>(null);
 
   const navigate = useNavigate();
   const activeSerial = selectedSerials[0];
@@ -126,6 +170,7 @@ function App() {
     [devices, activeSerial],
   );
   const hasDevices = devices.length > 0;
+  const selectedCount = selectedSerials.length;
   const deviceStatus = activeDevice?.summary.state ?? "offline";
   const deviceStatusLabel = useMemo(() => {
     if (!activeSerial) {
@@ -154,6 +199,73 @@ function App() {
     }
     return "warn";
   }, [activeSerial, deviceStatus]);
+
+  const rawLogcatLines = useMemo(
+    () => (activeSerial ? logcatLines[activeSerial] ?? [] : []),
+    [activeSerial, logcatLines],
+  );
+
+  const logcatSearchPattern = useMemo(
+    () =>
+      buildSearchRegex(logcatSearchTerm, {
+        caseSensitive: logcatSearchCaseSensitive,
+        regex: logcatSearchRegex,
+      }),
+    [logcatSearchTerm, logcatSearchCaseSensitive, logcatSearchRegex],
+  );
+
+  const logcatFiltered = useMemo(
+    () =>
+      filterLogcatLines(rawLogcatLines, {
+        levels: logcatLevels,
+        activePatterns: logcatActiveFilters,
+        livePattern: logcatLiveFilter,
+        searchTerm: logcatSearchTerm,
+        searchCaseSensitive: logcatSearchCaseSensitive,
+        searchRegex: logcatSearchRegex,
+        searchOnly: logcatSearchOnly,
+      }),
+    [
+      rawLogcatLines,
+      logcatLevels,
+      logcatActiveFilters,
+      logcatLiveFilter,
+      logcatSearchTerm,
+      logcatSearchCaseSensitive,
+      logcatSearchRegex,
+      logcatSearchOnly,
+    ],
+  );
+
+  const selectedLogcatPreset = useMemo(
+    () => logcatPresets.find((preset) => preset.name === logcatPresetSelected) ?? null,
+    [logcatPresets, logcatPresetSelected],
+  );
+
+  useEffect(() => {
+    if (!logcatPresetSelected) {
+      return;
+    }
+    if (!logcatPresets.some((preset) => preset.name === logcatPresetSelected)) {
+      setLogcatPresetSelected("");
+    }
+  }, [logcatPresets, logcatPresetSelected]);
+
+  const uiScreenshotSrc = useMemo(
+    () => (uiScreenshotPath ? convertFileSrc(uiScreenshotPath) : ""),
+    [uiScreenshotPath],
+  );
+
+  const filteredUiXml = useMemo(() => {
+    const query = uiInspectorSearch.trim().toLowerCase();
+    if (!query) {
+      return uiXml;
+    }
+    return uiXml
+      .split("\n")
+      .filter((line) => line.toLowerCase().includes(query))
+      .join("\n");
+  }, [uiXml, uiInspectorSearch]);
 
   const handleSelectActiveSerial = (serial: string) => {
     if (!serial) {
@@ -203,6 +315,17 @@ function App() {
     return null;
   };
 
+  const validatePackageName = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "Package name is required.";
+    }
+    if (!/^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$/.test(trimmed)) {
+      return "Invalid package name format.";
+    }
+    return null;
+  };
+
   const updateDraftConfig = (updater: (current: AppConfig) => AppConfig) => {
     setActionDraftConfig((prev) => (prev ? updater(prev) : prev));
   };
@@ -221,7 +344,17 @@ function App() {
       const response = await listDevices(true);
       setDevices(response.data);
       setSelectedSerials((prev) =>
-        prev.filter((serial) => response.data.some((device) => device.summary.serial === serial)),
+        {
+          const stillValid = prev.filter((serial) =>
+            response.data.some((device) => device.summary.serial === serial),
+          );
+          if (stillValid.length > 0) {
+            return stillValid;
+          }
+          const preferred =
+            response.data.find((device) => device.summary.state === "device") ?? response.data[0];
+          return preferred ? [preferred.summary.serial] : [];
+        },
       );
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -304,6 +437,25 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const stored = localStorage.getItem("logcat_presets");
+    if (!stored) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(stored) as { name: string; patterns: string[] }[];
+      if (Array.isArray(parsed)) {
+        setLogcatPresets(parsed.filter((preset) => preset.name && preset.patterns));
+      }
+    } catch {
+      setLogcatPresets([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("logcat_presets", JSON.stringify(logcatPresets));
+  }, [logcatPresets]);
+
+  useEffect(() => {
     if (!config) {
       return;
     }
@@ -311,6 +463,30 @@ function App() {
       prev ? { ...prev, device_groups: expandGroups(groupMap) } : prev,
     );
   }, [groupMap]);
+
+  useEffect(() => {
+    if (!logcatAutoScroll) {
+      return;
+    }
+    if (logcatOutputRef.current) {
+      logcatOutputRef.current.scrollTop = logcatOutputRef.current.scrollHeight;
+    }
+  }, [logcatFiltered.lines.length, logcatAutoScroll]);
+
+  useEffect(() => {
+    setLogcatMatchIndex(0);
+  }, [logcatSearchTerm, logcatSearchRegex, logcatSearchCaseSensitive, logcatSearchOnly]);
+
+
+  useEffect(() => {
+    if (logcatFiltered.matchIndices.length === 0) {
+      setLogcatMatchIndex(0);
+      return;
+    }
+    if (logcatMatchIndex >= logcatFiltered.matchIndices.length) {
+      setLogcatMatchIndex(logcatFiltered.matchIndices.length - 1);
+    }
+  }, [logcatFiltered.matchIndices.length, logcatMatchIndex]);
 
   useEffect(() => {
     const unlistenLogcat = listen<LogcatEvent>("logcat-line", (event) => {
@@ -388,6 +564,36 @@ function App() {
     setSelectedSerials((prev) =>
       prev.includes(serial) ? prev.filter((item) => item !== serial) : [...prev, serial],
     );
+  };
+
+  const handleDeviceRowSelect = (
+    event: React.MouseEvent<HTMLElement>,
+    serial: string,
+    index: number,
+  ) => {
+    event.preventDefault();
+    const isMeta = event.metaKey || event.ctrlKey;
+    const isShift = event.shiftKey;
+
+    if (isShift && lastSelectedIndexRef.current != null) {
+      const start = Math.min(lastSelectedIndexRef.current, index);
+      const end = Math.max(lastSelectedIndexRef.current, index);
+      const rangeSerials = visibleDevices.slice(start, end + 1).map((device) => device.summary.serial);
+      setSelectedSerials((prev) => Array.from(new Set([...prev, ...rangeSerials])));
+    } else if (isMeta) {
+      toggleDevice(serial);
+      lastSelectedIndexRef.current = index;
+      return;
+    } else {
+      setSelectedSerials((prev) => {
+        if (prev.length === 1 && prev[0] === serial) {
+          return prev;
+        }
+        return [serial];
+      });
+    }
+
+    lastSelectedIndexRef.current = index;
   };
 
   const selectAllVisible = () => {
@@ -496,35 +702,90 @@ function App() {
       pushToast("Select at least one device for APK install.", "error");
       return;
     }
-    let path = apkPath;
-    if (!path) {
-      const selected = await openDialog({
-        title: "Select APK",
-        multiple: false,
-        filters: [{ name: "APK", extensions: ["apk"] }],
-      });
-      if (!selected || Array.isArray(selected)) {
-        return;
+
+    let paths: string[] = [];
+    if (apkInstallMode === "single") {
+      let path = apkPath;
+      if (!path) {
+        const selected = await openDialog({
+          title: "Select APK",
+          multiple: false,
+          filters: [{ name: "APK", extensions: ["apk", "apks", "xapk"] }],
+        });
+        if (!selected || Array.isArray(selected)) {
+          return;
+        }
+        path = selected;
+        setApkPath(path);
       }
-      path = selected;
-      setApkPath(path);
+      paths = [path];
+    } else if (apkInstallMode === "bundle") {
+      let path = apkBundlePath;
+      if (!path) {
+        const selected = await openDialog({
+          title: "Select APK Bundle",
+          multiple: false,
+          filters: [{ name: "Bundle", extensions: ["apks", "xapk"] }],
+        });
+        if (!selected || Array.isArray(selected)) {
+          return;
+        }
+        path = selected;
+        setApkBundlePath(path);
+      }
+      paths = [path];
+    } else {
+      let selected = apkPaths;
+      if (!selected.length) {
+        const picked = await openDialog({
+          title: "Select APKs",
+          multiple: true,
+          filters: [{ name: "APK", extensions: ["apk", "apks", "xapk"] }],
+        });
+        if (!picked) {
+          return;
+        }
+        selected = Array.isArray(picked) ? picked : [picked];
+        setApkPaths(selected);
+      }
+      paths = selected;
     }
+
+    if (!paths.length) {
+      return;
+    }
+
+    setApkInstallSummary([]);
     setBusy(true);
     try {
-      const response = await installApkBatch(
-        selectedSerials,
-        path,
-        apkReplace,
-        apkAllowDowngrade,
-        apkGrant,
-        apkAllowTest,
-        apkExtraArgs,
-      );
-      const results = Object.values(response.data.results || {});
-      const successCount = results.filter((item) => item.success).length;
-      const summary = `Installed ${successCount}/${results.length} device(s)`;
-      setShellOutput([summary]);
+      const summaries: string[] = [];
+      for (const path of paths) {
+        const response = await installApkBatch(
+          selectedSerials,
+          path,
+          apkReplace,
+          apkAllowDowngrade,
+          apkGrant,
+          apkAllowTest,
+          apkExtraArgs,
+        );
+        const results = Object.values(response.data.results || {});
+        const successCount = results.filter((item) => item.success).length;
+        summaries.push(`${path}: Installed ${successCount}/${results.length} device(s)`);
+      }
+      setApkInstallSummary(summaries);
       pushToast("APK install completed.", "info");
+
+      if (apkLaunchAfterInstall) {
+        const error = validatePackageName(apkLaunchPackage);
+        if (error) {
+          pushToast(error, "error");
+        } else {
+          const response = await launchApp(selectedSerials, apkLaunchPackage.trim());
+          const successCount = response.data.filter((item) => item.exit_code === 0).length;
+          pushToast(`Launch requested (${successCount}/${response.data.length}).`, "info");
+        }
+      }
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -578,14 +839,97 @@ function App() {
     }
   };
 
+  const addActiveLogcatFilter = () => {
+    const value = logcatLiveFilter.trim();
+    if (!value) {
+      return;
+    }
+    setLogcatActiveFilters((prev) => Array.from(new Set([...prev, value])));
+    setLogcatLiveFilter("");
+  };
+
+  const removeActiveLogcatFilter = (pattern: string) => {
+    setLogcatActiveFilters((prev) => prev.filter((item) => item !== pattern));
+  };
+
+  const clearActiveLogcatFilters = () => {
+    setLogcatActiveFilters([]);
+  };
+
+  const saveLogcatPreset = () => {
+    const name = logcatPresetName.trim();
+    if (!name) {
+      pushToast("Preset name is required.", "error");
+      return;
+    }
+    if (logcatActiveFilters.length === 0) {
+      pushToast("Add at least one active filter.", "error");
+      return;
+    }
+    setLogcatPresets((prev) => [
+      ...prev.filter((preset) => preset.name !== name),
+      { name, patterns: logcatActiveFilters },
+    ]);
+    setLogcatPresetName("");
+    setLogcatPresetSelected(name);
+    pushToast("Preset saved.", "info");
+  };
+
+  const applyLogcatPreset = (name: string) => {
+    const preset = logcatPresets.find((item) => item.name === name);
+    if (!preset) {
+      return;
+    }
+    setLogcatActiveFilters(preset.patterns);
+  };
+
+  const deleteLogcatPreset = (name: string) => {
+    setLogcatPresets((prev) => prev.filter((item) => item.name !== name));
+    if (logcatPresetSelected === name) {
+      setLogcatPresetSelected("");
+    }
+  };
+
   const handleLogcatStart = async () => {
     if (!activeSerial) {
       pushToast("Select one device for logcat.", "error");
       return;
     }
+    const sourceValue = logcatSourceValue.trim();
+    let filter = "";
+    if (logcatSourceMode === "package") {
+      if (!sourceValue) {
+        pushToast("Package name is required for package mode.", "error");
+        return;
+      }
+      try {
+        const response = await runShell([activeSerial], `pidof ${sourceValue}`, false);
+        const stdout = response.data?.[0]?.stdout ?? "";
+        const pids = parsePidOutput(stdout);
+        if (!pids.length) {
+          pushToast(`No running process for ${sourceValue}.`, "error");
+          return;
+        }
+        filter = buildLogcatFilter({
+          sourceMode: "package",
+          sourceValue,
+          pids,
+        });
+      } catch (error) {
+        pushToast(formatError(error), "error");
+        return;
+      }
+    } else {
+      filter = buildLogcatFilter({
+        sourceMode: logcatSourceMode,
+        sourceValue,
+      });
+    }
+
     setBusy(true);
     try {
-      await startLogcat(activeSerial, logcatFilter);
+      await startLogcat(activeSerial, filter || undefined);
+      setLogcatActiveFilterSummary(filter || "All");
       pushToast("Logcat started.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -610,7 +954,7 @@ function App() {
     }
   };
 
-  const handleLogcatClear = async () => {
+  const handleLogcatClearBuffer = async () => {
     if (!activeSerial) {
       pushToast("Select one device for logcat.", "error");
       return;
@@ -619,12 +963,109 @@ function App() {
     try {
       await clearLogcat(activeSerial);
       setLogcatLines((prev) => ({ ...prev, [activeSerial]: [] }));
-      pushToast("Logcat cleared.", "info");
+      pushToast("Logcat buffer cleared.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleLogcatClearView = () => {
+    if (!activeSerial) {
+      return;
+    }
+    setLogcatLines((prev) => ({ ...prev, [activeSerial]: [] }));
+  };
+
+  const handleLogcatExport = async () => {
+    if (!activeSerial) {
+      pushToast("Select one device for logcat export.", "error");
+      return;
+    }
+    if (!logcatFiltered.lines.length) {
+      pushToast("No logcat lines to export.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await exportLogcat(
+        activeSerial,
+        logcatFiltered.lines,
+        config?.file_gen_output_path || config?.output_path,
+      );
+      setLogcatLastExport(response.data.output_path);
+      pushToast("Logcat exported.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleLogcatAdvanced = () => {
+    setLogcatAdvancedOpen((prev) => !prev);
+  };
+
+  const renderLogcatLine = (line: string) => {
+    if (!logcatSearchPattern) {
+      return line;
+    }
+    const parts: Array<{ text: string; match: boolean }> = [];
+    let lastIndex = 0;
+    logcatSearchPattern.lastIndex = 0;
+    let match = logcatSearchPattern.exec(line);
+    while (match) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (start > lastIndex) {
+        parts.push({ text: line.slice(lastIndex, start), match: false });
+      }
+      parts.push({ text: line.slice(start, end), match: true });
+      lastIndex = end;
+      match = logcatSearchPattern.exec(line);
+    }
+    if (lastIndex < line.length) {
+      parts.push({ text: line.slice(lastIndex), match: false });
+    }
+    logcatSearchPattern.lastIndex = 0;
+    return parts.map((part, index) =>
+      part.match ? <mark key={`${part.text}-${index}`}>{part.text}</mark> : <span key={`${part.text}-${index}`}>{part.text}</span>,
+    );
+  };
+
+  const scrollToLogcatMatch = (index: number) => {
+    const container = logcatOutputRef.current;
+    if (!container) {
+      return;
+    }
+    const matchIndex = logcatFiltered.matchIndices[index];
+    if (matchIndex == null) {
+      return;
+    }
+    const target = container.querySelector(`[data-log-index="${matchIndex}"]`);
+    if (target instanceof HTMLElement) {
+      target.scrollIntoView({ block: "center" });
+    }
+  };
+
+  const handleLogcatNextMatch = () => {
+    if (!logcatFiltered.matchIndices.length) {
+      return;
+    }
+    const nextIndex = (logcatMatchIndex + 1) % logcatFiltered.matchIndices.length;
+    setLogcatMatchIndex(nextIndex);
+    scrollToLogcatMatch(nextIndex);
+  };
+
+  const handleLogcatPrevMatch = () => {
+    if (!logcatFiltered.matchIndices.length) {
+      return;
+    }
+    const prevIndex =
+      (logcatMatchIndex - 1 + logcatFiltered.matchIndices.length) % logcatFiltered.matchIndices.length;
+    setLogcatMatchIndex(prevIndex);
+    scrollToLogcatMatch(prevIndex);
   };
 
   const handleFilesRefresh = async () => {
@@ -682,8 +1123,37 @@ function App() {
     setBusy(true);
     try {
       const response = await captureUiHierarchy(activeSerial);
-      setUiHtml(response.data);
+      setUiHtml(response.data.html);
+      setUiXml(response.data.xml);
+      setUiInspectorTab("hierarchy");
+      setUiInspectorSearch("");
+      setUiExportResult("");
+
+      const outputDir = config?.file_gen_output_path || config?.output_path || "";
+      if (outputDir) {
+        const screenshotResponse = await captureScreenshot(activeSerial, outputDir);
+        setUiScreenshotPath(screenshotResponse.data);
+      } else {
+        setUiScreenshotPath("");
+      }
       pushToast("UI hierarchy captured.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUiExport = async () => {
+    if (!activeSerial) {
+      pushToast("Select one device for UI inspector export.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await exportUiHierarchy(activeSerial, config?.file_gen_output_path || config?.output_path);
+      setUiExportResult(response.data.html_path);
+      pushToast("UI inspector export completed.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -796,17 +1266,11 @@ function App() {
       return;
     }
     const errors: string[] = [];
-    if (actionForm.actionId !== "install-apk" && !activeSerial && actionForm.actionId !== "reboot") {
+    if (!activeSerial && actionForm.actionId !== "reboot") {
       errors.push("Select an active device to run this action.");
     }
     if (actionForm.actionId === "reboot" && !selectedSerials.length) {
       errors.push("Select at least one device to reboot.");
-    }
-    if (actionForm.actionId === "install-apk" && !selectedSerials.length) {
-      errors.push("Select at least one device to install.");
-    }
-    if (actionForm.actionId === "install-apk" && !apkPath.trim()) {
-      errors.push("Select an APK file before installing.");
     }
     if (actionForm.actionId === "screenshot" && !actionOutputDir.trim() && !config?.output_path) {
       errors.push("Select an output folder for screenshots.");
@@ -860,9 +1324,8 @@ function App() {
         }
       } else if (actionForm.actionId === "logcat-clear") {
         await clearLogcat(activeSerial!);
+        setLogcatLines((prev) => ({ ...prev, [activeSerial!]: [] }));
         pushToast("Logcat cleared.", "info");
-      } else if (actionForm.actionId === "install-apk") {
-        await handleInstallApk();
       } else if (actionForm.actionId === "mirror") {
         await persistActionConfig();
         await handleScrcpyLaunch();
@@ -1012,13 +1475,6 @@ function App() {
       disabled: busy || !activeSerial,
     },
     {
-      id: "install-apk",
-      title: "Install APK",
-      description: "Install an APK on the selected devices.",
-      onClick: () => openActionForm("install-apk"),
-      disabled: busy || selectedSerials.length === 0,
-    },
-    {
       id: "mirror",
       title: "Live Mirror",
       description: scrcpyInfo?.available
@@ -1026,6 +1482,13 @@ function App() {
         : "Install scrcpy to enable live mirroring.",
       onClick: () => openActionForm("mirror"),
       disabled: busy || selectedSerials.length === 0,
+    },
+    {
+      id: "apk-installer",
+      title: "APK Installer",
+      description: "Install single, multiple, or split APK bundles.",
+      onClick: () => navigate("/apk-installer"),
+      disabled: busy,
     },
   ];
 
@@ -1094,7 +1557,7 @@ function App() {
               <span className="badge">{deviceState}</span>
             </div>
             <div className="device-summary">
-              <div>
+              <div className="device-primary">
                 <p className="eyebrow">Active Device</p>
                 <strong>{deviceName}</strong>
                 <p className="muted">{activeSerial ?? "Select a device"}</p>
@@ -1223,7 +1686,6 @@ function App() {
     reboot: "Reboot",
     record: screenRecordRemote ? "Stop Recording" : "Start Recording",
     "logcat-clear": "Clear Logcat",
-    "install-apk": "Install APK",
     mirror: "Live Mirror",
   };
 
@@ -1258,6 +1720,7 @@ function App() {
             <span className="nav-title">Manage</span>
             <NavLink to="/apps">App Manager</NavLink>
             <NavLink to="/files">File Explorer</NavLink>
+            <NavLink to="/apk-installer">APK Installer</NavLink>
             <NavLink to="/actions">Custom Actions</NavLink>
           </div>
           <div className="nav-group">
@@ -1284,17 +1747,22 @@ function App() {
           <div className="device-context">
             <div className="device-selector">
               <p className="eyebrow">Active Device</p>
-              <select
-                value={activeSerial ?? ""}
-                onChange={(event) => handleSelectActiveSerial(event.target.value)}
-              >
-                <option value="">No device connected</option>
-                {devices.map((device) => (
-                  <option key={device.summary.serial} value={device.summary.serial}>
-                    {device.detail?.model ?? device.summary.model ?? device.summary.serial}
-                  </option>
-                ))}
-              </select>
+              <div className="device-selector-row">
+                <select
+                  value={activeSerial ?? ""}
+                  onChange={(event) => handleSelectActiveSerial(event.target.value)}
+                >
+                  <option value="">Select a device</option>
+                  {devices.map((device) => (
+                    <option key={device.summary.serial} value={device.summary.serial}>
+                      {device.detail?.model ?? device.summary.model ?? device.summary.serial}
+                    </option>
+                  ))}
+                </select>
+                <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+                  Manage
+                </button>
+              </div>
             </div>
             <div className="device-status-row">
               <span className={`status-pill ${deviceStatusTone}`}>{deviceStatusLabel}</span>
@@ -1341,101 +1809,160 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  <section className="panel">
+                  <section className="panel logcat-panel">
                     <div className="panel-header">
                       <div>
                         <h2>Devices</h2>
                         <span>{devices.length} connected</span>
                       </div>
-                      <div className="button-row compact">
+                    </div>
+                    <div className="device-filter-bar">
+                      <div className="device-filter-main">
+                        <input
+                          value={searchText}
+                          onChange={(event) => setSearchText(event.target.value)}
+                          placeholder="Search by serial or model"
+                        />
+                        <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}>
+                          <option value="all">All groups</option>
+                          {groupOptions.map((group) => (
+                            <option key={group} value={group}>
+                              {group}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="device-filter-actions">
                         <button onClick={selectAllVisible} disabled={busy}>
                           Select Visible
                         </button>
                         <button onClick={clearSelection} disabled={busy}>
-                          Clear
+                          Clear Selection
                         </button>
+                        <span className="muted">{selectedCount} selected</span>
                       </div>
                     </div>
-                    <div className="toolbar">
-                      <input
-                        value={searchText}
-                        onChange={(event) => setSearchText(event.target.value)}
-                        placeholder="Search serial or model"
-                      />
-                      <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}>
-                        <option value="all">All groups</option>
-                        {groupOptions.map((group) => (
-                          <option key={group} value={group}>
-                            {group}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        value={groupName}
-                        onChange={(event) => setGroupName(event.target.value)}
-                        placeholder="Group name"
-                      />
-                      <button onClick={handleAssignGroup} disabled={busy}>
-                        Assign
-                      </button>
-                    </div>
                     <div className="device-list">
-                      {visibleDevices.map((device) => {
+                      <div className="device-list-header">
+                        <span />
+                        <span>Device</span>
+                        <span>Serial</span>
+                        <span>Platform</span>
+                        <span>Radios</span>
+                        <span>Battery</span>
+                        <span>Status</span>
+                      </div>
+                      {visibleDevices.map((device, index) => {
                         const serial = device.summary.serial;
                         const detail = device.detail;
                         const wifi = detail?.wifi_is_on;
                         const bt = detail?.bt_is_on;
+                        const isSelected = selectedSerials.includes(serial);
+                        const isActive = serial === activeSerial;
+                        const stateTone =
+                          device.summary.state === "device"
+                            ? "ok"
+                            : device.summary.state === "unauthorized"
+                              ? "error"
+                              : "warn";
                         return (
-                          <label
+                          <div
                             key={serial}
-                            className={`device-card ${selectedSerials.includes(serial) ? "active" : ""}`}
+                            className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
+                            onClick={(event) => handleDeviceRowSelect(event, serial, index)}
                           >
-                            <input
-                              type="checkbox"
-                              checked={selectedSerials.includes(serial)}
-                              onChange={() => toggleDevice(serial)}
-                            />
-                            <div className="device-main">
-                              <strong>{detail?.model ?? device.summary.model ?? serial}</strong>
-                              <p>{serial}</p>
-                              {groupMap[serial] && <span className="group-tag">{groupMap[serial]}</span>}
+                            <label className="device-check">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDeviceRowSelect(event, serial, index);
+                                }}
+                                onChange={() => {}}
+                              />
+                            </label>
+                            <div className="device-cell device-info">
+                              <div className="device-info-main">
+                                <strong>{detail?.model ?? device.summary.model ?? serial}</strong>
+                                {isActive && <span className="device-active-badge">Active</span>}
+                              </div>
+                              <div className="device-tags">
+                                {groupMap[serial] && <span className="group-tag">{groupMap[serial]}</span>}
+                              </div>
                             </div>
-                            <div className="device-meta">
-                              <span>{device.summary.state}</span>
-                              <span>{detail?.android_version ? `Android ${detail.android_version}` : "--"}</span>
-                              <span>{detail?.battery_level != null ? `${detail.battery_level}%` : "--"}</span>
-                              <span>{wifi == null ? "WiFi --" : wifi ? "WiFi On" : "WiFi Off"}</span>
-                              <span>{bt == null ? "BT --" : bt ? "BT On" : "BT Off"}</span>
+                            <div className="device-cell device-serial">{serial}</div>
+                            <div className="device-cell device-platform">
+                              <span>{detail?.android_version ? `Android ${detail.android_version}` : "Android --"}</span>
+                              <span className="muted">{detail?.api_level ? `API ${detail.api_level}` : "API --"}</span>
                             </div>
-                          </label>
+                            <div className="device-cell device-radios">
+                              <span
+                                className={`status-icon ${
+                                  wifi == null ? "unknown" : wifi ? "ok" : "off"
+                                }`}
+                                title={wifi == null ? "WiFi Unknown" : wifi ? "WiFi On" : "WiFi Off"}
+                              >
+                                WiFi
+                              </span>
+                              <span
+                                className={`status-icon ${bt == null ? "unknown" : bt ? "ok" : "off"}`}
+                                title={bt == null ? "Bluetooth Unknown" : bt ? "Bluetooth On" : "Bluetooth Off"}
+                              >
+                                BT
+                              </span>
+                            </div>
+                            <div className="device-cell device-battery">
+                              {detail?.battery_level != null ? `${detail.battery_level}%` : "--"}
+                            </div>
+                            <div className="device-cell device-state">
+                              <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
-                    <div className="button-row">
-                      <button onClick={() => handleReboot()} disabled={busy}>
-                        Reboot
-                      </button>
-                      <button onClick={() => handleReboot("recovery")} disabled={busy}>
-                        Reboot Recovery
-                      </button>
-                      <button onClick={() => handleReboot("bootloader")} disabled={busy}>
-                        Reboot Bootloader
-                      </button>
-                      <button onClick={() => handleToggleWifi(true)} disabled={busy}>
-                        WiFi On
-                      </button>
-                      <button onClick={() => handleToggleWifi(false)} disabled={busy}>
-                        WiFi Off
-                      </button>
-                      <button onClick={() => handleToggleBluetooth(true)} disabled={busy}>
-                        Bluetooth On
-                      </button>
-                      <button onClick={() => handleToggleBluetooth(false)} disabled={busy}>
-                        Bluetooth Off
-                      </button>
-                      <button onClick={handleCopyDeviceInfo} disabled={busy}>
-                        Copy Device Info
-                      </button>
+                    <div className="device-command-bar">
+                      <div className="device-command-group">
+                        <label>Group</label>
+                        <div className="inline-row">
+                          <input
+                            value={groupName}
+                            onChange={(event) => setGroupName(event.target.value)}
+                            placeholder="Group name"
+                          />
+                          <button onClick={handleAssignGroup} disabled={busy || selectedCount === 0}>
+                            Assign
+                          </button>
+                        </div>
+                        <span className="muted">{selectedCount} selected</span>
+                      </div>
+                      <div className="button-row compact">
+                        <button onClick={() => handleReboot()} disabled={busy || selectedCount === 0}>
+                          Reboot
+                        </button>
+                        <button onClick={() => handleReboot("recovery")} disabled={busy || selectedCount === 0}>
+                          Reboot Recovery
+                        </button>
+                        <button onClick={() => handleReboot("bootloader")} disabled={busy || selectedCount === 0}>
+                          Reboot Bootloader
+                        </button>
+                        <button onClick={() => handleToggleWifi(true)} disabled={busy || selectedCount === 0}>
+                          WiFi On
+                        </button>
+                        <button onClick={() => handleToggleWifi(false)} disabled={busy || selectedCount === 0}>
+                          WiFi Off
+                        </button>
+                        <button onClick={() => handleToggleBluetooth(true)} disabled={busy || selectedCount === 0}>
+                          Bluetooth On
+                        </button>
+                        <button onClick={() => handleToggleBluetooth(false)} disabled={busy || selectedCount === 0}>
+                          Bluetooth Off
+                        </button>
+                        <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount === 0}>
+                          Copy Device Info
+                        </button>
+                      </div>
                     </div>
                   </section>
                 </div>
@@ -1448,7 +1975,7 @@ function App() {
                   <div className="page-header">
                     <div>
                       <h1>Custom Actions</h1>
-                      <p className="muted">Run shell commands and batch installs.</p>
+                      <p className="muted">Run batch shell commands across devices.</p>
                     </div>
                   </div>
                   <div className="stack">
@@ -1480,35 +2007,163 @@ function App() {
                         )}
                       </div>
                     </section>
-
+                  </div>
+                </div>
+              }
+            />
+            <Route
+              path="/apk-installer"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>APK Installer</h1>
+                      <p className="muted">Install single APKs, bundles, or multi-file batches.</p>
+                    </div>
+                  </div>
+                  <div className="stack">
                     <section className="panel">
                       <div className="panel-header">
-                        <h2>APK Install</h2>
-                        <span>{selectedSerials.length ? `${selectedSerials.length} selected` : "No devices selected"}</span>
+                        <h2>Install Setup</h2>
+                        <span>
+                          {selectedSerials.length
+                            ? `${selectedSerials.length} selected`
+                            : "No devices selected"}
+                        </span>
                       </div>
                       <div className="form-row">
-                        <label>APK Path</label>
-                        <input
-                          value={apkPath}
-                          onChange={(event) => setApkPath(event.target.value)}
-                          placeholder="Select an APK file"
-                        />
-                        <button
-                          onClick={async () => {
-                            const selected = await openDialog({
-                              title: "Select APK",
-                              multiple: false,
-                              filters: [{ name: "APK", extensions: ["apk"] }],
-                            });
-                            if (selected && !Array.isArray(selected)) {
-                              setApkPath(selected);
-                            }
-                          }}
-                          disabled={busy}
-                        >
-                          Browse
-                        </button>
+                        <label>Install Mode</label>
+                        <div className="toggle-group">
+                          <button
+                            type="button"
+                            className={`toggle ${apkInstallMode === "single" ? "active" : ""}`}
+                            onClick={() => setApkInstallMode("single")}
+                          >
+                            Single APK
+                          </button>
+                          <button
+                            type="button"
+                            className={`toggle ${apkInstallMode === "multiple" ? "active" : ""}`}
+                            onClick={() => setApkInstallMode("multiple")}
+                          >
+                            Multiple APKs
+                          </button>
+                          <button
+                            type="button"
+                            className={`toggle ${apkInstallMode === "bundle" ? "active" : ""}`}
+                            onClick={() => setApkInstallMode("bundle")}
+                          >
+                            Split Bundle
+                          </button>
+                        </div>
                       </div>
+                      {apkInstallMode === "single" && (
+                        <div className="form-row">
+                          <label>APK Path</label>
+                          <input
+                            value={apkPath}
+                            onChange={(event) => setApkPath(event.target.value)}
+                            placeholder="Select an APK file"
+                          />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const selected = await openDialog({
+                                title: "Select APK",
+                                multiple: false,
+                                filters: [{ name: "APK", extensions: ["apk", "apks", "xapk"] }],
+                              });
+                              if (selected && !Array.isArray(selected)) {
+                                setApkPath(selected);
+                              }
+                            }}
+                            disabled={busy}
+                          >
+                            Browse
+                          </button>
+                        </div>
+                      )}
+                      {apkInstallMode === "bundle" && (
+                        <div className="form-row">
+                          <label>Bundle Path</label>
+                          <input
+                            value={apkBundlePath}
+                            onChange={(event) => setApkBundlePath(event.target.value)}
+                            placeholder="Select an .apks or .xapk bundle"
+                          />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const selected = await openDialog({
+                                title: "Select APK Bundle",
+                                multiple: false,
+                                filters: [{ name: "Bundle", extensions: ["apks", "xapk"] }],
+                              });
+                              if (selected && !Array.isArray(selected)) {
+                                setApkBundlePath(selected);
+                              }
+                            }}
+                            disabled={busy}
+                          >
+                            Browse
+                          </button>
+                        </div>
+                      )}
+                      {apkInstallMode === "multiple" && (
+                        <div className="stack">
+                          <div className="form-row">
+                            <label>APK Files</label>
+                            <input
+                              value={apkPaths.join(", ")}
+                              onChange={(event) =>
+                                setApkPaths(
+                                  event.target.value
+                                    .split(",")
+                                    .map((item) => item.trim())
+                                    .filter(Boolean),
+                                )
+                              }
+                              placeholder="Select multiple APKs"
+                            />
+                            <div className="button-row compact">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const selected = await openDialog({
+                                    title: "Select APKs",
+                                    multiple: true,
+                                    filters: [{ name: "APK", extensions: ["apk", "apks", "xapk"] }],
+                                  });
+                                  if (selected) {
+                                    const values = Array.isArray(selected) ? selected : [selected];
+                                    setApkPaths(values);
+                                  }
+                                }}
+                                disabled={busy}
+                              >
+                                Browse
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => setApkPaths([])}
+                                disabled={busy}
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+                          {apkPaths.length > 0 && (
+                            <div className="list-compact">
+                              {apkPaths.map((path) => (
+                                <div key={path} className="list-row">
+                                  <span>{path}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                       <div className="grid-two">
                         <label className="toggle">
                           <input
@@ -1550,9 +2205,41 @@ function App() {
                           onChange={(event) => setApkExtraArgs(event.target.value)}
                           placeholder="e.g. --force-queryable"
                         />
-                        <button onClick={handleInstallApk} disabled={busy}>
+                        <button onClick={handleInstallApk} disabled={busy || !selectedSerials.length}>
                           Install
                         </button>
+                      </div>
+                      <div className="form-row">
+                        <label>Launch After Install</label>
+                        <div className="inline-row">
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={apkLaunchAfterInstall}
+                              onChange={(event) => setApkLaunchAfterInstall(event.target.checked)}
+                            />
+                            Launch app after install
+                          </label>
+                          <input
+                            value={apkLaunchPackage}
+                            onChange={(event) => setApkLaunchPackage(event.target.value)}
+                            placeholder="com.example.app"
+                            disabled={!apkLaunchAfterInstall}
+                          />
+                        </div>
+                      </div>
+                    </section>
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h2>Latest Results</h2>
+                        <span>{apkInstallSummary.length ? "Completed" : "Idle"}</span>
+                      </div>
+                      <div className="output-block">
+                        {apkInstallSummary.length === 0 ? (
+                          <p className="muted">No installs yet.</p>
+                        ) : (
+                          <pre>{apkInstallSummary.join("\n")}</pre>
+                        )}
                       </div>
                     </section>
                   </div>
@@ -1632,37 +2319,308 @@ function App() {
                   <div className="page-header">
                     <div>
                       <h1>Logcat</h1>
-                      <p className="muted">Compact stream view with filters.</p>
+                      <p className="muted">Filters, presets, and search for streaming logs.</p>
                     </div>
                   </div>
                   <section className="panel">
                     <div className="panel-header">
-                      <h2>Logcat</h2>
-                      <span>{activeSerial ?? "No device selected"}</span>
-                    </div>
-                    <div className="form-row">
-                      <label>Filter</label>
-                      <input
-                        value={logcatFilter}
-                        onChange={(event) => setLogcatFilter(event.target.value)}
-                        placeholder="e.g. ActivityManager:D *:S"
-                      />
-                      <div className="button-row compact">
-                        <button onClick={handleLogcatStart} disabled={busy}>
-                          Start
-                        </button>
-                        <button onClick={handleLogcatStop} disabled={busy}>
-                          Stop
-                        </button>
-                        <button onClick={handleLogcatClear} disabled={busy}>
-                          Clear
-                        </button>
+                      <div>
+                        <h2>Logcat Stream</h2>
+                        <span>{activeSerial ?? "No device selected"}</span>
                       </div>
                     </div>
-                    <div className="logcat-output">
-                      {(activeSerial ? logcatLines[activeSerial] ?? [] : []).map((line, index) => (
-                        <div key={`${line}-${index}`}>{line}</div>
-                      ))}
+                    <div className="logcat-toolbar">
+                      <div className="logcat-toolbar-row">
+                        <div className="logcat-toolbar-cluster">
+                          <div className="logcat-button-group">
+                            <button onClick={handleLogcatStart} disabled={busy}>
+                              Start
+                            </button>
+                            <button onClick={handleLogcatStop} disabled={busy}>
+                              Stop
+                            </button>
+                          </div>
+                          <div className="logcat-button-group">
+                            <button onClick={handleLogcatClearBuffer} disabled={busy}>
+                              Clear Buffer
+                            </button>
+                            <button className="ghost" onClick={handleLogcatClearView} disabled={busy}>
+                              Clear View
+                            </button>
+                            <button className="ghost" onClick={handleLogcatExport} disabled={busy}>
+                              Export
+                            </button>
+                          </div>
+                          <button className="ghost" onClick={toggleLogcatAdvanced}>
+                            {logcatAdvancedOpen ? "Hide Advanced" : "Advanced"}
+                          </button>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={logcatAutoScroll}
+                              onChange={(event) => setLogcatAutoScroll(event.target.checked)}
+                            />
+                            Follow newest
+                          </label>
+                        </div>
+                      </div>
+                      <div className="logcat-toolbar-row">
+                        <div className="logcat-toolbar-group logcat-source-group">
+                          <div className="logcat-label-row">
+                            <span>Source</span>
+                            <span className="muted">
+                              Active: {logcatActiveFilterSummary || "All"}
+                            </span>
+                          </div>
+                          <div className="inline-row">
+                            <select
+                              value={logcatSourceMode}
+                              onChange={(event) =>
+                                setLogcatSourceMode(event.target.value as LogcatSourceMode)
+                              }
+                            >
+                              <option value="tag">Tag</option>
+                              <option value="package">Package</option>
+                              <option value="raw">Raw</option>
+                            </select>
+                            <input
+                              value={logcatSourceValue}
+                              onChange={(event) => setLogcatSourceValue(event.target.value)}
+                              placeholder={
+                                logcatSourceMode === "raw"
+                                  ? "ActivityManager:D *:S"
+                                  : logcatSourceMode === "package"
+                                    ? "com.example.app"
+                                    : "ActivityManager"
+                              }
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    {logcatAdvancedOpen && (
+                      <div className="logcat-advanced">
+                        <div className="panel-sub">
+                          <h3>Levels</h3>
+                          <div className="toggle-group">
+                            {(["V", "D", "I", "W", "E", "F"] as const).map((level) => (
+                              <label key={level} className="toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={logcatLevels[level]}
+                                  onChange={(event) =>
+                                    setLogcatLevels((prev) => ({
+                                      ...prev,
+                                      [level]: event.target.checked,
+                                    }))
+                                  }
+                                />
+                                {level}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="panel-sub">
+                          <h3>Search Options</h3>
+                          <div className="toggle-group">
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={logcatSearchRegex}
+                                onChange={(event) => setLogcatSearchRegex(event.target.checked)}
+                              />
+                              Regex
+                            </label>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={logcatSearchCaseSensitive}
+                                onChange={(event) => setLogcatSearchCaseSensitive(event.target.checked)}
+                              />
+                              Case sensitive
+                            </label>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={logcatSearchOnly}
+                                onChange={(event) => setLogcatSearchOnly(event.target.checked)}
+                              />
+                              Matches only
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    <div className="logcat-filter-grid">
+                      <div className="panel-sub logcat-filter-combined">
+                        <div className="logcat-filter-split">
+                          <div className="logcat-filter-section">
+                            <h3 title="Use regex to refine the stream.">Live Filter</h3>
+                            <div className="form-row">
+                              <label>Pattern</label>
+                              <input
+                                value={logcatLiveFilter}
+                                onChange={(event) => setLogcatLiveFilter(event.target.value)}
+                                placeholder="e.g. ActivityManager|AndroidRuntime"
+                              />
+                              <button type="button" onClick={addActiveLogcatFilter} disabled={busy}>
+                                Add
+                              </button>
+                            </div>
+                          </div>
+                          <div className="logcat-filter-section">
+                            <div className="logcat-filter-header">
+                              <h3 title="Applied in real time.">Active Filters</h3>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => setLogcatFiltersExpanded((prev) => !prev)}
+                              >
+                                {logcatFiltersExpanded ? "Hide" : "Expand"}
+                              </button>
+                            </div>
+                            <p className="muted">
+                              {logcatActiveFilters.length ? `${logcatActiveFilters.length} filters` : "No filters"}
+                            </p>
+                            {logcatFiltersExpanded && (
+                              <>
+                                {logcatActiveFilters.length === 0 ? (
+                                  <p className="muted">No active filters</p>
+                                ) : (
+                                  <div className="filter-chip-list">
+                                    {logcatActiveFilters.map((pattern) => (
+                                      <button
+                                        key={pattern}
+                                        type="button"
+                                        className="filter-chip"
+                                        onClick={() => removeActiveLogcatFilter(pattern)}
+                                      >
+                                        {pattern}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="button-row compact">
+                                  <button type="button" className="ghost" onClick={clearActiveLogcatFilters}>
+                                    Clear
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="panel-sub logcat-presets">
+                        <h3>Presets</h3>
+                        <div className="logcat-preset-row single">
+                          <label>Preset</label>
+                          <select
+                            value={logcatPresetSelected}
+                            onChange={(event) => setLogcatPresetSelected(event.target.value)}
+                          >
+                            <option value="">Select preset</option>
+                            {logcatPresets.map((preset) => (
+                              <option key={preset.name} value={preset.name}>
+                                {preset.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (logcatPresetSelected) {
+                                applyLogcatPreset(logcatPresetSelected);
+                              }
+                            }}
+                            disabled={busy || !selectedLogcatPreset}
+                          >
+                            Apply
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              if (logcatPresetSelected) {
+                                deleteLogcatPreset(logcatPresetSelected);
+                              }
+                            }}
+                            disabled={busy || !selectedLogcatPreset}
+                          >
+                            Delete
+                          </button>
+                          <label>New</label>
+                          <input
+                            value={logcatPresetName}
+                            onChange={(event) => setLogcatPresetName(event.target.value)}
+                            placeholder="e.g. Crash Only"
+                          />
+                          <button type="button" onClick={saveLogcatPreset} disabled={busy}>
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    {logcatLastExport && (
+                      <div className="inline-alert info">
+                        <strong>Exported</strong>
+                        <span>{logcatLastExport}</span>
+                      </div>
+                    )}
+                    <div className="logcat-output-wrapper">
+                      {logcatSearchOpen ? (
+                        <div className="logcat-search-overlay">
+                          <div className="logcat-search-header">
+                            <span>Search</span>
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => setLogcatSearchOpen(false)}
+                            >
+                              Close
+                            </button>
+                          </div>
+                          <div className="inline-row">
+                            <input
+                              value={logcatSearchTerm}
+                              onChange={(event) => setLogcatSearchTerm(event.target.value)}
+                              placeholder="Find in logs..."
+                            />
+                            <div className="button-row compact">
+                              <button type="button" onClick={handleLogcatPrevMatch} disabled={busy}>
+                                Prev
+                              </button>
+                              <button type="button" onClick={handleLogcatNextMatch} disabled={busy}>
+                                Next
+                              </button>
+                            </div>
+                          </div>
+                          <span className="muted">
+                            Match {logcatFiltered.matchIndices.length ? logcatMatchIndex + 1 : 0} /{" "}
+                            {logcatFiltered.matchIndices.length}
+                          </span>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="logcat-search-toggle"
+                          onClick={() => setLogcatSearchOpen(true)}
+                          aria-label="Open search"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path
+                              d="M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zm0-2a9 9 0 1 0 5.65 16.02l4.66 4.66a1 1 0 0 0 1.41-1.41l-4.66-4.66A9 9 0 0 0 11 2z"
+                              fill="currentColor"
+                            />
+                          </svg>
+                        </button>
+                      )}
+                      <div className="logcat-output" ref={logcatOutputRef}>
+                        {logcatFiltered.lines.map((line, index) => (
+                          <div key={`${line}-${index}`} data-log-index={index}>
+                            {renderLogcatLine(line)}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </section>
                 </div>
@@ -1675,18 +2633,21 @@ function App() {
                   <div className="page-header">
                     <div>
                       <h1>UI Inspector</h1>
-                      <p className="muted">Capture hierarchy or launch live mirror.</p>
+                      <p className="muted">Capture hierarchy, inspect XML, and export assets.</p>
                     </div>
                   </div>
                   <section className="panel">
                     <div className="panel-header">
                       <div>
-                        <h2>UI Inspector</h2>
+                        <h2>Inspector Workspace</h2>
                         <span>{activeSerial ?? "No device selected"}</span>
                       </div>
                       <div className="button-row compact">
                         <button onClick={handleUiInspect} disabled={busy}>
-                          Capture
+                          Refresh
+                        </button>
+                        <button className="ghost" onClick={handleUiExport} disabled={busy}>
+                          Export
                         </button>
                         <button
                           className="ghost"
@@ -1700,11 +2661,89 @@ function App() {
                     {!scrcpyInfo?.available && (
                       <p className="muted">Live mirror requires scrcpy. Install it and try again.</p>
                     )}
-                    {uiHtml ? (
-                      <iframe title="UI Inspector" srcDoc={uiHtml} className="ui-frame" />
-                    ) : (
-                      <p className="muted">Capture UI hierarchy to preview the structure.</p>
+                    {uiExportResult && (
+                      <div className="inline-alert info">
+                        <strong>Exported</strong>
+                        <span>{uiExportResult}</span>
+                      </div>
                     )}
+                    <div className="split inspector-split">
+                      <div className="panel-sub">
+                        <div className="panel-header">
+                          <h3>Screenshot</h3>
+                          <span className="muted">
+                            {uiScreenshotPath ? "Captured" : "No screenshot"}
+                          </span>
+                        </div>
+                        <div className="form-row">
+                          <label>Zoom</label>
+                          <input
+                            type="range"
+                            min={0.5}
+                            max={2}
+                            step={0.1}
+                            value={uiZoom}
+                            onChange={(event) => setUiZoom(Number(event.target.value))}
+                          />
+                          <span className="muted">{Math.round(uiZoom * 100)}%</span>
+                        </div>
+                        <div className="preview-panel inspector-preview">
+                          {uiScreenshotSrc ? (
+                            <img
+                              src={uiScreenshotSrc}
+                              alt="UI Screenshot"
+                              style={{ transform: `scale(${uiZoom})`, transformOrigin: "top left" }}
+                            />
+                          ) : (
+                            <p className="muted">Capture UI hierarchy to include a screenshot.</p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="panel-sub">
+                        <div className="panel-header">
+                          <h3>Hierarchy</h3>
+                          <div className="toggle-group">
+                            <button
+                              type="button"
+                              className={`toggle ${uiInspectorTab === "hierarchy" ? "active" : ""}`}
+                              onClick={() => setUiInspectorTab("hierarchy")}
+                            >
+                              Tree
+                            </button>
+                            <button
+                              type="button"
+                              className={`toggle ${uiInspectorTab === "xml" ? "active" : ""}`}
+                              onClick={() => setUiInspectorTab("xml")}
+                            >
+                              XML
+                            </button>
+                          </div>
+                        </div>
+                        <div className="form-row">
+                          <label>Search</label>
+                          <input
+                            value={uiInspectorSearch}
+                            onChange={(event) => setUiInspectorSearch(event.target.value)}
+                            placeholder="Filter XML lines"
+                          />
+                        </div>
+                        {uiInspectorTab === "hierarchy" ? (
+                          uiHtml ? (
+                            <iframe title="UI Inspector" srcDoc={uiHtml} className="ui-frame" />
+                          ) : (
+                            <p className="muted">Capture UI hierarchy to preview the structure.</p>
+                          )
+                        ) : (
+                          <div className="output-block inspector-xml">
+                            {filteredUiXml ? (
+                              <pre>{filteredUiXml}</pre>
+                            ) : (
+                              <p className="muted">No XML captured.</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </section>
                 </div>
               }
@@ -2335,75 +3374,6 @@ function App() {
             {actionForm.actionId === "logcat-clear" && (
               <div className="stack">
                 <p className="muted">This clears the logcat buffer for the active device.</p>
-              </div>
-            )}
-
-            {actionForm.actionId === "install-apk" && (
-              <div className="stack">
-                <label>
-                  APK Path
-                  <div className="inline-row">
-                    <input
-                      value={apkPath}
-                      onChange={(event) => setApkPath(event.target.value)}
-                      placeholder="Select an APK file"
-                    />
-                    <button
-                      className="ghost"
-                      onClick={async () => {
-                        const selected = await openDialog({
-                          title: "Select APK",
-                          multiple: false,
-                          filters: [{ name: "APK", extensions: ["apk"] }],
-                        });
-                        if (selected && !Array.isArray(selected)) {
-                          setApkPath(selected);
-                        }
-                      }}
-                      disabled={busy}
-                    >
-                      Browse
-                    </button>
-                  </div>
-                </label>
-                <div className="grid-two">
-                  <label className="toggle">
-                    <input type="checkbox" checked={apkReplace} onChange={(event) => setApkReplace(event.target.checked)} />
-                    Replace existing
-                  </label>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={apkAllowDowngrade}
-                      onChange={(event) => setApkAllowDowngrade(event.target.checked)}
-                    />
-                    Allow downgrade
-                  </label>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={apkGrant}
-                      onChange={(event) => setApkGrant(event.target.checked)}
-                    />
-                    Grant permissions
-                  </label>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={apkAllowTest}
-                      onChange={(event) => setApkAllowTest(event.target.checked)}
-                    />
-                    Allow test packages
-                  </label>
-                </div>
-                <label>
-                  Extra Args
-                  <input
-                    value={apkExtraArgs}
-                    onChange={(event) => setApkExtraArgs(event.target.value)}
-                    placeholder="e.g. --force-queryable"
-                  />
-                </label>
               </div>
             )}
 
