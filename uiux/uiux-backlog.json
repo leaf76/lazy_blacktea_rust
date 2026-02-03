@@ -1,0 +1,115 @@
+[
+  {
+    "priority": "P0",
+    "item": "App Shell + Global Device Context",
+    "desc": "Sidebar navigation, top bar with device selector, status, and command palette entry.",
+    "acceptance": [
+      "Device selector visible on all screens.",
+      "Sidebar includes core modules only.",
+      "No-device state disables device-specific modules."
+    ]
+  },
+  {
+    "priority": "P0",
+    "item": "Onboarding & Empty States",
+    "desc": "First-run guidance for ADB, device connection, and next steps.",
+    "acceptance": [
+      "Shows ADB missing instructions when required.",
+      "Connect device checklist present on home.",
+      "Actionable error guidance for unauthorized devices."
+    ]
+  },
+  {
+    "priority": "P1",
+    "item": "Wireless ADB Pairing",
+    "desc": "Pairing flow for QR or pairing code with clear status feedback.",
+    "acceptance": [
+      "Pairing entry point available from empty state and top bar.",
+      "Shows pairing progress and success/failure states.",
+      "Paired device becomes selectable immediately."
+    ]
+  },
+  {
+    "priority": "P1",
+    "item": "Dashboard Quick Actions",
+    "desc": "Grid of most common actions + recent packages/log filters.",
+    "acceptance": [
+      "At least 6 quick actions available.",
+      "Recent packages list is visible and actionable."
+    ]
+  },
+  {
+    "priority": "P1",
+    "item": "Actions Catalog",
+    "desc": "Categorized action list with advanced toggle and input validation.",
+    "acceptance": [
+      "Advanced actions hidden by default.",
+      "Inputs validated before execution."
+    ]
+  },
+  {
+    "priority": "P1",
+    "item": "Logcat Viewer",
+    "desc": "Virtualized list, filters, pause/resume, and keyboard shortcuts.",
+    "acceptance": [
+      "Log list remains responsive under heavy output.",
+      "Filters by level and tag.",
+      "Pause/Resume accessible by keyboard."
+    ]
+  },
+  {
+    "priority": "P1",
+    "item": "File Manager",
+    "desc": "Two-pane file browser with push/pull and context menu.",
+    "acceptance": [
+      "Push/pull supports drag & drop and toolbar buttons.",
+      "Breadcrumbs and current path visible."
+    ]
+  },
+  {
+    "priority": "P2",
+    "item": "UI Inspector",
+    "desc": "Screenshot canvas + node tree + properties panel.",
+    "acceptance": [
+      "Hover/selection sync between canvas and tree.",
+      "Export XML and refresh controls present."
+    ]
+  },
+  {
+    "priority": "P2",
+    "item": "UI Inspector Live Mirror",
+    "desc": "Optional live mirror mode (scrcpy or equivalent) with a safe fallback to static capture.",
+    "acceptance": [
+      "Live mirror can be toggled on/off.",
+      "Static capture remains available if mirror fails.",
+      "Clear error messaging if mirror dependencies are missing."
+    ]
+  },
+  {
+    "priority": "P2",
+    "item": "Apps Manager",
+    "desc": "Searchable package list with common actions.",
+    "acceptance": [
+      "Search and filter work instantly.",
+      "Launch, clear data, uninstall are accessible."
+    ]
+  },
+  {
+    "priority": "P2",
+    "item": "Command Palette",
+    "desc": "Global search and action launcher (Cmd/Ctrl+K).",
+    "acceptance": [
+      "Open palette from any screen.",
+      "Supports device switch and common actions."
+    ]
+  },
+  {
+    "priority": "P3",
+    "item": "Theme + Accessibility Settings",
+    "desc": "Light/dark toggle, font scaling, and shortcut reference.",
+    "acceptance": [
+      "Theme toggle persists.",
+      "Keyboard shortcuts are listed and searchable."
+    ]
+  }
+]

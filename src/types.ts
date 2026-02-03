@@ -43,6 +43,12 @@ export type CommandResult = {
   exit_code?: number | null;
 };
 
+export type HostCommandResult = {
+  stdout: string;
+  stderr: string;
+  exit_code?: number | null;
+};
+
 export type CommandResponse<T> = {
   trace_id: string;
   data: T;

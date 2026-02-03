@@ -12,6 +12,7 @@ Lazy Blacktea is a desktop console for Android device automation. This edition u
 - Logcat streaming, clear, and filters
 - Device file browsing, pull, and preview
 - UI hierarchy capture and HTML rendering
+- Wireless ADB pairing helper (QR/pairing code flow)
 - App management (list, uninstall, force stop, clear data, enable/disable, open info)
 - Bugreport generation with streaming progress and cancel
 - Bluetooth monitor (snapshot + log events)
@@ -35,6 +36,7 @@ npm run tauri dev
 ## Commands
 
 ```bash
+npm run test
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all --all-features
@@ -45,3 +47,12 @@ cargo test --all --all-features
 - Configuration is stored at `~/.lazy_blacktea_config.json`.
 - Logs are JSON-formatted in release builds.
 - Default output paths can be configured in Settings.
+- App shell + routing are implemented in `src/App.tsx` with `HashRouter` in `src/main.tsx`.
+- UI layout uses compact density, grouped sidebar navigation, and a device status top bar.
+- Theme follows system light/dark via CSS variables in `src/App.css`.
+
+## UI/UX Planning
+
+- `brief.md` captures the redesign brief and assumptions.
+- `uiux/` contains the generated UI/UX artifacts (plan, audit, tokens, backlog).
+- Decisions captured: wireless ADB pairing and live UI inspector mirror support.

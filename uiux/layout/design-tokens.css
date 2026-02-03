@@ -1,0 +1,24 @@
+/* Fallback token export (prefer design_tokens.css_variables from Gemini). */
+:root {
+  --colors-bg-app: var(--bg-app);
+  --colors-bg-panel: var(--bg-panel);
+  --colors-text-primary: var(--text-primary);
+  --colors-text-secondary: var(--text-secondary);
+  --colors-text-mono: var(--text-mono);
+  --colors-accent: var(--accent-color);
+  --colors-border: var(--border-color);
+  --colors-log-debug: #3B82F6;
+  --colors-log-info: #10B981;
+  --colors-log-warn: #F59E0B;
+  --colors-log-error: #EF4444;
+  --typography-font-family-ui: system-ui, -apple-system, sans-serif;
+  --typography-font-family-code: 'JetBrains Mono', 'Fira Code', monospace;
+  --typography-size-sm: 11px;
+  --typography-size-md: 13px;
+  --typography-size-lg: 15px;
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+}

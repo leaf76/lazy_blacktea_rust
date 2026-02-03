@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
+import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { open as openExternal } from "@tauri-apps/plugin-opener";
+import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   AppConfig,
   AppInfo,
@@ -14,6 +15,8 @@ import type {
   ScrcpyInfo,
 } from "./types";
 import {
+  adbConnect,
+  adbPair,
   cancelBugreport,
   captureScreenshot,
   captureUiHierarchy,
@@ -46,25 +49,36 @@ import {
   stopScreenRecord,
   uninstallApp,
 } from "./api";
+import {
+  initialPairingState,
+  pairingReducer,
+  parseAdbPairOutput,
+  parseQrPayload,
+} from "./pairing";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
 type BugreportProgress = { serial: string; progress: number; trace_id: string };
+type QuickActionId =
+  | "screenshot"
+  | "reboot"
+  | "record"
+  | "logcat-clear"
+  | "install-apk"
+  | "mirror";
+type ActionFormState = {
+  isOpen: boolean;
+  actionId: QuickActionId | null;
+  errors: string[];
+};
 
-const tabList = [
-  "Devices",
-  "Commands",
-  "Install",
-  "Files",
-  "Logcat",
-  "Apps",
-  "Bugreport",
-  "Bluetooth",
-  "Settings",
-] as const;
+const initialActionFormState: ActionFormState = {
+  isOpen: false,
+  actionId: null,
+  errors: [],
+};
 
 function App() {
-  const [activeTab, setActiveTab] = useState<(typeof tabList)[number]>("Devices");
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
   const [shellCommand, setShellCommand] = useState("");
@@ -99,8 +113,99 @@ function App() {
   const [bluetoothState, setBluetoothStateText] = useState<string>("");
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [pairingState, dispatchPairing] = useReducer(pairingReducer, initialPairingState);
+  const [actionForm, setActionForm] = useState<ActionFormState>(initialActionFormState);
+  const [actionOutputDir, setActionOutputDir] = useState("");
+  const [actionRebootMode, setActionRebootMode] = useState("normal");
+  const [actionDraftConfig, setActionDraftConfig] = useState<AppConfig | null>(null);
 
+  const navigate = useNavigate();
   const activeSerial = selectedSerials[0];
+  const activeDevice = useMemo(
+    () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
+    [devices, activeSerial],
+  );
+  const hasDevices = devices.length > 0;
+  const deviceStatus = activeDevice?.summary.state ?? "offline";
+  const deviceStatusLabel = useMemo(() => {
+    if (!activeSerial) {
+      return "No device";
+    }
+    if (deviceStatus === "device") {
+      return "Online";
+    }
+    if (deviceStatus === "unauthorized") {
+      return "Unauthorized";
+    }
+    if (deviceStatus === "offline") {
+      return "Offline";
+    }
+    return deviceStatus;
+  }, [activeSerial, deviceStatus]);
+  const deviceStatusTone = useMemo(() => {
+    if (!activeSerial) {
+      return "idle";
+    }
+    if (deviceStatus === "device") {
+      return "ok";
+    }
+    if (deviceStatus === "unauthorized") {
+      return "error";
+    }
+    return "warn";
+  }, [activeSerial, deviceStatus]);
+
+  const handleSelectActiveSerial = (serial: string) => {
+    if (!serial) {
+      return;
+    }
+    setSelectedSerials((prev) => {
+      const remaining = prev.filter((item) => item !== serial);
+      return [serial, ...remaining];
+    });
+  };
+
+  const openPairingModal = () => dispatchPairing({ type: "OPEN" });
+  const closePairingModal = () => dispatchPairing({ type: "CLOSE" });
+
+  const openActionForm = (actionId: QuickActionId) => {
+    setActionForm({ isOpen: true, actionId, errors: [] });
+    setActionOutputDir(config?.output_path ?? "");
+    setActionRebootMode("normal");
+    setActionDraftConfig(config ? (JSON.parse(JSON.stringify(config)) as AppConfig) : null);
+  };
+
+  const closeActionForm = () => setActionForm(initialActionFormState);
+
+  const validateHostPort = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "Address is required (host:port).";
+    }
+    const [host, port] = trimmed.split(":");
+    if (!host || !port) {
+      return "Use host:port format.";
+    }
+    if (!Number.isInteger(Number(port)) || Number(port) <= 0) {
+      return "Port must be a positive number.";
+    }
+    return null;
+  };
+
+  const validatePairingCode = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "Pairing code is required.";
+    }
+    if (!/^[0-9]{6}$/.test(trimmed)) {
+      return "Pairing code should be 6 digits.";
+    }
+    return null;
+  };
+
+  const updateDraftConfig = (updater: (current: AppConfig) => AppConfig) => {
+    setActionDraftConfig((prev) => (prev ? updater(prev) : prev));
+  };
 
   const pushToast = (message: string, tone: Toast["tone"]) => {
     const id = crypto.randomUUID();
@@ -120,6 +225,58 @@ function App() {
       );
     } catch (error) {
       pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePairSubmit = async () => {
+    const addressError = validateHostPort(pairingState.pairAddress);
+    const codeError = validatePairingCode(pairingState.pairingCode);
+    if (addressError || codeError) {
+      dispatchPairing({ type: "PAIR_ERROR", error: [addressError, codeError].filter(Boolean).join(" ") });
+      return;
+    }
+    setBusy(true);
+    dispatchPairing({ type: "PAIR_START" });
+    try {
+      const response = await adbPair(pairingState.pairAddress.trim(), pairingState.pairingCode.trim());
+      const combined = `${response.data.stdout}\n${response.data.stderr}`;
+      const parsed = parseAdbPairOutput(combined);
+      const message = parsed.message || response.data.stdout.trim() || "Paired successfully.";
+      dispatchPairing({
+        type: "PAIR_SUCCESS",
+        message,
+        connectAddress: parsed.connectAddress || pairingState.connectAddress,
+      });
+      pushToast("Wireless pairing succeeded.", "info");
+    } catch (error) {
+      const message = formatError(error);
+      dispatchPairing({ type: "PAIR_ERROR", error: message });
+      pushToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConnectSubmit = async () => {
+    const addressError = validateHostPort(pairingState.connectAddress);
+    if (addressError) {
+      dispatchPairing({ type: "CONNECT_ERROR", error: addressError });
+      return;
+    }
+    setBusy(true);
+    dispatchPairing({ type: "CONNECT_START" });
+    try {
+      const response = await adbConnect(pairingState.connectAddress.trim());
+      const message = response.data.stdout.trim() || "Connected.";
+      dispatchPairing({ type: "CONNECT_SUCCESS", message });
+      pushToast("Wireless connect succeeded.", "info");
+      await refreshDevices();
+    } catch (error) {
+      const message = formatError(error);
+      dispatchPairing({ type: "CONNECT_ERROR", error: message });
+      pushToast(message, "error");
     } finally {
       setBusy(false);
     }
@@ -375,84 +532,6 @@ function App() {
     }
   };
 
-  const handleScreenshot = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for screenshot.", "error");
-      return;
-    }
-    let outputDir = config?.output_path || "";
-    if (!outputDir) {
-      const selected = await openDialog({
-        title: "Select output folder",
-        directory: true,
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        return;
-      }
-      outputDir = selected;
-    }
-    setBusy(true);
-    try {
-      const response = await captureScreenshot(activeSerial, outputDir);
-      pushToast(`Screenshot saved to ${response.data}`, "info");
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleScreenRecordStart = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for screen record.", "error");
-      return;
-    }
-    setBusy(true);
-    try {
-      const response = await startScreenRecord(activeSerial);
-      setScreenRecordRemote(response.data);
-      pushToast("Screen recording started.", "info");
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleScreenRecordStop = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for screen record.", "error");
-      return;
-    }
-    let outputDir = config?.output_path || "";
-    if (!outputDir) {
-      const selected = await openDialog({
-        title: "Select output folder",
-        directory: true,
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        return;
-      }
-      outputDir = selected;
-    }
-    setBusy(true);
-    try {
-      const response = await stopScreenRecord(activeSerial, outputDir);
-      setScreenRecordRemote(null);
-      if (response.data) {
-        pushToast(`Recording saved to ${response.data}`, "info");
-      } else {
-        pushToast("Screen recording stopped.", "info");
-      }
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const handleBugreport = async () => {
     if (!activeSerial) {
       pushToast("Select one device for bugreport.", "error");
@@ -680,6 +759,122 @@ function App() {
     }
   };
 
+  const resolveOutputDir = async (value: string) => {
+    let outputDir = value.trim();
+    if (!outputDir) {
+      outputDir = config?.output_path ?? "";
+    }
+    if (!outputDir) {
+      const selected = await openDialog({
+        title: "Select output folder",
+        directory: true,
+        multiple: false,
+      });
+      if (!selected || Array.isArray(selected)) {
+        return null;
+      }
+      outputDir = selected;
+    }
+    return outputDir;
+  };
+
+  const persistActionConfig = async () => {
+    if (!actionDraftConfig) {
+      return;
+    }
+    const updated = {
+      ...actionDraftConfig,
+      device_groups: expandGroups(groupMap),
+    };
+    const response = await saveConfig(updated);
+    setConfig(response.data);
+    setGroupMap(flattenGroups(response.data.device_groups));
+  };
+
+  const handleActionSubmit = async () => {
+    if (!actionForm.actionId) {
+      return;
+    }
+    const errors: string[] = [];
+    if (actionForm.actionId !== "install-apk" && !activeSerial && actionForm.actionId !== "reboot") {
+      errors.push("Select an active device to run this action.");
+    }
+    if (actionForm.actionId === "reboot" && !selectedSerials.length) {
+      errors.push("Select at least one device to reboot.");
+    }
+    if (actionForm.actionId === "install-apk" && !selectedSerials.length) {
+      errors.push("Select at least one device to install.");
+    }
+    if (actionForm.actionId === "install-apk" && !apkPath.trim()) {
+      errors.push("Select an APK file before installing.");
+    }
+    if (actionForm.actionId === "screenshot" && !actionOutputDir.trim() && !config?.output_path) {
+      errors.push("Select an output folder for screenshots.");
+    }
+    if (actionForm.actionId === "record" && screenRecordRemote && !actionOutputDir.trim() && !config?.output_path) {
+      errors.push("Select an output folder for recordings.");
+    }
+    if (actionForm.actionId === "mirror" && !scrcpyInfo?.available) {
+      errors.push("scrcpy is not available. Install it to enable live mirror.");
+    }
+    if (
+      (actionForm.actionId === "screenshot" ||
+        actionForm.actionId === "record" ||
+        actionForm.actionId === "mirror") &&
+      !actionDraftConfig
+    ) {
+      errors.push("Settings are still loading. Try again in a moment.");
+    }
+    if (errors.length) {
+      setActionForm((prev) => ({ ...prev, errors }));
+      return;
+    }
+
+    setBusy(true);
+    setActionForm((prev) => ({ ...prev, errors: [] }));
+    try {
+      if (actionForm.actionId === "screenshot") {
+        await persistActionConfig();
+        const outputDir = await resolveOutputDir(actionOutputDir);
+        if (!outputDir) {
+          return;
+        }
+        const response = await captureScreenshot(activeSerial!, outputDir);
+        pushToast(`Screenshot saved to ${response.data}`, "info");
+      } else if (actionForm.actionId === "reboot") {
+        await handleReboot(actionRebootMode === "normal" ? undefined : actionRebootMode);
+      } else if (actionForm.actionId === "record") {
+        await persistActionConfig();
+        if (screenRecordRemote) {
+          const outputDir = await resolveOutputDir(actionOutputDir);
+          if (!outputDir) {
+            return;
+          }
+          const response = await stopScreenRecord(activeSerial!, outputDir);
+          setScreenRecordRemote(null);
+          pushToast(response.data ? `Recording saved to ${response.data}` : "Screen recording stopped.", "info");
+        } else {
+          const response = await startScreenRecord(activeSerial!);
+          setScreenRecordRemote(response.data);
+          pushToast("Screen recording started.", "info");
+        }
+      } else if (actionForm.actionId === "logcat-clear") {
+        await clearLogcat(activeSerial!);
+        pushToast("Logcat cleared.", "info");
+      } else if (actionForm.actionId === "install-apk") {
+        await handleInstallApk();
+      } else if (actionForm.actionId === "mirror") {
+        await persistActionConfig();
+        await handleScrcpyLaunch();
+      }
+      closeActionForm();
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleBluetoothMonitor = async (enable: boolean) => {
     if (!activeSerial) {
       pushToast("Select one device.", "error");
@@ -785,640 +980,1714 @@ function App() {
     return apps.filter((app) => app.package_name.toLowerCase().includes(query));
   }, [apps, appsFilter]);
 
-  return (
-    <div className="app-shell">
-      <header className="top-bar">
-        <div>
-          <p className="eyebrow">Lazy Blacktea</p>
-          <h1>Device Automation Console</h1>
-          <p className="subtle">Rust + Tauri edition</p>
-        </div>
-        <div className="actions">
-          <button className="ghost" onClick={refreshDevices} disabled={busy}>
-            Refresh Devices
-          </button>
-          <button className="ghost" onClick={handleScrcpyLaunch} disabled={busy || !scrcpyInfo?.available}>
-            Launch scrcpy
-          </button>
-          <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working..." : "Idle"}</span>
-        </div>
-      </header>
+  const dashboardActions = [
+    {
+      id: "screenshot",
+      title: "Screenshot",
+      description: "Capture the current screen to the output folder.",
+      onClick: () => openActionForm("screenshot"),
+      disabled: busy || !activeSerial,
+    },
+    {
+      id: "reboot",
+      title: "Reboot",
+      description: "Restart the active device.",
+      onClick: () => openActionForm("reboot"),
+      disabled: busy || !activeSerial,
+    },
+    {
+      id: "record",
+      title: screenRecordRemote ? "Stop Recording" : "Start Recording",
+      description: screenRecordRemote
+        ? "Finish and save the ongoing screen recording."
+        : "Record the device screen for a short clip.",
+      onClick: () => openActionForm("record"),
+      disabled: busy || !activeSerial,
+    },
+    {
+      id: "logcat-clear",
+      title: "Clear Logcat",
+      description: "Clear the logcat buffer for the active device.",
+      onClick: () => openActionForm("logcat-clear"),
+      disabled: busy || !activeSerial,
+    },
+    {
+      id: "install-apk",
+      title: "Install APK",
+      description: "Install an APK on the selected devices.",
+      onClick: () => openActionForm("install-apk"),
+      disabled: busy || selectedSerials.length === 0,
+    },
+    {
+      id: "mirror",
+      title: "Live Mirror",
+      description: scrcpyInfo?.available
+        ? "Launch scrcpy for a live mirror window."
+        : "Install scrcpy to enable live mirroring.",
+      onClick: () => openActionForm("mirror"),
+      disabled: busy || selectedSerials.length === 0,
+    },
+  ];
 
-      <nav className="tab-bar">
-        {tabList.map((tab) => (
-          <button
-            key={tab}
-            className={`tab ${activeTab === tab ? "active" : ""}`}
-            onClick={() => setActiveTab(tab)}
-          >
-            {tab}
-          </button>
-        ))}
-      </nav>
+  const DashboardView = () => {
+    const detail = activeDevice?.detail;
+    const deviceName =
+      detail?.model ?? activeDevice?.summary.model ?? activeSerial ?? "No device selected";
+    const deviceState = activeDevice?.summary.state ?? "No device";
+    const wifiState =
+      detail?.wifi_is_on == null ? "Unknown" : detail.wifi_is_on ? "On" : "Off";
+    const btState =
+      detail?.bt_is_on == null ? "Unknown" : detail.bt_is_on ? "On" : "Off";
 
-      <main className="tab-panels">
-        {activeTab === "Devices" && (
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <h2>Devices</h2>
-                <span>{devices.length} connected</span>
-              </div>
-              <div className="button-row compact">
-                <button onClick={selectAllVisible} disabled={busy}>
-                  Select Visible
-                </button>
-                <button onClick={clearSelection} disabled={busy}>
-                  Clear
-                </button>
-              </div>
+    if (!hasDevices) {
+      return (
+        <div className="page-section">
+          <div className="page-header">
+            <div>
+              <h1>Dashboard</h1>
+              <p className="muted">Connect a device to unlock quick actions and diagnostics.</p>
             </div>
-            <div className="toolbar">
-              <input
-                value={searchText}
-                onChange={(event) => setSearchText(event.target.value)}
-                placeholder="Search serial or model"
-              />
-              <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}>
-                <option value="all">All groups</option>
-                {groupOptions.map((group) => (
-                  <option key={group} value={group}>
-                    {group}
-                  </option>
-                ))}
-              </select>
-              <input
-                value={groupName}
-                onChange={(event) => setGroupName(event.target.value)}
-                placeholder="Group name"
-              />
-              <button onClick={handleAssignGroup} disabled={busy}>
-                Assign
-              </button>
-            </div>
-            <div className="device-list">
-              {visibleDevices.map((device) => {
-                const serial = device.summary.serial;
-                const detail = device.detail;
-                const wifi = detail?.wifi_is_on;
-                const bt = detail?.bt_is_on;
-                return (
-                  <label key={serial} className={`device-card ${selectedSerials.includes(serial) ? "active" : ""}`}>
-                    <input
-                      type="checkbox"
-                      checked={selectedSerials.includes(serial)}
-                      onChange={() => toggleDevice(serial)}
-                    />
-                    <div className="device-main">
-                      <strong>{detail?.model ?? device.summary.model ?? serial}</strong>
-                      <p>{serial}</p>
-                      {groupMap[serial] && <span className="group-tag">{groupMap[serial]}</span>}
-                    </div>
-                    <div className="device-meta">
-                      <span>{device.summary.state}</span>
-                      <span>{detail?.android_version ? `Android ${detail.android_version}` : "--"}</span>
-                      <span>{detail?.battery_level != null ? `${detail.battery_level}%` : "--"}</span>
-                      <span>{wifi == null ? "WiFi --" : wifi ? "WiFi On" : "WiFi Off"}</span>
-                      <span>{bt == null ? "BT --" : bt ? "BT On" : "BT Off"}</span>
-                    </div>
-                  </label>
-                );
-              })}
+          </div>
+          <section className="panel empty-state">
+            <div>
+              <h2>Connect a device to get started</h2>
+              <p className="muted">
+                Plug in via USB or pair wirelessly. Once connected, you will see the device overview
+                and quick actions here.
+              </p>
+              <ol className="step-list">
+                <li>Enable Developer Options and USB/Wireless Debugging.</li>
+                <li>Connect the device via USB or open Wireless Debugging.</li>
+                <li>Pair using QR or pairing code, then refresh the device list.</li>
+              </ol>
             </div>
             <div className="button-row">
-              <button onClick={() => handleReboot()} disabled={busy}>
-                Reboot
+              <button onClick={openPairingModal} disabled={busy}>
+                Wireless Pairing
               </button>
-              <button onClick={() => handleReboot("recovery")} disabled={busy}>
-                Reboot Recovery
+              <button className="ghost" onClick={refreshDevices} disabled={busy}>
+                Refresh Devices
               </button>
-              <button onClick={() => handleReboot("bootloader")} disabled={busy}>
-                Reboot Bootloader
-              </button>
-              <button onClick={() => handleToggleWifi(true)} disabled={busy}>
-                WiFi On
-              </button>
-              <button onClick={() => handleToggleWifi(false)} disabled={busy}>
-                WiFi Off
-              </button>
-              <button onClick={() => handleToggleBluetooth(true)} disabled={busy}>
-                Bluetooth On
-              </button>
-              <button onClick={() => handleToggleBluetooth(false)} disabled={busy}>
-                Bluetooth Off
-              </button>
-              <button onClick={handleCopyDeviceInfo} disabled={busy}>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    return (
+      <div className="page-section">
+        <div className="page-header">
+          <div>
+            <h1>Dashboard</h1>
+            <p className="muted">Overview, quick actions, and device health.</p>
+          </div>
+          <div className="page-actions">
+            <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+              Manage Devices
+            </button>
+          </div>
+        </div>
+        <div className="dashboard-grid">
+          <section className="panel card">
+            <div className="card-header">
+              <h2>Device Overview</h2>
+              <span className="badge">{deviceState}</span>
+            </div>
+            <div className="device-summary">
+              <div>
+                <p className="eyebrow">Active Device</p>
+                <strong>{deviceName}</strong>
+                <p className="muted">{activeSerial ?? "Select a device"}</p>
+              </div>
+              <div className="summary-grid">
+                <div>
+                  <span className="muted">Android</span>
+                  <strong>{detail?.android_version ?? "--"}</strong>
+                </div>
+                <div>
+                  <span className="muted">API</span>
+                  <strong>{detail?.api_level ?? "--"}</strong>
+                </div>
+                <div>
+                  <span className="muted">Battery</span>
+                  <strong>{detail?.battery_level != null ? `${detail.battery_level}%` : "--"}</strong>
+                </div>
+                <div>
+                  <span className="muted">WiFi</span>
+                  <strong>{wifiState}</strong>
+                </div>
+                <div>
+                  <span className="muted">Bluetooth</span>
+                  <strong>{btState}</strong>
+                </div>
+                <div>
+                  <span className="muted">GMS</span>
+                  <strong>{detail?.gms_version ?? "--"}</strong>
+                </div>
+              </div>
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={handleCopyDeviceInfo} disabled={busy || !activeSerial}>
                 Copy Device Info
               </button>
             </div>
           </section>
-        )}
 
-        {activeTab === "Commands" && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Shell Commands</h2>
-              <span>{activeSerial ?? "No device selected"}</span>
+          <section className="panel card">
+            <div className="card-header">
+              <h2>Quick Actions</h2>
+              <span className="muted">Most used</span>
             </div>
-            {screenRecordRemote && (
-              <p className="muted">Recording in progress: {screenRecordRemote}</p>
-            )}
-            <div className="form-row">
-              <label>Shell Command</label>
-              <input
-                value={shellCommand}
-                onChange={(event) => setShellCommand(event.target.value)}
-                placeholder="e.g. pm list packages"
-              />
-              <button onClick={handleRunShell} disabled={busy}>
-                Run
-              </button>
-            </div>
-            <div className="output-block">
-              <h3>Latest Output</h3>
-              {shellOutput.length === 0 ? (
-                <p className="muted">No output yet.</p>
-              ) : (
-                <pre>{shellOutput.join("\n\n")}</pre>
-              )}
-            </div>
-          </section>
-        )}
-
-        {activeTab === "Install" && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>APK Install</h2>
-              <span>{selectedSerials.length ? `${selectedSerials.length} selected` : "No devices selected"}</span>
-            </div>
-            <div className="form-row">
-              <label>APK Path</label>
-              <input value={apkPath} onChange={(event) => setApkPath(event.target.value)} placeholder="Select an APK file" />
-              <button
-                onClick={async () => {
-                  const selected = await openDialog({
-                    title: "Select APK",
-                    multiple: false,
-                    filters: [{ name: "APK", extensions: ["apk"] }],
-                  });
-                  if (selected && !Array.isArray(selected)) {
-                    setApkPath(selected);
-                  }
-                }}
-                disabled={busy}
-              >
-                Browse
-              </button>
-            </div>
-            <div className="grid-two">
-              <label className="toggle">
-                <input type="checkbox" checked={apkReplace} onChange={(event) => setApkReplace(event.target.checked)} />
-                Replace existing
-              </label>
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={apkAllowDowngrade}
-                  onChange={(event) => setApkAllowDowngrade(event.target.checked)}
-                />
-                Allow downgrade
-              </label>
-              <label className="toggle">
-                <input type="checkbox" checked={apkGrant} onChange={(event) => setApkGrant(event.target.checked)} />
-                Grant permissions
-              </label>
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={apkAllowTest}
-                  onChange={(event) => setApkAllowTest(event.target.checked)}
-                />
-                Allow test packages
-              </label>
-            </div>
-            <div className="form-row">
-              <label>Extra Args</label>
-              <input value={apkExtraArgs} onChange={(event) => setApkExtraArgs(event.target.value)} placeholder="e.g. --force-queryable" />
-              <button onClick={handleInstallApk} disabled={busy}>
-                Install
-              </button>
-            </div>
-          </section>
-        )}
-
-        {activeTab === "Files" && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Device Files</h2>
-              <span>{activeSerial ?? "No device selected"}</span>
-            </div>
-            <div className="form-row">
-              <label>Path</label>
-              <input value={filesPath} onChange={(event) => setFilesPath(event.target.value)} />
-              <button onClick={handleFilesRefresh} disabled={busy}>
-                Load
-              </button>
-            </div>
-            <div className="split">
-              <div className="file-list">
-                {files.length === 0 ? (
-                  <p className="muted">No files loaded.</p>
-                ) : (
-                  files.map((entry) => (
-                    <div key={entry.path} className="file-row">
-                      <div>
-                        <strong>{entry.name}</strong>
-                        <p className="muted">
-                          {entry.is_dir ? "Directory" : "File"} · {entry.size_bytes ?? "--"} bytes
-                        </p>
-                      </div>
-                      {!entry.is_dir && (
-                        <button onClick={() => handleFilePull(entry)} disabled={busy}>
-                          Pull
-                        </button>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-              <div className="preview-panel">
-                <h3>Preview</h3>
-                {filePreview?.is_text && filePreview.preview_text ? (
-                  <pre>{filePreview.preview_text}</pre>
-                ) : (
-                  <p className="muted">
-                    {filePreview
-                      ? `Preview not available (${filePreview.mime_type}).`
-                      : "Pull a file to preview."}
-                  </p>
-                )}
-                {filePreview && (
-                  <button onClick={() => openExternal(filePreview.local_path)} disabled={busy}>
-                    Open Externally
-                  </button>
-                )}
-              </div>
-            </div>
-          </section>
-        )}
-
-        {activeTab === "Logcat" && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Logcat</h2>
-              <span>{activeSerial ?? "No device selected"}</span>
-            </div>
-            <div className="form-row">
-              <label>Filter</label>
-              <input
-                value={logcatFilter}
-                onChange={(event) => setLogcatFilter(event.target.value)}
-                placeholder="e.g. ActivityManager:D *:S"
-              />
-              <div className="button-row compact">
-                <button onClick={handleLogcatStart} disabled={busy}>
-                  Start
+            <div className="quick-actions">
+              {dashboardActions.map((action) => (
+                <button
+                  key={action.id}
+                  className="quick-action"
+                  onClick={action.onClick}
+                  disabled={action.disabled}
+                >
+                  <span>{action.title}</span>
+                  <span className="muted">{action.description}</span>
                 </button>
-                <button onClick={handleLogcatStop} disabled={busy}>
-                  Stop
-                </button>
-                <button onClick={handleLogcatClear} disabled={busy}>
-                  Clear
-                </button>
-              </div>
-            </div>
-            <div className="logcat-output">
-              {(activeSerial ? logcatLines[activeSerial] ?? [] : []).map((line, index) => (
-                <div key={`${line}-${index}`}>{line}</div>
               ))}
             </div>
           </section>
-        )}
 
-        {activeTab === "Apps" && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>App Management</h2>
-              <span>{activeSerial ?? "No device selected"}</span>
+          <section className="panel card">
+            <div className="card-header">
+              <h2>Connection</h2>
+              <span className="muted">{hasDevices ? "Online" : "Offline"}</span>
             </div>
-            <div className="toolbar">
-              <input
-                value={appsFilter}
-                onChange={(event) => setAppsFilter(event.target.value)}
-                placeholder="Search package"
-              />
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={appsThirdPartyOnly}
-                  onChange={(event) => setAppsThirdPartyOnly(event.target.checked)}
-                />
-                Third-party only
-              </label>
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={appsIncludeVersions}
-                  onChange={(event) => setAppsIncludeVersions(event.target.checked)}
-                />
-                Include versions
-              </label>
-              <button onClick={handleLoadApps} disabled={busy}>
-                Load Apps
-              </button>
+            <div className="status-list">
+              <div>
+                <span className="muted">ADB Status</span>
+                <strong>{busy ? "Working" : "Ready"}</strong>
+              </div>
+              <div>
+                <span className="muted">Devices Connected</span>
+                <strong>{devices.length}</strong>
+              </div>
+              <div>
+                <span className="muted">scrcpy</span>
+                <strong>{scrcpyInfo?.available ? "Available" : "Not installed"}</strong>
+              </div>
             </div>
-            <div className="split">
-              <div className="file-list">
-                {filteredApps.map((app) => (
-                  <button
-                    key={app.package_name}
-                    className={`app-row ${selectedApp?.package_name === app.package_name ? "active" : ""}`}
-                    onClick={() => setSelectedApp(app)}
-                  >
-                    <strong>{app.package_name}</strong>
-                    <span>{app.version_name ?? ""}</span>
-                    {app.is_system && <span className="badge">System</span>}
-                  </button>
+            {!scrcpyInfo?.available && (
+              <p className="muted">
+                Install scrcpy to enable live mirror and high-fidelity interaction.
+              </p>
+            )}
+          </section>
+
+          <section className="panel card">
+            <div className="card-header">
+              <h2>Recent Apps</h2>
+              <span className="muted">Quick access</span>
+            </div>
+            {apps.length === 0 ? (
+              <div className="empty-inline">
+                <p className="muted">No app list loaded yet.</p>
+                <button className="ghost" onClick={handleLoadApps} disabled={busy || !activeSerial}>
+                  Load Apps
+                </button>
+              </div>
+            ) : (
+              <div className="list-compact">
+                {apps.slice(0, 5).map((app) => (
+                  <div key={app.package_name} className="list-row">
+                    <div>
+                      <strong>{app.package_name}</strong>
+                      <p className="muted">{app.package_name}</p>
+                    </div>
+                    <button
+                      className="ghost"
+                      onClick={() => {
+                        setSelectedApp(app);
+                        navigate("/apps");
+                      }}
+                    >
+                      Open
+                    </button>
+                  </div>
                 ))}
               </div>
-              <div className="preview-panel">
-                <h3>Selected App</h3>
-                {selectedApp ? (
-                  <div className="stack">
-                    <p>{selectedApp.package_name}</p>
-                    <p className="muted">Version: {selectedApp.version_name ?? "--"}</p>
-                    <div className="button-row">
-                      <button onClick={() => handleAppAction("forceStop")} disabled={busy}>
-                        Force Stop
-                      </button>
-                      <button onClick={() => handleAppAction("clear")} disabled={busy}>
-                        Clear Data
-                      </button>
-                      <button onClick={() => handleAppAction("info")} disabled={busy}>
-                        Open Info
-                      </button>
-                      <button onClick={() => handleAppAction("enable")} disabled={busy}>
-                        Enable
-                      </button>
-                      <button onClick={() => handleAppAction("disable")} disabled={busy}>
-                        Disable
-                      </button>
-                      <button onClick={() => handleAppAction("uninstall")} disabled={busy}>
-                        Uninstall
+            )}
+          </section>
+        </div>
+      </div>
+    );
+  };
+
+  const actionTitleMap: Record<QuickActionId, string> = {
+    screenshot: "Screenshot",
+    reboot: "Reboot",
+    record: screenRecordRemote ? "Stop Recording" : "Start Recording",
+    "logcat-clear": "Clear Logcat",
+    "install-apk": "Install APK",
+    mirror: "Live Mirror",
+  };
+
+  const actionNeedsConfig =
+    actionForm.actionId === "screenshot" ||
+    actionForm.actionId === "record" ||
+    actionForm.actionId === "mirror";
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-title">Lazy Blacktea</span>
+          <span className="brand-subtitle">Device Automation</span>
+        </div>
+        <nav className="nav-links">
+          <div className="nav-group">
+            <span className="nav-title">Connect</span>
+            <NavLink to="/" end>
+              Dashboard
+            </NavLink>
+            <NavLink to="/devices">Device Manager</NavLink>
+            <NavLink to="/bluetooth">Bluetooth Monitor</NavLink>
+          </div>
+          <div className="nav-group">
+            <span className="nav-title">Debug</span>
+            <NavLink to="/logcat">Logcat</NavLink>
+            <NavLink to="/ui-inspector">UI Inspector</NavLink>
+            <NavLink to="/bugreport">Bug Report</NavLink>
+          </div>
+          <div className="nav-group">
+            <span className="nav-title">Manage</span>
+            <NavLink to="/apps">App Manager</NavLink>
+            <NavLink to="/files">File Explorer</NavLink>
+            <NavLink to="/actions">Custom Actions</NavLink>
+          </div>
+          <div className="nav-group">
+            <span className="nav-title">System</span>
+            <NavLink to="/settings">Settings</NavLink>
+          </div>
+        </nav>
+        <div className="sidebar-footer">
+          <button className="ghost" onClick={openPairingModal} disabled={busy}>
+            Connect Device
+          </button>
+          <button className="ghost" onClick={() => navigate("/settings")}>
+            Settings
+          </button>
+          <div className="sidebar-status">
+            <span className={`status-dot ${hasDevices ? "ok" : "warn"}`} />
+            <span>{hasDevices ? `${devices.length} devices` : "No devices"}</span>
+          </div>
+        </div>
+      </aside>
+
+      <div className="app-main">
+        <header className="top-bar">
+          <div className="device-context">
+            <div className="device-selector">
+              <p className="eyebrow">Active Device</p>
+              <select
+                value={activeSerial ?? ""}
+                onChange={(event) => handleSelectActiveSerial(event.target.value)}
+              >
+                <option value="">No device connected</option>
+                {devices.map((device) => (
+                  <option key={device.summary.serial} value={device.summary.serial}>
+                    {device.detail?.model ?? device.summary.model ?? device.summary.serial}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="device-status-row">
+              <span className={`status-pill ${deviceStatusTone}`}>{deviceStatusLabel}</span>
+              <span className="muted">
+                {activeSerial ? `Selected: ${activeSerial}` : "Select a device to enable actions"}
+              </span>
+            </div>
+          </div>
+          <div className="top-actions">
+            <button className="ghost" onClick={() => openActionForm("screenshot")} disabled={busy || !activeSerial}>
+              Screenshot
+            </button>
+            <button className="ghost" onClick={() => openActionForm("reboot")} disabled={busy || !selectedSerials.length}>
+              Reboot
+            </button>
+            <button className="ghost" onClick={openPairingModal} disabled={busy}>
+              Wireless Pairing
+            </button>
+            <button className="ghost" onClick={refreshDevices} disabled={busy}>
+              Refresh
+            </button>
+            <button className="ghost" onClick={() => openActionForm("mirror")} disabled={busy}>
+              Live Mirror
+            </button>
+            <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working..." : "Idle"}</span>
+          </div>
+        </header>
+
+        <main className="page">
+          <Routes>
+            <Route path="/" element={<DashboardView />} />
+            <Route
+              path="/devices"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>Device Manager</h1>
+                      <p className="muted">Organize devices, groups, and connection status.</p>
+                    </div>
+                    <div className="page-actions">
+                      <button className="ghost" onClick={refreshDevices} disabled={busy}>
+                        Refresh Devices
                       </button>
                     </div>
                   </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <div>
+                        <h2>Devices</h2>
+                        <span>{devices.length} connected</span>
+                      </div>
+                      <div className="button-row compact">
+                        <button onClick={selectAllVisible} disabled={busy}>
+                          Select Visible
+                        </button>
+                        <button onClick={clearSelection} disabled={busy}>
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                    <div className="toolbar">
+                      <input
+                        value={searchText}
+                        onChange={(event) => setSearchText(event.target.value)}
+                        placeholder="Search serial or model"
+                      />
+                      <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}>
+                        <option value="all">All groups</option>
+                        {groupOptions.map((group) => (
+                          <option key={group} value={group}>
+                            {group}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        value={groupName}
+                        onChange={(event) => setGroupName(event.target.value)}
+                        placeholder="Group name"
+                      />
+                      <button onClick={handleAssignGroup} disabled={busy}>
+                        Assign
+                      </button>
+                    </div>
+                    <div className="device-list">
+                      {visibleDevices.map((device) => {
+                        const serial = device.summary.serial;
+                        const detail = device.detail;
+                        const wifi = detail?.wifi_is_on;
+                        const bt = detail?.bt_is_on;
+                        return (
+                          <label
+                            key={serial}
+                            className={`device-card ${selectedSerials.includes(serial) ? "active" : ""}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedSerials.includes(serial)}
+                              onChange={() => toggleDevice(serial)}
+                            />
+                            <div className="device-main">
+                              <strong>{detail?.model ?? device.summary.model ?? serial}</strong>
+                              <p>{serial}</p>
+                              {groupMap[serial] && <span className="group-tag">{groupMap[serial]}</span>}
+                            </div>
+                            <div className="device-meta">
+                              <span>{device.summary.state}</span>
+                              <span>{detail?.android_version ? `Android ${detail.android_version}` : "--"}</span>
+                              <span>{detail?.battery_level != null ? `${detail.battery_level}%` : "--"}</span>
+                              <span>{wifi == null ? "WiFi --" : wifi ? "WiFi On" : "WiFi Off"}</span>
+                              <span>{bt == null ? "BT --" : bt ? "BT On" : "BT Off"}</span>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="button-row">
+                      <button onClick={() => handleReboot()} disabled={busy}>
+                        Reboot
+                      </button>
+                      <button onClick={() => handleReboot("recovery")} disabled={busy}>
+                        Reboot Recovery
+                      </button>
+                      <button onClick={() => handleReboot("bootloader")} disabled={busy}>
+                        Reboot Bootloader
+                      </button>
+                      <button onClick={() => handleToggleWifi(true)} disabled={busy}>
+                        WiFi On
+                      </button>
+                      <button onClick={() => handleToggleWifi(false)} disabled={busy}>
+                        WiFi Off
+                      </button>
+                      <button onClick={() => handleToggleBluetooth(true)} disabled={busy}>
+                        Bluetooth On
+                      </button>
+                      <button onClick={() => handleToggleBluetooth(false)} disabled={busy}>
+                        Bluetooth Off
+                      </button>
+                      <button onClick={handleCopyDeviceInfo} disabled={busy}>
+                        Copy Device Info
+                      </button>
+                    </div>
+                  </section>
+                </div>
+              }
+            />
+            <Route
+              path="/actions"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>Custom Actions</h1>
+                      <p className="muted">Run shell commands and batch installs.</p>
+                    </div>
+                  </div>
+                  <div className="stack">
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h2>Shell Commands</h2>
+                        <span>{activeSerial ?? "No device selected"}</span>
+                      </div>
+                      {screenRecordRemote && (
+                        <p className="muted">Recording in progress: {screenRecordRemote}</p>
+                      )}
+                      <div className="form-row">
+                        <label>Shell Command</label>
+                        <input
+                          value={shellCommand}
+                          onChange={(event) => setShellCommand(event.target.value)}
+                          placeholder="e.g. pm list packages"
+                        />
+                        <button onClick={handleRunShell} disabled={busy}>
+                          Run
+                        </button>
+                      </div>
+                      <div className="output-block">
+                        <h3>Latest Output</h3>
+                        {shellOutput.length === 0 ? (
+                          <p className="muted">No output yet.</p>
+                        ) : (
+                          <pre>{shellOutput.join("\n\n")}</pre>
+                        )}
+                      </div>
+                    </section>
+
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h2>APK Install</h2>
+                        <span>{selectedSerials.length ? `${selectedSerials.length} selected` : "No devices selected"}</span>
+                      </div>
+                      <div className="form-row">
+                        <label>APK Path</label>
+                        <input
+                          value={apkPath}
+                          onChange={(event) => setApkPath(event.target.value)}
+                          placeholder="Select an APK file"
+                        />
+                        <button
+                          onClick={async () => {
+                            const selected = await openDialog({
+                              title: "Select APK",
+                              multiple: false,
+                              filters: [{ name: "APK", extensions: ["apk"] }],
+                            });
+                            if (selected && !Array.isArray(selected)) {
+                              setApkPath(selected);
+                            }
+                          }}
+                          disabled={busy}
+                        >
+                          Browse
+                        </button>
+                      </div>
+                      <div className="grid-two">
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={apkReplace}
+                            onChange={(event) => setApkReplace(event.target.checked)}
+                          />
+                          Replace existing
+                        </label>
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={apkAllowDowngrade}
+                            onChange={(event) => setApkAllowDowngrade(event.target.checked)}
+                          />
+                          Allow downgrade
+                        </label>
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={apkGrant}
+                            onChange={(event) => setApkGrant(event.target.checked)}
+                          />
+                          Grant permissions
+                        </label>
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={apkAllowTest}
+                            onChange={(event) => setApkAllowTest(event.target.checked)}
+                          />
+                          Allow test packages
+                        </label>
+                      </div>
+                      <div className="form-row">
+                        <label>Extra Args</label>
+                        <input
+                          value={apkExtraArgs}
+                          onChange={(event) => setApkExtraArgs(event.target.value)}
+                          placeholder="e.g. --force-queryable"
+                        />
+                        <button onClick={handleInstallApk} disabled={busy}>
+                          Install
+                        </button>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              }
+            />
+            <Route
+              path="/files"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>File Explorer</h1>
+                      <p className="muted">Browse device storage and pull files.</p>
+                    </div>
+                  </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <h2>Device Files</h2>
+                      <span>{activeSerial ?? "No device selected"}</span>
+                    </div>
+                    <div className="form-row">
+                      <label>Path</label>
+                      <input value={filesPath} onChange={(event) => setFilesPath(event.target.value)} />
+                      <button onClick={handleFilesRefresh} disabled={busy}>
+                        Load
+                      </button>
+                    </div>
+                    <div className="split">
+                      <div className="file-list">
+                        {files.length === 0 ? (
+                          <p className="muted">No files loaded.</p>
+                        ) : (
+                          files.map((entry) => (
+                            <div key={entry.path} className="file-row">
+                              <div>
+                                <strong>{entry.name}</strong>
+                                <p className="muted">
+                                  {entry.is_dir ? "Directory" : "File"} · {entry.size_bytes ?? "--"} bytes
+                                </p>
+                              </div>
+                              {!entry.is_dir && (
+                                <button onClick={() => handleFilePull(entry)} disabled={busy}>
+                                  Pull
+                                </button>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                      <div className="preview-panel">
+                        <h3>Preview</h3>
+                        {filePreview?.is_text && filePreview.preview_text ? (
+                          <pre>{filePreview.preview_text}</pre>
+                        ) : (
+                          <p className="muted">
+                            {filePreview
+                              ? `Preview not available (${filePreview.mime_type}).`
+                              : "Pull a file to preview."}
+                          </p>
+                        )}
+                        {filePreview && (
+                          <button onClick={() => openPath(filePreview.local_path)} disabled={busy}>
+                            Open Externally
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              }
+            />
+            <Route
+              path="/logcat"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>Logcat</h1>
+                      <p className="muted">Compact stream view with filters.</p>
+                    </div>
+                  </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <h2>Logcat</h2>
+                      <span>{activeSerial ?? "No device selected"}</span>
+                    </div>
+                    <div className="form-row">
+                      <label>Filter</label>
+                      <input
+                        value={logcatFilter}
+                        onChange={(event) => setLogcatFilter(event.target.value)}
+                        placeholder="e.g. ActivityManager:D *:S"
+                      />
+                      <div className="button-row compact">
+                        <button onClick={handleLogcatStart} disabled={busy}>
+                          Start
+                        </button>
+                        <button onClick={handleLogcatStop} disabled={busy}>
+                          Stop
+                        </button>
+                        <button onClick={handleLogcatClear} disabled={busy}>
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                    <div className="logcat-output">
+                      {(activeSerial ? logcatLines[activeSerial] ?? [] : []).map((line, index) => (
+                        <div key={`${line}-${index}`}>{line}</div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+              }
+            />
+            <Route
+              path="/ui-inspector"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>UI Inspector</h1>
+                      <p className="muted">Capture hierarchy or launch live mirror.</p>
+                    </div>
+                  </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <div>
+                        <h2>UI Inspector</h2>
+                        <span>{activeSerial ?? "No device selected"}</span>
+                      </div>
+                      <div className="button-row compact">
+                        <button onClick={handleUiInspect} disabled={busy}>
+                          Capture
+                        </button>
+                        <button
+                          className="ghost"
+                          onClick={handleScrcpyLaunch}
+                          disabled={busy || !scrcpyInfo?.available}
+                        >
+                          Live Mirror
+                        </button>
+                      </div>
+                    </div>
+                    {!scrcpyInfo?.available && (
+                      <p className="muted">Live mirror requires scrcpy. Install it and try again.</p>
+                    )}
+                    {uiHtml ? (
+                      <iframe title="UI Inspector" srcDoc={uiHtml} className="ui-frame" />
+                    ) : (
+                      <p className="muted">Capture UI hierarchy to preview the structure.</p>
+                    )}
+                  </section>
+                </div>
+              }
+            />
+            <Route
+              path="/apps"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>App Manager</h1>
+                      <p className="muted">Search packages and execute common actions.</p>
+                    </div>
+                  </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <h2>App Management</h2>
+                      <span>{activeSerial ?? "No device selected"}</span>
+                    </div>
+                    <div className="toolbar">
+                      <input
+                        value={appsFilter}
+                        onChange={(event) => setAppsFilter(event.target.value)}
+                        placeholder="Search package"
+                      />
+                      <label className="toggle">
+                        <input
+                          type="checkbox"
+                          checked={appsThirdPartyOnly}
+                          onChange={(event) => setAppsThirdPartyOnly(event.target.checked)}
+                        />
+                        Third-party only
+                      </label>
+                      <label className="toggle">
+                        <input
+                          type="checkbox"
+                          checked={appsIncludeVersions}
+                          onChange={(event) => setAppsIncludeVersions(event.target.checked)}
+                        />
+                        Include versions
+                      </label>
+                      <button onClick={handleLoadApps} disabled={busy}>
+                        Load Apps
+                      </button>
+                    </div>
+                    <div className="split">
+                      <div className="file-list">
+                        {filteredApps.map((app) => (
+                          <button
+                            key={app.package_name}
+                            className={`app-row ${selectedApp?.package_name === app.package_name ? "active" : ""}`}
+                            onClick={() => setSelectedApp(app)}
+                          >
+                            <strong>{app.package_name}</strong>
+                            <span>{app.version_name ?? ""}</span>
+                            {app.is_system && <span className="badge">System</span>}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="preview-panel">
+                        <h3>Selected App</h3>
+                        {selectedApp ? (
+                          <div className="stack">
+                            <p>{selectedApp.package_name}</p>
+                            <p className="muted">Version: {selectedApp.version_name ?? "--"}</p>
+                            <div className="button-row">
+                              <button onClick={() => handleAppAction("forceStop")} disabled={busy}>
+                                Force Stop
+                              </button>
+                              <button onClick={() => handleAppAction("clear")} disabled={busy}>
+                                Clear Data
+                              </button>
+                              <button onClick={() => handleAppAction("info")} disabled={busy}>
+                                Open Info
+                              </button>
+                              <button onClick={() => handleAppAction("enable")} disabled={busy}>
+                                Enable
+                              </button>
+                              <button onClick={() => handleAppAction("disable")} disabled={busy}>
+                                Disable
+                              </button>
+                              <button onClick={() => handleAppAction("uninstall")} disabled={busy}>
+                                Uninstall
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="muted">Select an app to manage.</p>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              }
+            />
+            <Route
+              path="/bugreport"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>Bug Report</h1>
+                      <p className="muted">Generate bugreports with progress tracking.</p>
+                    </div>
+                  </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <h2>Bugreport</h2>
+                      <span>{activeSerial ?? "No device selected"}</span>
+                    </div>
+                    <div className="button-row">
+                      <button onClick={handleBugreport} disabled={busy}>
+                        Generate Bugreport
+                      </button>
+                      <button onClick={handleCancelBugreport} disabled={busy}>
+                        Cancel
+                      </button>
+                    </div>
+                    <div className="progress">
+                      <div className="progress-bar">
+                        <div className="progress-fill" style={{ width: `${bugreportProgress ?? 0}%` }} />
+                      </div>
+                      <span>{bugreportProgress != null ? `${bugreportProgress}%` : "Idle"}</span>
+                    </div>
+                    {bugreportResult && (
+                      <div className="output-block">
+                        <h3>Last Result</h3>
+                        <p>Status: {bugreportResult.success ? "Success" : "Failed"}</p>
+                        <p>Output: {bugreportResult.output_path ?? "--"}</p>
+                        <p>Error: {bugreportResult.error ?? "--"}</p>
+                      </div>
+                    )}
+                  </section>
+                </div>
+              }
+            />
+            <Route
+              path="/bluetooth"
+              element={
+                <div className="page-section">
+                  <div className="page-header">
+                    <div>
+                      <h1>Bluetooth Monitor</h1>
+                      <p className="muted">Track Bluetooth state changes.</p>
+                    </div>
+                  </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <h2>Bluetooth Monitor</h2>
+                      <span>{activeSerial ?? "No device selected"}</span>
+                    </div>
+                    <div className="button-row">
+                      <button onClick={() => handleBluetoothMonitor(true)} disabled={busy}>
+                        Start Monitor
+                      </button>
+                      <button onClick={() => handleBluetoothMonitor(false)} disabled={busy}>
+                        Stop Monitor
+                      </button>
+                    </div>
+                    <div className="output-block">
+                      <h3>Current State</h3>
+                      <p>{bluetoothState || "No state yet."}</p>
+                    </div>
+                    <div className="logcat-output">
+                      {bluetoothEvents.map((line, index) => (
+                        <div key={`${line}-${index}`}>{line}</div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                config ? (
+                  <div className="page-section">
+                    <div className="page-header">
+                      <div>
+                        <h1>Settings</h1>
+                        <p className="muted">Persisted locally. Update defaults for actions.</p>
+                      </div>
+                    </div>
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h2>Settings</h2>
+                        <span>Saved locally</span>
+                      </div>
+                      <div className="settings-grid">
+                        <div>
+                          <h3>Output Paths</h3>
+                          <label>
+                            Default Output
+                            <input
+                              value={config.output_path}
+                              onChange={(event) =>
+                                setConfig((prev) => (prev ? { ...prev, output_path: event.target.value } : prev))
+                              }
+                            />
+                          </label>
+                          <label>
+                            File Export
+                            <input
+                              value={config.file_gen_output_path}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev ? { ...prev, file_gen_output_path: event.target.value } : prev,
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
+                        <div>
+                          <h3>Commands</h3>
+                          <label>
+                            Timeout (sec)
+                            <input
+                              type="number"
+                              value={config.command.command_timeout}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        command: { ...prev.command, command_timeout: Number(event.target.value) },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.command.parallel_execution}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        command: { ...prev.command, parallel_execution: event.target.checked },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Parallel execution
+                          </label>
+                        </div>
+                        <div>
+                          <h3>Screenrecord</h3>
+                          <label>
+                            Bit rate
+                            <input
+                              value={config.screen_record.bit_rate}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screen_record: { ...prev.screen_record, bit_rate: event.target.value },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            Size
+                            <input
+                              value={config.screen_record.size}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? { ...prev, screen_record: { ...prev.screen_record, size: event.target.value } }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.screen_record.use_hevc}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screen_record: { ...prev.screen_record, use_hevc: event.target.checked },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Use HEVC
+                          </label>
+                        </div>
+                        <div>
+                          <h3>scrcpy</h3>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.scrcpy.stay_awake}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? { ...prev, scrcpy: { ...prev.scrcpy, stay_awake: event.target.checked } }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Stay awake
+                          </label>
+                          <label>
+                            Bit rate
+                            <input
+                              value={config.scrcpy.bitrate}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev ? { ...prev, scrcpy: { ...prev.scrcpy, bitrate: event.target.value } } : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            Extra args
+                            <input
+                              value={config.scrcpy.extra_args}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? { ...prev, scrcpy: { ...prev.scrcpy, extra_args: event.target.value } }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
+                      </div>
+                      <div className="button-row">
+                        <button onClick={handleSaveConfig} disabled={busy}>
+                          Save Settings
+                        </button>
+                        <button onClick={handleResetConfig} disabled={busy}>
+                          Reset Defaults
+                        </button>
+                      </div>
+                    </section>
+                  </div>
                 ) : (
-                  <p className="muted">Select an app to manage.</p>
+                  <div className="page-section">
+                    <div className="page-header">
+                      <div>
+                        <h1>Settings</h1>
+                        <p className="muted">Loading settings...</p>
+                      </div>
+                    </div>
+                    <section className="panel">
+                      <h2>Settings</h2>
+                      <p className="muted">Loading settings...</p>
+                    </section>
+                  </div>
+                )
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
+
+      {actionForm.isOpen && actionForm.actionId && (
+        <div className="modal-backdrop" onClick={closeActionForm}>
+          <div className="modal modal-wide" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>{actionTitleMap[actionForm.actionId]}</h3>
+                <p className="muted">Configure parameters before running.</p>
+              </div>
+              <button className="ghost" onClick={closeActionForm}>
+                Close
+              </button>
+            </div>
+            {actionForm.errors.length > 0 && (
+              <div className="inline-alert error">
+                {actionForm.errors.map((error) => (
+                  <span key={error}>{error}</span>
+                ))}
+              </div>
+            )}
+
+            {actionForm.actionId === "screenshot" && (
+              <div className="stack">
+                <label>
+                  Output folder
+                  <div className="inline-row">
+                    <input
+                      value={actionOutputDir}
+                      onChange={(event) => setActionOutputDir(event.target.value)}
+                      placeholder={config?.output_path || "Select output folder"}
+                    />
+                    <button
+                      className="ghost"
+                      onClick={async () => {
+                        const selected = await openDialog({
+                          title: "Select output folder",
+                          directory: true,
+                          multiple: false,
+                        });
+                        if (selected && !Array.isArray(selected)) {
+                          setActionOutputDir(selected);
+                        }
+                      }}
+                      disabled={busy}
+                    >
+                      Browse
+                    </button>
+                  </div>
+                </label>
+                {actionDraftConfig ? (
+                  <div className="grid-two">
+                    <label>
+                      Display ID
+                      <input
+                        type="number"
+                        value={actionDraftConfig.screenshot.display_id}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screenshot: {
+                              ...current.screenshot,
+                              display_id: Number(event.target.value),
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Extra args
+                      <input
+                        value={actionDraftConfig.screenshot.extra_args}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screenshot: {
+                              ...current.screenshot,
+                              extra_args: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <p className="muted">Loading screenshot settings...</p>
                 )}
               </div>
-            </div>
-          </section>
-        )}
+            )}
 
-        {activeTab === "Bugreport" && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Bugreport</h2>
-              <span>{activeSerial ?? "No device selected"}</span>
-            </div>
+            {actionForm.actionId === "reboot" && (
+              <div className="stack">
+                <label>
+                  Reboot mode
+                  <select value={actionRebootMode} onChange={(event) => setActionRebootMode(event.target.value)}>
+                    <option value="normal">Normal</option>
+                    <option value="recovery">Recovery</option>
+                    <option value="bootloader">Bootloader</option>
+                  </select>
+                </label>
+                <p className="muted">Reboot will run on all selected devices.</p>
+              </div>
+            )}
+
+            {actionForm.actionId === "record" && (
+              <div className="stack">
+                <p className="muted">
+                  {screenRecordRemote
+                    ? "A recording is running. Configure output and stop it."
+                    : "Configure recording parameters before starting."}
+                </p>
+                {screenRecordRemote && (
+                  <label>
+                    Output folder
+                    <div className="inline-row">
+                      <input
+                        value={actionOutputDir}
+                        onChange={(event) => setActionOutputDir(event.target.value)}
+                        placeholder={config?.output_path || "Select output folder"}
+                      />
+                      <button
+                        className="ghost"
+                        onClick={async () => {
+                          const selected = await openDialog({
+                            title: "Select output folder",
+                            directory: true,
+                            multiple: false,
+                          });
+                          if (selected && !Array.isArray(selected)) {
+                            setActionOutputDir(selected);
+                          }
+                        }}
+                        disabled={busy}
+                      >
+                        Browse
+                      </button>
+                    </div>
+                  </label>
+                )}
+                {actionDraftConfig ? (
+                  <div className="grid-two">
+                    <label>
+                      Bit rate
+                      <input
+                        value={actionDraftConfig.screen_record.bit_rate}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screen_record: {
+                              ...current.screen_record,
+                              bit_rate: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Time limit (sec)
+                      <input
+                        type="number"
+                        value={actionDraftConfig.screen_record.time_limit_sec}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screen_record: {
+                              ...current.screen_record,
+                              time_limit_sec: Number(event.target.value),
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Size
+                      <input
+                        value={actionDraftConfig.screen_record.size}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screen_record: {
+                              ...current.screen_record,
+                              size: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Display ID
+                      <input
+                        type="number"
+                        value={actionDraftConfig.screen_record.display_id}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screen_record: {
+                              ...current.screen_record,
+                              display_id: Number(event.target.value),
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={actionDraftConfig.screen_record.use_hevc}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screen_record: {
+                              ...current.screen_record,
+                              use_hevc: event.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      Use HEVC
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={actionDraftConfig.screen_record.bugreport}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screen_record: {
+                              ...current.screen_record,
+                              bugreport: event.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      Bugreport overlay
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={actionDraftConfig.screen_record.verbose}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            screen_record: {
+                              ...current.screen_record,
+                              verbose: event.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      Verbose output
+                    </label>
+                  </div>
+                ) : (
+                  <p className="muted">Loading screen record settings...</p>
+                )}
+              </div>
+            )}
+
+            {actionForm.actionId === "logcat-clear" && (
+              <div className="stack">
+                <p className="muted">This clears the logcat buffer for the active device.</p>
+              </div>
+            )}
+
+            {actionForm.actionId === "install-apk" && (
+              <div className="stack">
+                <label>
+                  APK Path
+                  <div className="inline-row">
+                    <input
+                      value={apkPath}
+                      onChange={(event) => setApkPath(event.target.value)}
+                      placeholder="Select an APK file"
+                    />
+                    <button
+                      className="ghost"
+                      onClick={async () => {
+                        const selected = await openDialog({
+                          title: "Select APK",
+                          multiple: false,
+                          filters: [{ name: "APK", extensions: ["apk"] }],
+                        });
+                        if (selected && !Array.isArray(selected)) {
+                          setApkPath(selected);
+                        }
+                      }}
+                      disabled={busy}
+                    >
+                      Browse
+                    </button>
+                  </div>
+                </label>
+                <div className="grid-two">
+                  <label className="toggle">
+                    <input type="checkbox" checked={apkReplace} onChange={(event) => setApkReplace(event.target.checked)} />
+                    Replace existing
+                  </label>
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={apkAllowDowngrade}
+                      onChange={(event) => setApkAllowDowngrade(event.target.checked)}
+                    />
+                    Allow downgrade
+                  </label>
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={apkGrant}
+                      onChange={(event) => setApkGrant(event.target.checked)}
+                    />
+                    Grant permissions
+                  </label>
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={apkAllowTest}
+                      onChange={(event) => setApkAllowTest(event.target.checked)}
+                    />
+                    Allow test packages
+                  </label>
+                </div>
+                <label>
+                  Extra Args
+                  <input
+                    value={apkExtraArgs}
+                    onChange={(event) => setApkExtraArgs(event.target.value)}
+                    placeholder="e.g. --force-queryable"
+                  />
+                </label>
+              </div>
+            )}
+
+            {actionForm.actionId === "mirror" && (
+              <div className="stack">
+                {!scrcpyInfo?.available && (
+                  <div className="inline-alert error">
+                    scrcpy is not available. Install it to enable live mirror.
+                  </div>
+                )}
+                {actionDraftConfig ? (
+                  <div className="grid-two">
+                    <label>
+                      Bit rate
+                      <input
+                        value={actionDraftConfig.scrcpy.bitrate}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            scrcpy: {
+                              ...current.scrcpy,
+                              bitrate: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Max size
+                      <input
+                        type="number"
+                        value={actionDraftConfig.scrcpy.max_size}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            scrcpy: {
+                              ...current.scrcpy,
+                              max_size: Number(event.target.value),
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={actionDraftConfig.scrcpy.stay_awake}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            scrcpy: {
+                              ...current.scrcpy,
+                              stay_awake: event.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      Stay awake
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={actionDraftConfig.scrcpy.turn_screen_off}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            scrcpy: {
+                              ...current.scrcpy,
+                              turn_screen_off: event.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      Turn screen off
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={actionDraftConfig.scrcpy.disable_screensaver}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            scrcpy: {
+                              ...current.scrcpy,
+                              disable_screensaver: event.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      Disable screensaver
+                    </label>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={actionDraftConfig.scrcpy.enable_audio_playback}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            scrcpy: {
+                              ...current.scrcpy,
+                              enable_audio_playback: event.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      Enable audio
+                    </label>
+                    <label>
+                      Extra args
+                      <input
+                        value={actionDraftConfig.scrcpy.extra_args}
+                        onChange={(event) =>
+                          updateDraftConfig((current) => ({
+                            ...current,
+                            scrcpy: {
+                              ...current.scrcpy,
+                              extra_args: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <p className="muted">Loading scrcpy settings...</p>
+                )}
+              </div>
+            )}
+
             <div className="button-row">
-              <button onClick={handleBugreport} disabled={busy}>
-                Generate Bugreport
+              <button onClick={handleActionSubmit} disabled={busy || (actionNeedsConfig && !actionDraftConfig)}>
+                Run Action
               </button>
-              <button onClick={handleCancelBugreport} disabled={busy}>
+              <button className="ghost" onClick={closeActionForm}>
                 Cancel
               </button>
             </div>
-            <div className="progress">
-              <div className="progress-bar">
-                <div
-                  className="progress-fill"
-                  style={{ width: `${bugreportProgress ?? 0}%` }}
-                />
-              </div>
-              <span>{bugreportProgress != null ? `${bugreportProgress}%` : "Idle"}</span>
+          </div>
+        </div>
+      )}
+
+      {pairingState.isOpen && (
+        <div className="modal-backdrop" onClick={closePairingModal}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Wireless Pairing</h3>
+              <button className="ghost" onClick={closePairingModal}>
+                Close
+              </button>
             </div>
-            {bugreportResult && (
-              <div className="output-block">
-                <h3>Last Result</h3>
-                <p>Status: {bugreportResult.success ? "Success" : "Failed"}</p>
-                <p>Output: {bugreportResult.output_path ?? "--"}</p>
-                <p>Error: {bugreportResult.error ?? "--"}</p>
+            <div className="pairing-content">
+              <div className="pairing-step">
+                <div className="pairing-step-header">
+                  <h4>Step 1: Pair</h4>
+                  <span className="muted">
+                    {pairingState.status === "pairing"
+                      ? "Pairing..."
+                      : pairingState.status === "paired"
+                        ? "Paired"
+                        : "Enter pairing info"}
+                  </span>
+                </div>
+                <p className="muted">
+                  Enable Wireless Debugging on the device, then scan a QR code or enter the pairing code.
+                </p>
+                <div className="toggle-group">
+                  <button
+                    className={pairingState.mode === "qr" ? "toggle active" : "toggle"}
+                    onClick={() => dispatchPairing({ type: "SET_MODE", mode: "qr" })}
+                  >
+                    QR Pairing
+                  </button>
+                  <button
+                    className={pairingState.mode === "code" ? "toggle active" : "toggle"}
+                    onClick={() => dispatchPairing({ type: "SET_MODE", mode: "code" })}
+                  >
+                    Pairing Code
+                  </button>
+                </div>
+                <label>
+                  QR Payload (paste to auto-fill)
+                  <div className="inline-row">
+                    <input
+                      value={pairingState.qrPayload}
+                      onChange={(event) =>
+                        dispatchPairing({ type: "SET_QR_PAYLOAD", value: event.target.value })
+                      }
+                      placeholder="WIFI:T:ADB;S:192.168.0.10:37145;P:123456;;"
+                    />
+                    <button
+                      className="ghost"
+                      onClick={() => {
+                        const parsed = parseQrPayload(pairingState.qrPayload);
+                        if (!parsed.pairAddress && !parsed.pairingCode) {
+                          pushToast("Unable to parse QR payload.", "error");
+                          return;
+                        }
+                        if (parsed.pairAddress) {
+                          dispatchPairing({ type: "SET_PAIR_ADDRESS", value: parsed.pairAddress });
+                        }
+                        if (parsed.pairingCode) {
+                          dispatchPairing({ type: "SET_PAIR_CODE", value: parsed.pairingCode });
+                        }
+                        dispatchPairing({ type: "SET_MODE", mode: "qr" });
+                      }}
+                    >
+                      Parse
+                    </button>
+                  </div>
+                </label>
+                <label>
+                  Pairing Address (host:port)
+                  <input
+                    value={pairingState.pairAddress}
+                    onChange={(event) =>
+                      dispatchPairing({ type: "SET_PAIR_ADDRESS", value: event.target.value })
+                    }
+                    placeholder="192.168.0.10:37145"
+                  />
+                </label>
+                <label>
+                  Pairing Code
+                  <input
+                    value={pairingState.pairingCode}
+                    onChange={(event) =>
+                      dispatchPairing({ type: "SET_PAIR_CODE", value: event.target.value })
+                    }
+                    placeholder="123456"
+                  />
+                </label>
+                <div className="button-row">
+                  <button onClick={handlePairSubmit} disabled={busy}>
+                    Pair Device
+                  </button>
+                  <button
+                    className="ghost"
+                    onClick={() => dispatchPairing({ type: "RESET" })}
+                    disabled={busy}
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+
+              <div className="pairing-step">
+                <div className="pairing-step-header">
+                  <h4>Step 2: Connect</h4>
+                  <span className="muted">
+                    {pairingState.status === "connecting"
+                      ? "Connecting..."
+                      : pairingState.status === "connected"
+                        ? "Connected"
+                        : "Connect after pairing"}
+                  </span>
+                </div>
+                <label>
+                  Device Address (host:port)
+                  <input
+                    value={pairingState.connectAddress}
+                    onChange={(event) =>
+                      dispatchPairing({ type: "SET_CONNECT_ADDRESS", value: event.target.value })
+                    }
+                    placeholder="192.168.0.10:5555"
+                  />
+                </label>
+                <div className="button-row">
+                  <button onClick={handleConnectSubmit} disabled={busy}>
+                    Connect
+                  </button>
+                  <button className="ghost" onClick={refreshDevices} disabled={busy}>
+                    Refresh Devices
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {(pairingState.error || pairingState.message) && (
+              <div className={`inline-alert ${pairingState.error ? "error" : "info"}`}>
+                {pairingState.error ?? pairingState.message}
               </div>
             )}
-          </section>
-        )}
-
-        {activeTab === "Bluetooth" && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Bluetooth Monitor</h2>
-              <span>{activeSerial ?? "No device selected"}</span>
-            </div>
-            <div className="button-row">
-              <button onClick={() => handleBluetoothMonitor(true)} disabled={busy}>
-                Start Monitor
-              </button>
-              <button onClick={() => handleBluetoothMonitor(false)} disabled={busy}>
-                Stop Monitor
-              </button>
-            </div>
-            <div className="output-block">
-              <h3>Current State</h3>
-              <p>{bluetoothState || "No state yet."}</p>
-            </div>
-            <div className="logcat-output">
-              {bluetoothEvents.map((line, index) => (
-                <div key={`${line}-${index}`}>{line}</div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {activeTab === "Settings" && config && (
-          <section className="panel">
-            <div className="panel-header">
-              <h2>Settings</h2>
-              <span>Saved locally</span>
-            </div>
-            <div className="settings-grid">
-              <div>
-                <h3>Output Paths</h3>
-                <label>
-                  Default Output
-                  <input
-                    value={config.output_path}
-                    onChange={(event) =>
-                      setConfig((prev) => (prev ? { ...prev, output_path: event.target.value } : prev))
-                    }
-                  />
-                </label>
-                <label>
-                  File Export
-                  <input
-                    value={config.file_gen_output_path}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev ? { ...prev, file_gen_output_path: event.target.value } : prev,
-                      )
-                    }
-                  />
-                </label>
-              </div>
-              <div>
-                <h3>Commands</h3>
-                <label>
-                  Timeout (sec)
-                  <input
-                    type="number"
-                    value={config.command.command_timeout}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              command: { ...prev.command, command_timeout: Number(event.target.value) },
-                            }
-                          : prev,
-                      )
-                    }
-                  />
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={config.command.parallel_execution}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              command: { ...prev.command, parallel_execution: event.target.checked },
-                            }
-                          : prev,
-                      )
-                    }
-                  />
-                  Parallel execution
-                </label>
-              </div>
-              <div>
-                <h3>Screenrecord</h3>
-                <label>
-                  Bit rate
-                  <input
-                    value={config.screen_record.bit_rate}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              screen_record: { ...prev.screen_record, bit_rate: event.target.value },
-                            }
-                          : prev,
-                      )
-                    }
-                  />
-                </label>
-                <label>
-                  Size
-                  <input
-                    value={config.screen_record.size}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev
-                          ? { ...prev, screen_record: { ...prev.screen_record, size: event.target.value } }
-                          : prev,
-                      )
-                    }
-                  />
-                </label>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={config.screen_record.use_hevc}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              screen_record: { ...prev.screen_record, use_hevc: event.target.checked },
-                            }
-                          : prev,
-                      )
-                    }
-                  />
-                  Use HEVC
-                </label>
-              </div>
-              <div>
-                <h3>scrcpy</h3>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={config.scrcpy.stay_awake}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev
-                          ? { ...prev, scrcpy: { ...prev.scrcpy, stay_awake: event.target.checked } }
-                          : prev,
-                      )
-                    }
-                  />
-                  Stay awake
-                </label>
-                <label>
-                  Bit rate
-                  <input
-                    value={config.scrcpy.bitrate}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev ? { ...prev, scrcpy: { ...prev.scrcpy, bitrate: event.target.value } } : prev,
-                      )
-                    }
-                  />
-                </label>
-                <label>
-                  Extra args
-                  <input
-                    value={config.scrcpy.extra_args}
-                    onChange={(event) =>
-                      setConfig((prev) =>
-                        prev
-                          ? { ...prev, scrcpy: { ...prev.scrcpy, extra_args: event.target.value } }
-                          : prev,
-                      )
-                    }
-                  />
-                </label>
-              </div>
-            </div>
-            <div className="button-row">
-              <button onClick={handleSaveConfig} disabled={busy}>
-                Save Settings
-              </button>
-              <button onClick={handleResetConfig} disabled={busy}>
-                Reset Defaults
-              </button>
-            </div>
-          </section>
-        )}
-      </main>
-
-      <section className="panel ui-inspector">
-        <div className="panel-header">
-          <h2>UI Inspector</h2>
-          <button onClick={handleUiInspect} disabled={busy}>
-            Capture
-          </button>
+          </div>
         </div>
-        {uiHtml ? (
-          <iframe title="UI Inspector" srcDoc={uiHtml} className="ui-frame" />
-        ) : (
-          <p className="muted">Capture UI hierarchy to preview the structure.</p>
-        )}
-      </section>
+      )}
 
       <div className="toast-stack">
         {toasts.map((toast) => (

@@ -1,12 +1,12 @@
 mod app;
 
 use app::commands::{
-    cancel_bugreport, capture_screenshot, capture_ui_hierarchy, check_scrcpy, clear_app_data,
-    clear_logcat, force_stop_app, generate_bugreport, get_config, install_apk_batch, launch_scrcpy,
-    list_apps, list_device_files, list_devices, open_app_info, preview_local_file, pull_device_file,
-    reboot_devices, reset_config, run_shell, save_app_config, set_app_enabled, set_bluetooth_state,
-    set_wifi_state, start_bluetooth_monitor, start_logcat, start_screen_record, stop_bluetooth_monitor,
-    stop_logcat, stop_screen_record, uninstall_app,
+    adb_connect, adb_pair, cancel_bugreport, capture_screenshot, capture_ui_hierarchy, check_scrcpy,
+    clear_app_data, clear_logcat, force_stop_app, generate_bugreport, get_config, install_apk_batch,
+    launch_scrcpy, list_apps, list_device_files, list_devices, open_app_info, preview_local_file,
+    pull_device_file, reboot_devices, reset_config, run_shell, save_app_config, set_app_enabled,
+    set_bluetooth_state, set_wifi_state, start_bluetooth_monitor, start_logcat, start_screen_record,
+    stop_bluetooth_monitor, stop_logcat, stop_screen_record, uninstall_app,
 };
 use app::logging::init_logging;
 use app::state::AppState;
@@ -24,6 +24,8 @@ pub fn run() {
             save_app_config,
             reset_config,
             list_devices,
+            adb_pair,
+            adb_connect,
             run_shell,
             reboot_devices,
             set_wifi_state,

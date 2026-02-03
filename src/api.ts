@@ -9,6 +9,7 @@ import type {
   DeviceFileEntry,
   DeviceInfo,
   FilePreview,
+  HostCommandResult,
   ScrcpyInfo,
 } from "./types";
 
@@ -36,6 +37,21 @@ export const resetConfig = async () => {
 export const listDevices = async (detailed = true) => {
   return invoke<CommandResponse<DeviceInfo[]>>("list_devices", {
     detailed,
+    trace_id: createTraceId(),
+  });
+};
+
+export const adbPair = async (address: string, pairingCode: string) => {
+  return invoke<CommandResponse<HostCommandResult>>("adb_pair", {
+    address,
+    pairing_code: pairingCode,
+    trace_id: createTraceId(),
+  });
+};
+
+export const adbConnect = async (address: string) => {
+  return invoke<CommandResponse<HostCommandResult>>("adb_connect", {
+    address,
     trace_id: createTraceId(),
   });
 };

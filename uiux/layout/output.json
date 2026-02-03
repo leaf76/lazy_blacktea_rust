@@ -1,0 +1,332 @@
+{
+  "version": "1.0.0",
+  "mode": "audit_and_optimize",
+  "assumptions": [
+    "Users are technical (QA/Devs) and understand ADB concepts.",
+    "The app runs in a desktop environment where 'system' theme implies OS light/dark mode compliance.",
+    "Scrcpy binary availability is managed outside the UI, or the UI needs to guide the path configuration.",
+    " 'Lazy Blacktea' implies a need for efficiency/laziness in workflows (automation/scripts)."
+  ],
+  "open_questions": [
+    "Are there existing specific brand colors, or should we rely entirely on semantic system colors?",
+    "Does the 'Actions' page support custom user scripts or just predefined ADB commands?",
+    "Should the wireless pairing support mDNS discovery if available?",
+    "Is the 'UI Inspector' strictly for XML dumping or does it support interactive element selection?"
+  ],
+  "ux_goals": [
+    "Efficiency: Reduce clicks to perform common ADB tasks (logcat, install, screenshot).",
+    "Density: Maximize information density for logs and file lists without clutter.",
+    "Clarity: Clearly distinguish between local machine state and connected device state.",
+    "Discoverability: Group complex ADB commands into logical UI sections."
+  ],
+  "information_architecture": {
+    "structure": "Sidebar + Top Bar + Main Content Area",
+    "top_bar": {
+      "elements": [
+        "Global Device Selector (Dropdown)",
+        "Device Status Indicator (Online/Offline/Unauthorized)",
+        "Quick Actions (Screenshot, Reboot)",
+        "Live Mirror Toggle (Scrcpy)"
+      ]
+    },
+    "sidebar_navigation": {
+      "groups": [
+        {
+          "name": "Connect",
+          "items": [
+            {
+              "id": "nav_dashboard",
+              "label": "Dashboard",
+              "icon": "home"
+            },
+            {
+              "id": "nav_devices",
+              "label": "Device Manager",
+              "icon": "smartphone"
+            },
+            {
+              "id": "nav_bluetooth",
+              "label": "Bluetooth Pairing",
+              "icon": "bluetooth"
+            }
+          ]
+        },
+        {
+          "name": "Debug",
+          "items": [
+            {
+              "id": "nav_logcat",
+              "label": "Logcat",
+              "icon": "list"
+            },
+            {
+              "id": "nav_inspector",
+              "label": "UI Inspector",
+              "icon": "layers"
+            },
+            {
+              "id": "nav_bugreport",
+              "label": "Bug Report",
+              "icon": "bug"
+            }
+          ]
+        },
+        {
+          "name": "Manage",
+          "items": [
+            {
+              "id": "nav_apps",
+              "label": "App Manager",
+              "icon": "grid"
+            },
+            {
+              "id": "nav_files",
+              "label": "File Explorer",
+              "icon": "folder"
+            },
+            {
+              "id": "nav_actions",
+              "label": "Custom Actions",
+              "icon": "terminal"
+            }
+          ]
+        },
+        {
+          "name": "System",
+          "items": [
+            {
+              "id": "nav_settings",
+              "label": "Settings",
+              "icon": "settings"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "user_flows": [
+    {
+      "name": "Wireless Connect via QR",
+      "steps": [
+        "User opens 'Device Manager'",
+        "Selects 'Pair New Device'",
+        "Pastes QR payload or Types Pairing Code + Port",
+        "System auto-fills connection address",
+        "User clicks 'Pair' -> 'Connect'",
+        "Device appears in Top Bar Selector"
+      ]
+    },
+    {
+      "name": "Analyze UI Layout",
+      "steps": [
+        "User selects target device in Top Bar",
+        "Navigates to 'UI Inspector'",
+        "Clicks 'Capture Hierarchy'",
+        "View renders interactive tree + screenshot",
+        "User hovers element to see attributes"
+      ]
+    }
+  ],
+  "screens": {
+    "dashboard": {
+      "layout": "Grid Dashboard",
+      "sections": [
+        "Device Overview (Model, Battery, Android Version)",
+        "Quick Shortcuts (customizable)",
+        "Recent Activity/Logs snippet",
+        "ADB Server Status"
+      ],
+      "states": {
+        "empty": "Welcome screen with 'Connect a Device' CTA",
+        "loading": "Skeleton loader for device stats"
+      }
+    },
+    "devices": {
+      "layout": "List/Card Hybrid",
+      "features": [
+        "List of connected USB/Wifi devices",
+        "Connection Toggle (Connect/Disconnect)",
+        "Wireless Pairing Wizard (QR/Code tab)",
+        "Saved Devices History"
+      ]
+    },
+    "logcat": {
+      "layout": "Full-height Terminal View",
+      "features": [
+        "Sticky Search Bar (Regex support)",
+        "Filter Chips (Verbose, Debug, Info, Warn, Error, Fatal)",
+        "Package Name Filter",
+        "Compact Row Layout (Timestamp | PID | Tag | Message)",
+        "Auto-scroll toggle"
+      ],
+      "density": "Compact (12px font, 20px line-height)"
+    },
+    "files": {
+      "layout": "Fixed Dual-Pane (Split View)",
+      "left_pane": "Local File System",
+      "right_pane": "Android File System",
+      "actions": [
+        "Upload (Left->Right)",
+        "Download (Right->Left)",
+        "Delete",
+        "New Folder"
+      ],
+      "features": "Drag and drop support between panes"
+    },
+    "apps": {
+      "layout": "Data Table",
+      "columns": [
+        "Icon",
+        "App Name",
+        "Package",
+        "Version",
+        "Size",
+        "Actions"
+      ],
+      "actions": [
+        "Install APK",
+        "Uninstall",
+        "Clear Data",
+        "Force Stop",
+        "Extract APK"
+      ],
+      "filter": "Search by package name"
+    },
+    "ui_inspector": {
+      "layout": "Three-Column Resizable",
+      "col_1": "UI Hierarchy Tree",
+      "col_2": "Screenshot Overlay (Interactive)",
+      "col_3": "Node Properties / Attributes",
+      "actions": [
+        "Refresh",
+        "Save XML",
+        "Save Screenshot"
+      ]
+    }
+  },
+  "issues": [
+    {
+      "severity": "High",
+      "description": "Current navigation is mixed; sidebar and top tabs are inconsistent."
+    },
+    {
+      "severity": "Medium",
+      "description": "Logcat view wastes vertical space with padding."
+    },
+    {
+      "severity": "Medium",
+      "description": "File transfer lacks clear progress indication for large files."
+    }
+  ],
+  "backlog": [
+    {
+      "priority": "P0",
+      "task": "Implement new Sidebar + Top Bar shell layout."
+    },
+    {
+      "priority": "P0",
+      "task": "Refactor Logcat to virtualization (react-window) for performance."
+    },
+    {
+      "priority": "P1",
+      "task": "Implement Dual-Pane File Manager."
+    },
+    {
+      "priority": "P1",
+      "task": "Build Wireless Pairing Wizard with payload parsing."
+    },
+    {
+      "priority": "P2",
+      "task": "Add Scrcpy dependency check and download helper."
+    }
+  ],
+  "components": [
+    {
+      "name": "NavSidebar",
+      "props": [
+        "collapsed",
+        "activeItem"
+      ]
+    },
+    {
+      "name": "DeviceSelector",
+      "props": [
+        "devices",
+        "selectedId",
+        "onSelect"
+      ]
+    },
+    {
+      "name": "LogViewer",
+      "props": [
+        "logs",
+        "filter",
+        "density='compact'"
+      ]
+    },
+    {
+      "name": "FilePane",
+      "props": [
+        "path",
+        "items",
+        "onNavigate"
+      ]
+    },
+    {
+      "name": "StatusBadge",
+      "props": [
+        "status: 'online'|'offline'|'unauthorized'"
+      ]
+    }
+  ],
+  "design_tokens": {
+    "colors": {
+      "bg_app": "var(--bg-app)",
+      "bg_panel": "var(--bg-panel)",
+      "text_primary": "var(--text-primary)",
+      "text_secondary": "var(--text-secondary)",
+      "text_mono": "var(--text-mono)",
+      "accent": "var(--accent-color)",
+      "border": "var(--border-color)",
+      "log_debug": "#3B82F6",
+      "log_info": "#10B981",
+      "log_warn": "#F59E0B",
+      "log_error": "#EF4444"
+    },
+    "spacing": {
+      "xs": "4px",
+      "sm": "8px",
+      "md": "12px",
+      "lg": "16px",
+      "xl": "24px"
+    },
+    "typography": {
+      "font_family_ui": "system-ui, -apple-system, sans-serif",
+      "font_family_code": "'JetBrains Mono', 'Fira Code', monospace",
+      "size_sm": "11px",
+      "size_md": "13px",
+      "size_lg": "15px"
+    }
+  },
+  "microcopy": {
+    "empty_states": {
+      "device_list": "No devices detected. Connect via USB or pair wirelessly.",
+      "logcat": "Waiting for logs... (Check if device is connected)",
+      "files": "Directory is empty."
+    },
+    "errors": {
+      "scrcpy_missing": "Scrcpy binary not found. Please install scrcpy or set the path in Settings.",
+      "adb_unauthorized": "Device unauthorized. Check your phone to allow USB debugging."
+    }
+  },
+  "rollout": {
+    "phase_1": "Shell & Navigation Rework (Sidebar implementation)",
+    "phase_2": "Core Tools Update (Logcat & Devices & Wireless Pairing)",
+    "phase_3": "File Manager & App Manager Overhaul",
+    "phase_4": "Advanced Tools (Inspector, Actions, Bugreport) & Polish"
+  },
+  "experiments": [
+    "Test 'Compact Mode' toggle globally vs per-page.",
+    "A/B test the placement of 'Live Mirror' (integrated in Dashboard vs Separate Window)."
+  ]
+}

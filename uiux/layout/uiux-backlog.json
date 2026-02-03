@@ -1,0 +1,22 @@
+[
+  {
+    "priority": "P0",
+    "task": "Implement new Sidebar + Top Bar shell layout."
+  },
+  {
+    "priority": "P0",
+    "task": "Refactor Logcat to virtualization (react-window) for performance."
+  },
+  {
+    "priority": "P1",
+    "task": "Implement Dual-Pane File Manager."
+  },
+  {
+    "priority": "P1",
+    "task": "Build Wireless Pairing Wizard with payload parsing."
+  },
+  {
+    "priority": "P2",
+    "task": "Add Scrcpy dependency check and download helper."
+  }
+]

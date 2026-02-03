@@ -1,0 +1,67 @@
+:root {
+  --color-bg-app: #F5F7FA;
+  --color-bg-panel: #FFFFFF;
+  --color-bg-subtle: #EEF2F7;
+  --color-border: #D7DEE8;
+  --color-text: #0F172A;
+  --color-text-muted: #5B6B7F;
+  --color-primary: #2563EB;
+  --color-primary-600: #1D4ED8;
+  --color-accent: #0F766E;
+  --color-success: #16A34A;
+  --color-warning: #D97706;
+  --color-danger: #DC2626;
+  --color-log-info: #2563EB;
+  --color-log-warn: #D97706;
+  --color-log-error: #DC2626;
+
+  --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Space Grotesk", "IBM Plex Sans", sans-serif;
+  --font-code: "JetBrains Mono", "Fira Code", monospace;
+
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-48: 48px;
+
+  --radius-6: 6px;
+  --radius-10: 10px;
+  --radius-14: 14px;
+
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.08);
+  --shadow-popover: 0 8px 24px rgba(15, 23, 42, 0.12);
+
+  --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.35);
+}
+
+[data-theme="dark"] {
+  --color-bg-app: #111318;
+  --color-bg-panel: #151A22;
+  --color-bg-subtle: #1B222C;
+  --color-border: #273140;
+  --color-text: #E5E7EB;
+  --color-text-muted: #94A3B8;
+  --color-primary: #60A5FA;
+  --color-primary-600: #3B82F6;
+  --color-accent: #22C55E;
+  --color-success: #22C55E;
+  --color-warning: #F59E0B;
+  --color-danger: #F87171;
+  --color-log-info: #60A5FA;
+  --color-log-warn: #F59E0B;
+  --color-log-error: #F87171;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-popover: 0 12px 30px rgba(0, 0, 0, 0.55);
+}

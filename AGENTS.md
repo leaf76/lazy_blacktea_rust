@@ -36,6 +36,10 @@ lazy_blacktea_rust/
 | UI hierarchy | `src-tauri/src/app/ui_xml.rs` | XML → HTML renderer |
 | Frontend API | `src/api.ts` | Tauri invoke wrappers |
 | Frontend UI | `src/App.tsx` | Device console layout |
+| App shell + routing | `src/App.tsx`, `src/App.css`, `src/main.tsx` | Sidebar, dashboard, HashRouter |
+| Layout tokens | `src/App.css` | Compact density, page-section/page-header styles, system theme variables |
+| Wireless pairing | `src-tauri/src/app/commands.rs`, `src/api.ts`, `src/App.tsx` | adb pair/connect flow |
+| Pairing helpers | `src/pairing.ts` | QR/pair output parsing + reducer |
 
 ## CONVENTIONS
 
@@ -55,8 +59,17 @@ npm install
 # Run dev app
 npm run tauri dev
 
+# Frontend tests
+npm run test
+
 # Rust checks
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all --all-features
 ```
+
+## UI/UX Artifacts
+
+- `brief.md`: Redesign brief and assumptions.
+- `uiux/`: UI/UX audit, plan, tokens, and backlog for the redesign.
+- Decisions: wireless ADB pairing and live UI inspector mirror support.

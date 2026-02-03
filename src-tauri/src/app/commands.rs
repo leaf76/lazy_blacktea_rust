@@ -31,7 +31,8 @@ use crate::app::config::{load_config, save_config, AppConfig};
 use crate::app::error::AppError;
 use crate::app::models::{
     ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppInfo, BugreportResult,
-    CommandResponse, CommandResult, DeviceFileEntry, DeviceInfo, FilePreview, ScrcpyInfo,
+    CommandResponse, CommandResult, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult,
+    ScrcpyInfo,
 };
 use crate::app::state::{AppState, BugreportHandle, LogcatHandle, RecordingHandle};
 use crate::app::ui_xml::render_device_ui_html;
@@ -241,6 +242,78 @@ pub fn list_devices(
     Ok(CommandResponse {
         trace_id,
         data: devices,
+    })
+}
+
+#[tauri::command]
+pub fn adb_pair(
+    address: String,
+    pairing_code: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<HostCommandResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&address, "address", &trace_id)?;
+    ensure_non_empty(&pairing_code, "pairing_code", &trace_id)?;
+
+    let args = vec![
+        "pair".to_string(),
+        address.clone(),
+        pairing_code.clone(),
+    ];
+    let output = run_command_with_timeout("adb", &args, Duration::from_secs(10), &trace_id)?;
+    let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+    if output.exit_code.unwrap_or_default() != 0 || combined.contains("failed") || combined.contains("unable") {
+        let detail = if output.stderr.trim().is_empty() {
+            output.stdout.trim()
+        } else {
+            output.stderr.trim()
+        };
+        return Err(AppError::dependency(
+            format!("adb pair failed: {detail}"),
+            &trace_id,
+        ));
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: HostCommandResult {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_code: output.exit_code,
+        },
+    })
+}
+
+#[tauri::command]
+pub fn adb_connect(
+    address: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<HostCommandResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&address, "address", &trace_id)?;
+
+    let args = vec!["connect".to_string(), address.clone()];
+    let output = run_command_with_timeout("adb", &args, Duration::from_secs(10), &trace_id)?;
+    let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+    if output.exit_code.unwrap_or_default() != 0 || combined.contains("failed") || combined.contains("unable") {
+        let detail = if output.stderr.trim().is_empty() {
+            output.stdout.trim()
+        } else {
+            output.stderr.trim()
+        };
+        return Err(AppError::dependency(
+            format!("adb connect failed: {detail}"),
+            &trace_id,
+        ));
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: HostCommandResult {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_code: output.exit_code,
+        },
     })
 }
 
