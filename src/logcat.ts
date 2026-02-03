@@ -18,6 +18,13 @@ export type FilteredLogcatResult = {
   matchIndices: number[];
 };
 
+export type LogcatLineEntry = { id: number; text: string };
+
+export type FilteredLogcatEntriesResult = {
+  lines: LogcatLineEntry[];
+  matchIds: number[];
+};
+
 export const defaultLogcatLevels: LogcatLevelsState = {
   V: true,
   D: true,
@@ -149,4 +156,56 @@ export const filterLogcatLines = (
   }
 
   return { lines: filteredByPatterns, matchIndices };
+};
+
+export const filterLogcatEntries = (
+  entries: LogcatLineEntry[],
+  state: LogcatFilterState,
+): FilteredLogcatEntriesResult => {
+  const filteredByLevel = entries.filter((entry) => {
+    const level = parseLogcatLevel(entry.text);
+    if (!level) {
+      return true;
+    }
+    return state.levels[level];
+  });
+
+  const patterns = [...state.activePatterns, state.livePattern ?? ""]
+    .map((pattern) => pattern.trim())
+    .filter(Boolean)
+    .map((pattern) => {
+      try {
+        return new RegExp(pattern, "i");
+      } catch {
+        return null;
+      }
+    })
+    .filter((pattern): pattern is RegExp => Boolean(pattern));
+
+  const filteredByPatterns = filteredByLevel.filter((entry) =>
+    matchesAnyPattern(entry.text, patterns),
+  );
+
+  const searchRegex = buildSearchRegex(state.searchTerm ?? "", {
+    caseSensitive: state.searchCaseSensitive,
+    regex: state.searchRegex,
+  });
+
+  const matchIds: number[] = [];
+  const matchedEntries: LogcatLineEntry[] = [];
+  filteredByPatterns.forEach((entry) => {
+    if (searchRegex && searchRegex.test(entry.text)) {
+      matchIds.push(entry.id);
+      if (state.searchOnly) {
+        matchedEntries.push(entry);
+      }
+      searchRegex.lastIndex = 0;
+    }
+  });
+
+  if (state.searchOnly && searchRegex) {
+    return { lines: matchedEntries, matchIds };
+  }
+
+  return { lines: filteredByPatterns, matchIds };
 };

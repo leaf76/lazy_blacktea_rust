@@ -46,6 +46,7 @@ export const createInitialTaskState = (maxItems = 50): TaskState => ({
 
 export type TaskAction =
   | { type: "TASK_ADD"; task: TaskItem }
+  | { type: "TASK_SET_ALL"; items: TaskItem[]; max_items?: number }
   | {
       type: "TASK_SET_TRACE";
       id: string;
@@ -69,6 +70,14 @@ export const tasksReducer = (state: TaskState, action: TaskAction): TaskState =>
   if (action.type === "TASK_ADD") {
     const next = [action.task, ...state.items];
     return { ...state, items: next.slice(0, state.max_items) };
+  }
+  if (action.type === "TASK_SET_ALL") {
+    const maxItems = action.max_items ?? state.max_items;
+    return {
+      ...state,
+      max_items: maxItems,
+      items: action.items.slice(0, maxItems),
+    };
   }
   if (action.type === "TASK_SET_TRACE") {
     return {
@@ -152,4 +161,123 @@ export const summarizeTask = (task: TaskItem) => {
     counts[status] += 1;
   });
   return { serials, counts };
+};
+
+export type StoredDeviceTaskStatus = {
+  serial: string;
+  status: TaskStatus;
+  message?: string | null;
+  output_path?: string | null;
+  exit_code?: number | null;
+};
+
+export type StoredTaskItem = {
+  id: string;
+  trace_id?: string | null;
+  kind: TaskKind;
+  title: string;
+  status: TaskStatus;
+  started_at: number;
+  finished_at?: number | null;
+  devices: Record<string, StoredDeviceTaskStatus>;
+};
+
+export type StoredTaskState = {
+  max_items: number;
+  items: StoredTaskItem[];
+};
+
+const truncateString = (value: string, maxLen: number) => {
+  if (value.length <= maxLen) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxLen - 1))}…`;
+};
+
+export const sanitizeTaskStateForStorage = (state: TaskState): StoredTaskState => {
+  const maxItems = Math.max(1, Math.min(200, state.max_items));
+  const items: StoredTaskItem[] = state.items.slice(0, maxItems).map((item) => {
+    const devices: Record<string, StoredDeviceTaskStatus> = {};
+    Object.entries(item.devices).forEach(([serial, entry]) => {
+      devices[serial] = {
+        serial,
+        status: entry.status,
+        message: entry.message ? truncateString(entry.message, 240) : entry.message ?? null,
+        output_path: entry.output_path ? truncateString(entry.output_path, 500) : entry.output_path ?? null,
+        exit_code: entry.exit_code ?? null,
+      };
+    });
+    return {
+      id: item.id,
+      trace_id: item.trace_id ?? null,
+      kind: item.kind,
+      title: truncateString(item.title, 160),
+      status: item.status,
+      started_at: item.started_at,
+      finished_at: item.finished_at ?? null,
+      devices,
+    };
+  });
+  return { max_items: maxItems, items };
+};
+
+export const parseStoredTaskState = (raw: string): StoredTaskState | null => {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.max_items !== "number" || !Array.isArray(record.items)) {
+      return null;
+    }
+    const items = record.items.filter((value) => {
+      if (!value || typeof value !== "object") {
+        return false;
+      }
+      const item = value as Record<string, unknown>;
+      return (
+        typeof item.id === "string" &&
+        typeof item.title === "string" &&
+        typeof item.kind === "string" &&
+        typeof item.status === "string" &&
+        typeof item.started_at === "number" &&
+        item.devices != null &&
+        typeof item.devices === "object"
+      );
+    }) as StoredTaskItem[];
+    return { max_items: record.max_items, items };
+  } catch {
+    return null;
+  }
+};
+
+export const inflateStoredTaskState = (stored: StoredTaskState, fallbackMaxItems = 50): TaskState => {
+  const maxItems = typeof stored.max_items === "number" ? stored.max_items : fallbackMaxItems;
+  const items = stored.items.map((item) => {
+    const devices: Record<string, DeviceTaskStatus> = {};
+    Object.entries(item.devices || {}).forEach(([serial, entry]) => {
+      devices[serial] = {
+        serial,
+        status: entry.status,
+        message: entry.message ?? null,
+        output_path: entry.output_path ?? null,
+        exit_code: entry.exit_code ?? null,
+        progress: null,
+        stdout: null,
+        stderr: null,
+      };
+    });
+    return {
+      id: item.id,
+      trace_id: item.trace_id ?? null,
+      kind: item.kind,
+      title: item.title,
+      status: item.status,
+      started_at: item.started_at,
+      finished_at: item.finished_at ?? null,
+      devices,
+    } as TaskItem;
+  });
+  return { max_items: maxItems, items: items.slice(0, maxItems) };
 };

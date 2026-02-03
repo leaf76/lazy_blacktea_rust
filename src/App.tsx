@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -64,7 +64,7 @@ import {
   buildLogcatFilter,
   buildSearchRegex,
   defaultLogcatLevels,
-  filterLogcatLines,
+  filterLogcatEntries,
   parsePidOutput,
   type LogcatLevelsState,
   type LogcatSourceMode,
@@ -78,9 +78,11 @@ import {
 import {
   createInitialTaskState,
   createTask,
+  inflateStoredTaskState,
+  parseStoredTaskState,
+  sanitizeTaskStateForStorage,
   summarizeTask,
   tasksReducer,
-  type TaskItem,
   type TaskKind,
 } from "./tasks";
 import "./App.css";
@@ -94,6 +96,7 @@ type FileTransferProgress = {
   message?: string | null;
   trace_id: string;
 };
+type LogcatLineEntry = { id: number; text: string };
 type QuickActionId =
   | "screenshot"
   | "reboot"
@@ -112,13 +115,70 @@ const initialActionFormState: ActionFormState = {
   errors: [],
 };
 
+const truncateText = (value: string, maxLen: number) => {
+  if (value.length <= maxLen) {
+    return value;
+  }
+  const limit = Math.max(0, maxLen - 1);
+  return `${value.slice(0, limit)}…`;
+};
+
+function renderHighlightedLogcatLine(line: string, searchPattern: RegExp | null) {
+  if (!searchPattern) {
+    return line;
+  }
+  const parts: Array<{ text: string; match: boolean }> = [];
+  let lastIndex = 0;
+  searchPattern.lastIndex = 0;
+  let match = searchPattern.exec(line);
+  while (match) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (start > lastIndex) {
+      parts.push({ text: line.slice(lastIndex, start), match: false });
+    }
+    parts.push({ text: line.slice(start, end), match: true });
+    lastIndex = end;
+    match = searchPattern.exec(line);
+  }
+  if (lastIndex < line.length) {
+    parts.push({ text: line.slice(lastIndex), match: false });
+  }
+  searchPattern.lastIndex = 0;
+  return parts.map((part, index) =>
+    part.match ? (
+      <mark key={`${part.text}-${index}`}>{part.text}</mark>
+    ) : (
+      <span key={`${part.text}-${index}`}>{part.text}</span>
+    ),
+  );
+}
+
+const LogcatLineRow = ({
+  entry,
+  searchPattern,
+}: {
+  entry: LogcatLineEntry;
+  searchPattern: RegExp | null;
+}) => {
+  return (
+    <div data-log-id={entry.id}>
+      {renderHighlightedLogcatLine(entry.text, searchPattern)}
+    </div>
+  );
+};
+
+const MemoLogcatLineRow = memo(LogcatLineRow, (prev, next) => {
+  return prev.entry === next.entry && prev.searchPattern === next.searchPattern;
+});
+
 function App() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
   const [shellCommand, setShellCommand] = useState("");
   const [shellOutput, setShellOutput] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [logcatLines, setLogcatLines] = useState<Record<string, string[]>>({});
+  const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
   const [logcatSourceValue, setLogcatSourceValue] = useState("");
   const [logcatLevels, setLogcatLevels] = useState<LogcatLevelsState>(defaultLogcatLevels);
@@ -189,40 +249,7 @@ function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [pairingState, dispatchPairing] = useReducer(pairingReducer, initialPairingState);
   const [actionForm, setActionForm] = useState<ActionFormState>(initialActionFormState);
-  const [taskState, dispatchTasks] = useReducer(tasksReducer, undefined, () => {
-    const initial = createInitialTaskState(50);
-    try {
-      const raw = localStorage.getItem("lazy_blacktea_tasks_v1");
-      if (!raw) {
-        return initial;
-      }
-      const parsed = JSON.parse(raw) as { items?: unknown; max_items?: unknown };
-      if (!Array.isArray(parsed.items)) {
-        return initial;
-      }
-      const isTaskItem = (value: unknown): value is TaskItem => {
-        if (!value || typeof value !== "object") {
-          return false;
-        }
-        const record = value as Record<string, unknown>;
-        return (
-          typeof record.id === "string" &&
-          typeof record.title === "string" &&
-          typeof record.kind === "string" &&
-          typeof record.status === "string" &&
-          typeof record.started_at === "number" &&
-          record.devices != null &&
-          typeof record.devices === "object"
-        );
-      };
-      const maxItems = typeof parsed.max_items === "number" ? parsed.max_items : initial.max_items;
-      const items = parsed.items.filter(isTaskItem).slice(0, maxItems);
-      return { ...initial, max_items: maxItems, items };
-    } catch (error) {
-      console.warn("Failed to load Task Center state from storage.", error);
-      return initial;
-    }
-  });
+  const [taskState, dispatchTasks] = useReducer(tasksReducer, undefined, () => createInitialTaskState(50));
   const [actionOutputDir, setActionOutputDir] = useState("");
   const [actionRebootMode, setActionRebootMode] = useState("normal");
   const [actionDraftConfig, setActionDraftConfig] = useState<AppConfig | null>(null);
@@ -231,6 +258,9 @@ function App() {
   const lastSelectedIndexRef = useRef<number | null>(null);
   const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
+  const logcatPendingRef = useRef<Record<string, string[]>>({});
+  const logcatNextIdRef = useRef<Record<string, number>>({});
+  const logcatFlushTimerRef = useRef<number | null>(null);
   const filesDragContextRef = useRef<{
     pathname: string;
     serial: string;
@@ -288,17 +318,54 @@ function App() {
   }, [activeSerial, files, filesOverwriteEnabled, filesPath, location.pathname]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        "lazy_blacktea_tasks_v1",
-        JSON.stringify({ max_items: taskState.max_items, items: taskState.items }),
-      );
-    } catch (error) {
-      console.warn("Failed to persist Task Center state to storage.", error);
-    }
-  }, [taskState.items, taskState.max_items]);
+    const key = "lazy_blacktea_tasks_v1";
+    const load = () => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) {
+          return;
+        }
+        if (raw.length > 800_000) {
+          console.warn("Task Center storage is too large; skipping load.");
+          localStorage.removeItem(key);
+          return;
+        }
+        const parsed = parseStoredTaskState(raw);
+        if (!parsed) {
+          return;
+        }
+        const inflated = inflateStoredTaskState(parsed, 50);
+        dispatchTasks({ type: "TASK_SET_ALL", items: inflated.items, max_items: inflated.max_items });
+      } catch (error) {
+        console.warn("Failed to load Task Center state from storage.", error);
+      }
+    };
+    const handle = window.setTimeout(load, 0);
+    return () => window.clearTimeout(handle);
+  }, []);
 
-  const rawLogcatLines = useMemo(
+  const taskPersistTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    const key = "lazy_blacktea_tasks_v1";
+    if (taskPersistTimerRef.current != null) {
+      window.clearTimeout(taskPersistTimerRef.current);
+    }
+    taskPersistTimerRef.current = window.setTimeout(() => {
+      try {
+        const stored = sanitizeTaskStateForStorage(taskState);
+        localStorage.setItem(key, JSON.stringify(stored));
+      } catch (error) {
+        console.warn("Failed to persist Task Center state to storage.", error);
+      }
+    }, 1200);
+    return () => {
+      if (taskPersistTimerRef.current != null) {
+        window.clearTimeout(taskPersistTimerRef.current);
+      }
+    };
+  }, [taskState]);
+
+  const rawLogcatLines = useMemo<LogcatLineEntry[]>(
     () => (activeSerial ? logcatLines[activeSerial] ?? [] : []),
     [activeSerial, logcatLines],
   );
@@ -314,7 +381,7 @@ function App() {
 
   const logcatFiltered = useMemo(
     () =>
-      filterLogcatLines(rawLogcatLines, {
+      filterLogcatEntries(rawLogcatLines, {
         levels: logcatLevels,
         activePatterns: logcatActiveFilters,
         livePattern: logcatLiveFilter,
@@ -605,23 +672,56 @@ function App() {
 
 
   useEffect(() => {
-    if (logcatFiltered.matchIndices.length === 0) {
+    if (logcatFiltered.matchIds.length === 0) {
       setLogcatMatchIndex(0);
       return;
     }
-    if (logcatMatchIndex >= logcatFiltered.matchIndices.length) {
-      setLogcatMatchIndex(logcatFiltered.matchIndices.length - 1);
+    if (logcatMatchIndex >= logcatFiltered.matchIds.length) {
+      setLogcatMatchIndex(logcatFiltered.matchIds.length - 1);
     }
-  }, [logcatFiltered.matchIndices.length, logcatMatchIndex]);
+  }, [logcatFiltered.matchIds.length, logcatMatchIndex]);
 
   useEffect(() => {
+    const flushLogcatPending = () => {
+      logcatFlushTimerRef.current = null;
+      const pending = logcatPendingRef.current;
+      const serials = Object.keys(pending);
+      if (!serials.length) {
+        return;
+      }
+      logcatPendingRef.current = {};
+      setLogcatLines((prev) => {
+        const next: Record<string, LogcatLineEntry[]> = { ...prev };
+        serials.forEach((serial) => {
+          const existing = next[serial] ?? [];
+          const appended = pending[serial] ?? [];
+          let nextId =
+            logcatNextIdRef.current[serial] ??
+            existing[existing.length - 1]?.id ??
+            0;
+          const appendedEntries: LogcatLineEntry[] = appended.map((text) => {
+            nextId += 1;
+            return { id: nextId, text };
+          });
+          logcatNextIdRef.current[serial] = nextId;
+          next[serial] = [...existing, ...appendedEntries].slice(-2000);
+        });
+        return next;
+      });
+    };
+
+    const scheduleLogcatFlush = () => {
+      if (logcatFlushTimerRef.current != null) {
+        return;
+      }
+      logcatFlushTimerRef.current = window.setTimeout(flushLogcatPending, 120);
+    };
+
     const unlistenLogcat = listen<LogcatEvent>("logcat-line", (event) => {
       const payload = event.payload;
-      setLogcatLines((prev) => {
-        const current = prev[payload.serial] ?? [];
-        const updated = [...current, payload.line].slice(-2000);
-        return { ...prev, [payload.serial]: updated };
-      });
+      const bucket = (logcatPendingRef.current[payload.serial] ??= []);
+      bucket.push(payload.line);
+      scheduleLogcatFlush();
     });
     const unlistenBluetoothSnapshot = listen("bluetooth-snapshot", (event) => {
       const payload = event.payload as { snapshot?: { summary?: string } };
@@ -724,6 +824,11 @@ function App() {
 
     return () => {
       void unlistenLogcat.then((unlisten) => unlisten());
+      if (logcatFlushTimerRef.current != null) {
+        window.clearTimeout(logcatFlushTimerRef.current);
+        logcatFlushTimerRef.current = null;
+      }
+      logcatPendingRef.current = {};
       void unlistenBluetoothSnapshot.then((unlisten) => unlisten());
       void unlistenBluetoothState.then((unlisten) => unlisten());
       void unlistenBluetoothEvent.then((unlisten) => unlisten());
@@ -835,28 +940,28 @@ function App() {
 	    });
 	    setBusy(true);
 	    try {
-	      const response = await runShell(selectedSerials, shellCommand, config?.command.parallel_execution);
-	      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-	      const output = response.data.map(
-	        (result) =>
-	          `${result.serial} (${result.exit_code ?? "?"}):\n${result.stdout || result.stderr || ""}`,
-	      );
-	      setShellOutput(output);
-	      response.data.forEach((result) => {
-	        const combined = (result.stdout || result.stderr || "").trim();
-	        dispatchTasks({
-	          type: "TASK_UPDATE_DEVICE",
-	          id: taskId,
-	          serial: result.serial,
-	          patch: {
-	            status: result.exit_code === 0 ? "success" : "error",
-	            exit_code: result.exit_code ?? null,
-	            stdout: result.stdout ?? null,
-	            stderr: result.stderr ?? null,
-	            message: combined ? combined.split("\n")[0].slice(0, 160) : "No output.",
-	          },
-	        });
-	      });
+		      const response = await runShell(selectedSerials, shellCommand, config?.command.parallel_execution);
+		      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+		      const output = response.data.map((result) => {
+		        const combined = `${result.serial} (${result.exit_code ?? "?"}):\n${result.stdout || result.stderr || ""}`;
+		        return truncateText(combined, 20_000);
+		      });
+		      setShellOutput(output);
+		      response.data.forEach((result) => {
+		        const combined = (result.stdout || result.stderr || "").trim();
+		        dispatchTasks({
+		          type: "TASK_UPDATE_DEVICE",
+		          id: taskId,
+		          serial: result.serial,
+		          patch: {
+		            status: result.exit_code === 0 ? "success" : "error",
+		            exit_code: result.exit_code ?? null,
+		            stdout: result.stdout ? truncateText(result.stdout, 50_000) : null,
+		            stderr: result.stderr ? truncateText(result.stderr, 50_000) : null,
+		            message: combined ? combined.split("\n")[0].slice(0, 160) : "No output.",
+		          },
+		        });
+		      });
 	      const hasError = response.data.some((item) => item.exit_code !== 0);
 	      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
 	      pushToast("Shell command completed.", "info");
@@ -1282,7 +1387,7 @@ function App() {
     try {
       const response = await exportLogcat(
         activeSerial,
-        logcatFiltered.lines,
+        logcatFiltered.lines.map((entry) => entry.text),
         config?.file_gen_output_path || config?.output_path,
       );
       setLogcatLastExport(response.data.output_path);
@@ -1298,69 +1403,42 @@ function App() {
     setLogcatAdvancedOpen((prev) => !prev);
   };
 
-  const renderLogcatLine = (line: string) => {
-    if (!logcatSearchPattern) {
-      return line;
-    }
-    const parts: Array<{ text: string; match: boolean }> = [];
-    let lastIndex = 0;
-    logcatSearchPattern.lastIndex = 0;
-    let match = logcatSearchPattern.exec(line);
-    while (match) {
-      const start = match.index;
-      const end = start + match[0].length;
-      if (start > lastIndex) {
-        parts.push({ text: line.slice(lastIndex, start), match: false });
-      }
-      parts.push({ text: line.slice(start, end), match: true });
-      lastIndex = end;
-      match = logcatSearchPattern.exec(line);
-    }
-    if (lastIndex < line.length) {
-      parts.push({ text: line.slice(lastIndex), match: false });
-    }
-    logcatSearchPattern.lastIndex = 0;
-    return parts.map((part, index) =>
-      part.match ? <mark key={`${part.text}-${index}`}>{part.text}</mark> : <span key={`${part.text}-${index}`}>{part.text}</span>,
-    );
-  };
-
   const scrollToLogcatMatch = (index: number) => {
     const container = logcatOutputRef.current;
     if (!container) {
       return;
     }
-    const matchIndex = logcatFiltered.matchIndices[index];
-    if (matchIndex == null) {
+    const matchId = logcatFiltered.matchIds[index];
+    if (matchId == null) {
       return;
     }
-    const target = container.querySelector(`[data-log-index="${matchIndex}"]`);
+    const target = container.querySelector(`[data-log-id="${matchId}"]`);
     if (target instanceof HTMLElement) {
       target.scrollIntoView({ block: "center" });
     }
   };
 
   const handleLogcatNextMatch = () => {
-    if (!logcatFiltered.matchIndices.length) {
+    if (!logcatFiltered.matchIds.length) {
       return;
     }
-    const nextIndex = (logcatMatchIndex + 1) % logcatFiltered.matchIndices.length;
+    const nextIndex = (logcatMatchIndex + 1) % logcatFiltered.matchIds.length;
     setLogcatMatchIndex(nextIndex);
     scrollToLogcatMatch(nextIndex);
   };
 
   const handleLogcatPrevMatch = () => {
-    if (!logcatFiltered.matchIndices.length) {
+    if (!logcatFiltered.matchIds.length) {
       return;
     }
     const prevIndex =
-      (logcatMatchIndex - 1 + logcatFiltered.matchIndices.length) % logcatFiltered.matchIndices.length;
+      (logcatMatchIndex - 1 + logcatFiltered.matchIds.length) % logcatFiltered.matchIds.length;
     setLogcatMatchIndex(prevIndex);
     scrollToLogcatMatch(prevIndex);
   };
 
   const basenameFromHostPath = (value: string) => {
-    const normalized = value.replaceAll("\\", "/");
+    const normalized = value.replace(/\\/g, "/");
     const parts = normalized.split("/").filter(Boolean);
     return parts[parts.length - 1] ?? "upload";
   };
@@ -1828,22 +1906,23 @@ function App() {
   useEffect(() => {
     const unlistenPromise = getCurrentWindow().onDragDropEvent((event) => {
       const ctx = filesDragContextRef.current;
+      const payload = event.payload;
       if (ctx.pathname !== "/files") {
         return;
       }
-      if (event.type === "enter" || event.type === "over") {
+      if (payload.type === "enter" || payload.type === "over") {
         setFilesDropActive(true);
         return;
       }
-      if (event.type === "leave") {
+      if (payload.type === "leave") {
         setFilesDropActive(false);
         return;
       }
-      if (event.type !== "drop") {
+      if (payload.type !== "drop") {
         return;
       }
       setFilesDropActive(false);
-      if (!event.paths.length) {
+      if (!payload.paths.length) {
         return;
       }
       if (!ctx.serial) {
@@ -1854,7 +1933,7 @@ function App() {
       const uploadDroppedFiles = async () => {
         setBusy(true);
         try {
-          for (const path of event.paths) {
+          for (const path of payload.paths) {
             const filename = basenameFromHostPath(path);
             if (!ctx.overwrite && existing.has(filename)) {
               pushToast(`Upload blocked: ${filename} already exists.`, "error");
@@ -3771,8 +3850,8 @@ function App() {
                             </div>
                           </div>
                           <span className="muted">
-                            Match {logcatFiltered.matchIndices.length ? logcatMatchIndex + 1 : 0} /{" "}
-                            {logcatFiltered.matchIndices.length}
+                            Match {logcatFiltered.matchIds.length ? logcatMatchIndex + 1 : 0} /{" "}
+                            {logcatFiltered.matchIds.length}
                           </span>
                         </div>
                       ) : (
@@ -3789,17 +3868,19 @@ function App() {
                             />
                           </svg>
                         </button>
-                      )}
-                      <div className="logcat-output" ref={logcatOutputRef}>
-                        {logcatFiltered.lines.map((line, index) => (
-                          <div key={`${line}-${index}`} data-log-index={index}>
-                            {renderLogcatLine(line)}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </section>
-                </div>
+	                      )}
+	                      <div className="logcat-output" ref={logcatOutputRef}>
+	                        {logcatFiltered.lines.map((entry) => (
+	                          <MemoLogcatLineRow
+	                            key={entry.id}
+	                            entry={entry}
+	                            searchPattern={logcatSearchPattern}
+	                          />
+	                        ))}
+	                      </div>
+	                    </div>
+	                  </section>
+	                </div>
               }
             />
             <Route

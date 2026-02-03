@@ -239,7 +239,7 @@ fn get_adb_program(trace_id: &str) -> Result<String, AppError> {
     Ok(program)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfig>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     let config = load_config().map_err(|err| AppError::system(err.error, &trace_id))?;
@@ -249,7 +249,7 @@ pub fn get_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfig>
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_app_config(
     config: AppConfig,
     trace_id: Option<String>,
@@ -262,7 +262,7 @@ pub fn save_app_config(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfig>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     let config = AppConfig::default();
@@ -273,7 +273,7 @@ pub fn reset_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfi
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_adb(
     command_path: Option<String>,
     trace_id: Option<String>,
@@ -345,7 +345,7 @@ pub fn check_adb(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_devices(
     detailed: Option<bool>,
     trace_id: Option<String>,
@@ -511,7 +511,7 @@ pub fn list_devices(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn adb_pair(
     address: String,
     pairing_code: String,
@@ -552,7 +552,7 @@ pub fn adb_pair(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn adb_connect(
     address: String,
     trace_id: Option<String>,
@@ -587,7 +587,7 @@ pub fn adb_connect(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_shell(
     serials: Vec<String>,
     command: String,
@@ -682,7 +682,7 @@ pub fn run_shell(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reboot_devices(
     serials: Vec<String>,
     mode: Option<String>,
@@ -717,7 +717,7 @@ pub fn reboot_devices(
     Ok(CommandResponse { trace_id, data: results })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_wifi_state(
     serials: Vec<String>,
     enable: bool,
@@ -753,7 +753,7 @@ pub fn set_wifi_state(
     Ok(CommandResponse { trace_id, data: results })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_bluetooth_state(
     serials: Vec<String>,
     enable: bool,
@@ -809,7 +809,7 @@ pub fn set_bluetooth_state(
     Ok(CommandResponse { trace_id, data: results })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn install_apk_batch(
     serials: Vec<String>,
     apk_path: String,
@@ -993,7 +993,7 @@ pub fn install_apk_batch(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn capture_screenshot(
     serial: String,
     output_dir: String,
@@ -1054,7 +1054,7 @@ pub fn capture_screenshot(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_screen_record(
     serial: String,
     state: State<'_, AppState>,
@@ -1140,7 +1140,7 @@ pub fn start_screen_record(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_screen_record(
     serial: String,
     output_dir: Option<String>,
@@ -1226,7 +1226,7 @@ pub fn stop_screen_record(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_device_files(
     serial: String,
     path: String,
@@ -1255,7 +1255,7 @@ pub fn list_device_files(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pull_device_file(
     serial: String,
     device_path: String,
@@ -1331,7 +1331,7 @@ pub fn pull_device_file(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn push_device_file(
     serial: String,
     local_path: String,
@@ -1432,7 +1432,7 @@ pub fn push_device_file(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mkdir_device_dir(
     serial: String,
     device_path: String,
@@ -1469,7 +1469,7 @@ pub fn mkdir_device_dir(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_device_path(
     serial: String,
     from_path: String,
@@ -1514,7 +1514,7 @@ pub fn rename_device_path(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_device_path(
     serial: String,
     device_path: String,
@@ -1557,7 +1557,7 @@ pub fn delete_device_path(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_local_file(
     local_path: String,
     trace_id: Option<String>,
@@ -1621,7 +1621,7 @@ fn contains_binary_control_chars(text: &str) -> bool {
     false
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_apps(
     serial: String,
     third_party_only: Option<bool>,
@@ -1687,7 +1687,7 @@ pub fn list_apps(
     Ok(CommandResponse { trace_id, data: apps })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn uninstall_app(
     serial: String,
     package_name: String,
@@ -1713,7 +1713,7 @@ pub fn uninstall_app(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn force_stop_app(
     serial: String,
     package_name: String,
@@ -1740,7 +1740,7 @@ pub fn force_stop_app(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_app_data(
     serial: String,
     package_name: String,
@@ -1769,7 +1769,7 @@ pub fn clear_app_data(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_app_enabled(
     serial: String,
     package_name: String,
@@ -1812,7 +1812,7 @@ pub fn set_app_enabled(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_app_info(
     serial: String,
     package_name: String,
@@ -1862,7 +1862,7 @@ pub fn open_app_info(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn launch_app(
     serials: Vec<String>,
     package_name: String,
@@ -1904,7 +1904,7 @@ pub fn launch_app(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_scrcpy(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<ScrcpyInfo>, AppError> {
@@ -1921,7 +1921,7 @@ pub fn check_scrcpy(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn launch_scrcpy(
     serials: Vec<String>,
     trace_id: Option<String>,
@@ -1968,7 +1968,7 @@ pub fn launch_scrcpy(
     Ok(CommandResponse { trace_id, data: results })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn capture_ui_hierarchy(
     serial: String,
     trace_id: Option<String>,
@@ -1999,7 +1999,7 @@ pub fn capture_ui_hierarchy(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_ui_hierarchy(
     serial: String,
     output_dir: Option<String>,
@@ -2101,7 +2101,7 @@ pub fn export_ui_hierarchy(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_logcat(
     serial: String,
     filter: Option<String>,
@@ -2218,7 +2218,7 @@ pub fn start_logcat(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_logcat(
     serial: String,
     state: State<'_, AppState>,
@@ -2245,7 +2245,7 @@ pub fn stop_logcat(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_logcat(
     serial: String,
     trace_id: Option<String>,
@@ -2276,7 +2276,7 @@ pub fn clear_logcat(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_logcat(
     serial: String,
     lines: Vec<String>,
@@ -2318,7 +2318,7 @@ pub fn export_logcat(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_bluetooth_monitor(
     serial: String,
     app: AppHandle,
@@ -2346,7 +2346,7 @@ pub fn start_bluetooth_monitor(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_bluetooth_monitor(
     serial: String,
     state: State<'_, AppState>,
@@ -2371,7 +2371,7 @@ pub fn stop_bluetooth_monitor(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn generate_bugreport(
     serial: String,
     output_dir: String,
@@ -2497,7 +2497,7 @@ pub fn generate_bugreport(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_bugreport(
     serial: String,
     state: State<'_, AppState>,

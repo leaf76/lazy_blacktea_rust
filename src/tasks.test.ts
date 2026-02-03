@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { createInitialTaskState, createTask, tasksReducer } from "./tasks";
+import {
+  createInitialTaskState,
+  createTask,
+  inflateStoredTaskState,
+  parseStoredTaskState,
+  sanitizeTaskStateForStorage,
+  tasksReducer,
+} from "./tasks";
 
 describe("tasksReducer", () => {
   it("adds tasks and trims to max", () => {
@@ -39,5 +46,23 @@ describe("tasksReducer", () => {
     const cleared = tasksReducer(completed, { type: "TASK_CLEAR_COMPLETED" });
     expect(cleared.items.map((t) => t.id)).toEqual(["2"]);
   });
-});
 
+  it("sanitizes and inflates stored tasks", () => {
+    const state = createInitialTaskState();
+    const longMessage = "x".repeat(500);
+    const task = createTask({ id: "1", kind: "shell", title: "Shell title", serials: ["A"] });
+    const withMessage = tasksReducer({ ...state, items: [task] }, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "A",
+      patch: { status: "success", message: longMessage, stdout: "y".repeat(50_000) },
+    });
+    const stored = sanitizeTaskStateForStorage(withMessage);
+    expect(stored.items[0].devices.A.message?.length).toBeLessThanOrEqual(240);
+
+    const parsed = parseStoredTaskState(JSON.stringify(stored));
+    expect(parsed).not.toBeNull();
+    const inflated = inflateStoredTaskState(parsed!, 50);
+    expect(inflated.items[0].devices.A.stdout ?? null).toBeNull();
+  });
+});
