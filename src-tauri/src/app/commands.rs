@@ -33,11 +33,13 @@ use crate::app::bluetooth::service::start_bluetooth_monitor as start_bluetooth_m
 use crate::app::config::{load_config, save_config, AppConfig};
 use crate::app::error::AppError;
 use crate::app::models::{
-    AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppInfo, BugreportResult,
-    CommandResponse, CommandResult, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult,
-    LogcatExportResult, ScrcpyInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
+    AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppInfo,
+    BugreportResult, CommandResponse, CommandResult, DeviceFileEntry, DeviceInfo, FilePreview,
+    HostCommandResult, LogcatExportResult, ScrcpyInfo, UiHierarchyCaptureResult,
+    UiHierarchyExportResult,
 };
 use crate::app::state::{AppState, BugreportHandle, LogcatHandle, RecordingHandle};
+use crate::app::ui_capture::png_bytes_to_data_url;
 use crate::app::ui_xml::render_device_ui_html;
 
 #[derive(Clone, serde::Serialize)]
@@ -57,13 +59,17 @@ pub struct FileTransferProgressEvent {
 }
 
 fn resolve_trace_id(input: Option<String>) -> String {
-    input.filter(|value| !value.trim().is_empty())
+    input
+        .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
 fn ensure_non_empty(value: &str, field: &str, trace_id: &str) -> Result<(), AppError> {
     if value.trim().is_empty() {
-        return Err(AppError::validation(format!("{field} is required"), trace_id));
+        return Err(AppError::validation(
+            format!("{field} is required"),
+            trace_id,
+        ));
     }
     Ok(())
 }
@@ -206,7 +212,10 @@ fn run_adb_transfer_with_progress(
             Err(err) => {
                 let _ = stdout_handle.join();
                 let _ = stderr_handle.join();
-                return Err(AppError::system(format!("Failed to poll command: {err}"), trace_id));
+                return Err(AppError::system(
+                    format!("Failed to poll command: {err}"),
+                    trace_id,
+                ));
             }
         }
     };
@@ -302,7 +311,8 @@ pub fn check_adb(
     }
 
     let args = vec!["version".to_string()];
-    let output = match run_command_with_timeout(&program, &args, Duration::from_secs(5), &trace_id) {
+    let output = match run_command_with_timeout(&program, &args, Duration::from_secs(5), &trace_id)
+    {
         Ok(output) => output,
         Err(err) => {
             warn!(trace_id = %trace_id, error = %err.error, "adb check failed");
@@ -417,12 +427,8 @@ pub fn list_devices(
                 "global".to_string(),
                 "bluetooth_on".to_string(),
             ];
-            let bt_output = run_command_with_timeout(
-                &adb_program,
-                &bt_args,
-                Duration::from_secs(5),
-                &trace_id,
-            );
+            let bt_output =
+                run_command_with_timeout(&adb_program, &bt_args, Duration::from_secs(5), &trace_id);
             let bt_state_args = vec![
                 "-s".to_string(),
                 summary.serial.clone(),
@@ -467,7 +473,8 @@ pub fn list_devices(
 
             match getprop {
                 Ok(output) => {
-                    let mut detail = build_device_detail(&summary.serial, &parse_getprop_map(&output.stdout));
+                    let mut detail =
+                        build_device_detail(&summary.serial, &parse_getprop_map(&output.stdout));
                     if let Ok(battery_output) = battery {
                         detail.battery_level = parse_battery_level(&battery_output.stdout);
                     }
@@ -522,15 +529,13 @@ pub fn adb_pair(
     ensure_non_empty(&pairing_code, "pairing_code", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    let args = vec![
-        "pair".to_string(),
-        address.clone(),
-        pairing_code.clone(),
-    ];
-    let output =
-        run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
+    let args = vec!["pair".to_string(), address.clone(), pairing_code.clone()];
+    let output = run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
     let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
-    if output.exit_code.unwrap_or_default() != 0 || combined.contains("failed") || combined.contains("unable") {
+    if output.exit_code.unwrap_or_default() != 0
+        || combined.contains("failed")
+        || combined.contains("unable")
+    {
         let detail = if output.stderr.trim().is_empty() {
             output.stdout.trim()
         } else {
@@ -562,10 +567,12 @@ pub fn adb_connect(
 
     let adb_program = get_adb_program(&trace_id)?;
     let args = vec!["connect".to_string(), address.clone()];
-    let output =
-        run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
+    let output = run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
     let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
-    if output.exit_code.unwrap_or_default() != 0 || combined.contains("failed") || combined.contains("unable") {
+    if output.exit_code.unwrap_or_default() != 0
+        || combined.contains("failed")
+        || combined.contains("unable")
+    {
         let detail = if output.stderr.trim().is_empty() {
             output.stdout.trim()
         } else {
@@ -622,7 +629,8 @@ pub fn run_shell(
                     "-c".to_string(),
                     command_clone,
                 ];
-                let output = run_command_with_timeout(&adb_program_clone, &args, timeout, &trace_id_clone);
+                let output =
+                    run_command_with_timeout(&adb_program_clone, &args, timeout, &trace_id_clone);
                 (index, serial, output)
             }));
         }
@@ -633,12 +641,15 @@ pub fn run_shell(
                 .join()
                 .map_err(|_| AppError::system("Shell command thread panicked", &trace_id))?;
             let output = output?;
-            collected.push((index, CommandResult {
-                serial,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                exit_code: output.exit_code,
-            }));
+            collected.push((
+                index,
+                CommandResult {
+                    serial,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_code: output.exit_code,
+                },
+            ));
         }
         collected.sort_by_key(|item| item.0);
         results = collected.into_iter().map(|item| item.1).collect();
@@ -664,12 +675,20 @@ pub fn run_shell(
     }
 
     if config.command.auto_save_history && !command.trim().is_empty() {
-        if config.command_history.last().map(|last| last == &command).unwrap_or(false) {
+        if config
+            .command_history
+            .last()
+            .map(|last| last == &command)
+            .unwrap_or(false)
+        {
             // skip duplicate trailing entry
         } else {
             config.command_history.push(command.clone());
             if config.command_history.len() > config.command.max_history_size {
-                let start = config.command_history.len().saturating_sub(config.command.max_history_size);
+                let start = config
+                    .command_history
+                    .len()
+                    .saturating_sub(config.command.max_history_size);
                 config.command_history = config.command_history.split_off(start);
             }
             let _ = save_config(&config);
@@ -714,7 +733,10 @@ pub fn reboot_devices(
         });
     }
 
-    Ok(CommandResponse { trace_id, data: results })
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
 }
 
 #[tauri::command(async)]
@@ -750,7 +772,10 @@ pub fn set_wifi_state(
         });
     }
 
-    Ok(CommandResponse { trace_id, data: results })
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
 }
 
 #[tauri::command(async)]
@@ -806,7 +831,10 @@ pub fn set_bluetooth_state(
         });
     }
 
-    Ok(CommandResponse { trace_id, data: results })
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
 }
 
 #[tauri::command(async)]
@@ -840,8 +868,8 @@ pub fn install_apk_batch(
 
     let mut split_bundle = None;
     if is_split_bundle(&apk_path) {
-        let bundle = extract_split_apks(&apk_path)
-            .map_err(|err| AppError::dependency(err, &trace_id))?;
+        let bundle =
+            extract_split_apks(&apk_path).map_err(|err| AppError::dependency(err, &trace_id))?;
         if bundle.apk_paths.is_empty() {
             for serial in &serials {
                 result.results.insert(
@@ -857,7 +885,10 @@ pub fn install_apk_batch(
                 );
             }
             result.total_duration_seconds = start.elapsed().as_secs_f64();
-            return Ok(CommandResponse { trace_id, data: result });
+            return Ok(CommandResponse {
+                trace_id,
+                data: result,
+            });
         }
         split_bundle = Some(bundle);
     } else {
@@ -878,7 +909,10 @@ pub fn install_apk_batch(
                 );
             }
             result.total_duration_seconds = start.elapsed().as_secs_f64();
-            return Ok(CommandResponse { trace_id, data: result });
+            return Ok(CommandResponse {
+                trace_id,
+                data: result,
+            });
         }
     }
 
@@ -896,9 +930,7 @@ pub fn install_apk_batch(
     for serial in serials {
         let trace_clone = trace_id.clone();
         let extra_args_list = extra_args_list.clone();
-        let split_paths = split_bundle
-            .as_ref()
-            .map(|bundle| bundle.apk_paths.clone());
+        let split_paths = split_bundle.as_ref().map(|bundle| bundle.apk_paths.clone());
         let apk_path_clone = apk_path.clone();
         let adb_program_clone = adb_program.clone();
         handles.push(std::thread::spawn(move || {
@@ -937,8 +969,12 @@ pub fn install_apk_batch(
                 args.extend(extra_args_list.clone());
                 args.push(apk_path_clone);
             }
-            let output =
-                run_command_with_timeout(&adb_program_clone, &args, Duration::from_secs(180), &trace_clone);
+            let output = run_command_with_timeout(
+                &adb_program_clone,
+                &args,
+                Duration::from_secs(180),
+                &trace_clone,
+            );
             let elapsed = start_device.elapsed().as_secs_f64();
             match output {
                 Ok(output) => {
@@ -973,7 +1009,9 @@ pub fn install_apk_batch(
                 let result_item = handle
                     .join()
                     .map_err(|_| AppError::system("Install thread panicked", &trace_id))?;
-                result.results.insert(result_item.serial.clone(), result_item);
+                result
+                    .results
+                    .insert(result_item.serial.clone(), result_item);
             }
         }
     }
@@ -982,7 +1020,9 @@ pub fn install_apk_batch(
         let result_item = handle
             .join()
             .map_err(|_| AppError::system("Install thread panicked", &trace_id))?;
-        result.results.insert(result_item.serial.clone(), result_item);
+        result
+            .results
+            .insert(result_item.serial.clone(), result_item);
     }
 
     result.total_duration_seconds = start.elapsed().as_secs_f64();
@@ -1008,8 +1048,9 @@ pub fn capture_screenshot(
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
     let filename = format!("screenshot_{}_{}.png", serial, timestamp);
     let mut output_path = PathBuf::from(output_dir);
-    fs::create_dir_all(&output_path)
-        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+    fs::create_dir_all(&output_path).map_err(|err| {
+        AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
+    })?;
     output_path.push(filename);
 
     let mut args = vec![
@@ -1040,7 +1081,10 @@ pub fn capture_screenshot(
 
     if !output.status.success() {
         return Err(AppError::dependency(
-            format!("Screenshot failed: {}", String::from_utf8_lossy(&output.stderr)),
+            format!(
+                "Screenshot failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
             &trace_id,
         ));
     }
@@ -1124,7 +1168,9 @@ pub fn start_screen_record(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| AppError::dependency(format!("Failed to start screenrecord: {err}"), &trace_id))?;
+        .map_err(|err| {
+            AppError::dependency(format!("Failed to start screenrecord: {err}"), &trace_id)
+        })?;
 
     guard.insert(
         serial,
@@ -1175,12 +1221,18 @@ pub fn stop_screen_record(
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(AppError::system("Timeout waiting for screenrecord", &trace_id));
+                    return Err(AppError::system(
+                        "Timeout waiting for screenrecord",
+                        &trace_id,
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(err) => {
-                return Err(AppError::system(format!("Failed to stop screenrecord: {err}"), &trace_id));
+                return Err(AppError::system(
+                    format!("Failed to stop screenrecord: {err}"),
+                    &trace_id,
+                ));
             }
         }
     }
@@ -1196,8 +1248,9 @@ pub fn stop_screen_record(
         });
     }
 
-    fs::create_dir_all(&output_dir)
-        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+    fs::create_dir_all(&output_dir).map_err(|err| {
+        AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
+    })?;
 
     let filename = PathBuf::from(&handle.remote_path)
         .file_name()
@@ -1269,8 +1322,9 @@ pub fn pull_device_file(
     ensure_non_empty(&output_dir, "output_dir", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    fs::create_dir_all(&output_dir)
-        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+    fs::create_dir_all(&output_dir).map_err(|err| {
+        AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
+    })?;
 
     let args = vec![
         "-s".to_string(),
@@ -1488,7 +1542,10 @@ pub fn rename_device_path(
         return Err(AppError::validation(message, &trace_id));
     }
     if from_path.trim() == to_path.trim() {
-        return Err(AppError::validation("from_path and to_path must be different", &trace_id));
+        return Err(AppError::validation(
+            "from_path and to_path must be different",
+            &trace_id,
+        ));
     }
 
     let adb_program = get_adb_program(&trace_id)?;
@@ -1669,7 +1726,12 @@ pub fn list_apps(
                 "package".to_string(),
                 entry.package_name.clone(),
             ];
-            match run_command_with_timeout(&adb_program, &dump_args, Duration::from_secs(10), &trace_id) {
+            match run_command_with_timeout(
+                &adb_program,
+                &dump_args,
+                Duration::from_secs(10),
+                &trace_id,
+            ) {
                 Ok(out) => (
                     parse_dumpsys_version_name(&out.stdout),
                     parse_dumpsys_version_code(&out.stdout),
@@ -1684,7 +1746,10 @@ pub fn list_apps(
 
     apps.sort_by(|a, b| a.package_name.cmp(&b.package_name));
 
-    Ok(CommandResponse { trace_id, data: apps })
+    Ok(CommandResponse {
+        trace_id,
+        data: apps,
+    })
 }
 
 #[tauri::command(async)]
@@ -1799,7 +1864,11 @@ pub fn set_app_enabled(
     }
     args.push(package_name);
     let output = run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
-    let normalized = format!("{} {}", output.stdout.to_lowercase(), output.stderr.to_lowercase());
+    let normalized = format!(
+        "{} {}",
+        output.stdout.to_lowercase(),
+        output.stderr.to_lowercase()
+    );
     let success = if enable {
         normalized.contains("enabled") || normalized.trim().is_empty()
     } else {
@@ -1834,8 +1903,17 @@ pub fn open_app_info(
         "-d".to_string(),
         format!("package:{package_name}"),
     ];
-    let output = run_command_with_timeout(&adb_program, &primary_args, Duration::from_secs(10), &trace_id)?;
-    let combined = format!("{}{}", output.stdout.to_lowercase(), output.stderr.to_lowercase());
+    let output = run_command_with_timeout(
+        &adb_program,
+        &primary_args,
+        Duration::from_secs(10),
+        &trace_id,
+    )?;
+    let combined = format!(
+        "{}{}",
+        output.stdout.to_lowercase(),
+        output.stderr.to_lowercase()
+    );
     if output.exit_code.unwrap_or_default() != 0
         || combined.contains("error")
         || combined.contains("exception")
@@ -1853,7 +1931,12 @@ pub fn open_app_info(
             "package".to_string(),
             package_name,
         ];
-        let _ = run_command_with_timeout(&adb_program, &legacy_args, Duration::from_secs(10), &trace_id)?;
+        let _ = run_command_with_timeout(
+            &adb_program,
+            &legacy_args,
+            Duration::from_secs(10),
+            &trace_id,
+        )?;
     }
 
     Ok(CommandResponse {
@@ -1889,7 +1972,8 @@ pub fn launch_app(
             "android.intent.category.LAUNCHER".to_string(),
             "1".to_string(),
         ];
-        let output = run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
+        let output =
+            run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
         results.push(CommandResult {
             serial,
             stdout: output.stdout,
@@ -1905,9 +1989,7 @@ pub fn launch_app(
 }
 
 #[tauri::command(async)]
-pub fn check_scrcpy(
-    trace_id: Option<String>,
-) -> Result<CommandResponse<ScrcpyInfo>, AppError> {
+pub fn check_scrcpy(trace_id: Option<String>) -> Result<CommandResponse<ScrcpyInfo>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     let availability = check_scrcpy_availability();
     Ok(CommandResponse {
@@ -1965,7 +2047,10 @@ pub fn launch_scrcpy(
         }
     }
 
-    Ok(CommandResponse { trace_id, data: results })
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
 }
 
 #[tauri::command(async)]
@@ -1977,14 +2062,20 @@ pub fn capture_ui_hierarchy(
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
+    let config = load_config().unwrap_or_default();
     let output = Command::new(&adb_program)
         .args(["-s", &serial, "exec-out", "uiautomator", "dump", "/dev/tty"])
         .output()
-        .map_err(|err| AppError::dependency(format!("Failed to run uiautomator: {err}"), &trace_id))?;
+        .map_err(|err| {
+            AppError::dependency(format!("Failed to run uiautomator: {err}"), &trace_id)
+        })?;
 
     if !output.status.success() {
         return Err(AppError::dependency(
-            format!("UI dump failed: {}", String::from_utf8_lossy(&output.stderr)),
+            format!(
+                "UI dump failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
             &trace_id,
         ));
     }
@@ -1993,9 +2084,64 @@ pub fn capture_ui_hierarchy(
     let html = render_device_ui_html(&xml)
         .map_err(|err| AppError::system(format!("Failed to render HTML: {err}"), &trace_id))?;
 
+    let mut screenshot_args = vec![
+        "-s".to_string(),
+        serial.clone(),
+        "exec-out".to_string(),
+        "screencap".to_string(),
+        "-p".to_string(),
+    ];
+    if config.screenshot.display_id >= 0 {
+        screenshot_args.push("-d".to_string());
+        screenshot_args.push(config.screenshot.display_id.to_string());
+    }
+    if !config.screenshot.extra_args.trim().is_empty() {
+        screenshot_args.extend(
+            config
+                .screenshot
+                .extra_args
+                .split_whitespace()
+                .map(|item| item.to_string()),
+        );
+    }
+
+    let (screenshot_data_url, screenshot_error) = match Command::new(&adb_program)
+        .args(&screenshot_args)
+        .output()
+    {
+        Ok(screenshot_output) => {
+            if !screenshot_output.status.success() {
+                let message = format!(
+                    "Screenshot failed: {}",
+                    String::from_utf8_lossy(&screenshot_output.stderr)
+                );
+                warn!(trace_id = %trace_id, error = %message, "ui_inspector screenshot failed");
+                (None, Some(message))
+            } else {
+                match png_bytes_to_data_url(&screenshot_output.stdout) {
+                    Ok(url) => (Some(url), None),
+                    Err(message) => {
+                        warn!(trace_id = %trace_id, error = %message, "ui_inspector screenshot invalid");
+                        (None, Some(message))
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            let message = format!("Failed to capture screenshot: {err}");
+            warn!(trace_id = %trace_id, error = %message, "ui_inspector screenshot error");
+            (None, Some(message))
+        }
+    };
+
     Ok(CommandResponse {
         trace_id,
-        data: UiHierarchyCaptureResult { html, xml },
+        data: UiHierarchyCaptureResult {
+            html,
+            xml,
+            screenshot_data_url,
+            screenshot_error,
+        },
     })
 }
 
@@ -2020,23 +2166,31 @@ pub fn export_ui_hierarchy(
             }
         });
     ensure_non_empty(&resolved_dir, "output_dir", &trace_id)?;
-    fs::create_dir_all(&resolved_dir)
-        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+    fs::create_dir_all(&resolved_dir).map_err(|err| {
+        AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
+    })?;
 
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let xml_path = PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.xml", serial, timestamp));
-    let html_path = PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.html", serial, timestamp));
+    let xml_path =
+        PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.xml", serial, timestamp));
+    let html_path =
+        PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.html", serial, timestamp));
     let screenshot_path =
         PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.png", serial, timestamp));
 
     let output = Command::new(&adb_program)
         .args(["-s", &serial, "exec-out", "uiautomator", "dump", "/dev/tty"])
         .output()
-        .map_err(|err| AppError::dependency(format!("Failed to run uiautomator: {err}"), &trace_id))?;
+        .map_err(|err| {
+            AppError::dependency(format!("Failed to run uiautomator: {err}"), &trace_id)
+        })?;
 
     if !output.status.success() {
         return Err(AppError::dependency(
-            format!("UI dump failed: {}", String::from_utf8_lossy(&output.stderr)),
+            format!(
+                "UI dump failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
             &trace_id,
         ));
     }
@@ -2074,7 +2228,9 @@ pub fn export_ui_hierarchy(
     let screenshot_output = Command::new(&adb_program)
         .args(&screenshot_args)
         .output()
-        .map_err(|err| AppError::dependency(format!("Failed to capture screenshot: {err}"), &trace_id))?;
+        .map_err(|err| {
+            AppError::dependency(format!("Failed to capture screenshot: {err}"), &trace_id)
+        })?;
     if !screenshot_output.status.success() {
         return Err(AppError::dependency(
             format!(
@@ -2084,8 +2240,9 @@ pub fn export_ui_hierarchy(
             &trace_id,
         ));
     }
-    let mut screenshot_file = fs::File::create(&screenshot_path)
-        .map_err(|err| AppError::system(format!("Failed to create screenshot: {err}"), &trace_id))?;
+    let mut screenshot_file = fs::File::create(&screenshot_path).map_err(|err| {
+        AppError::system(format!("Failed to create screenshot: {err}"), &trace_id)
+    })?;
     screenshot_file
         .write_all(&screenshot_output.stdout)
         .map_err(|err| AppError::system(format!("Failed to write screenshot: {err}"), &trace_id))?;
@@ -2204,13 +2361,7 @@ pub fn start_logcat(
         }
     });
 
-    guard.insert(
-        serial,
-        LogcatHandle {
-            child,
-            stop_flag,
-        },
-    );
+    guard.insert(serial, LogcatHandle { child, stop_flag });
 
     Ok(CommandResponse {
         trace_id,
@@ -2298,15 +2449,17 @@ pub fn export_logcat(
         });
     ensure_non_empty(&resolved_dir, "output_dir", &trace_id)?;
 
-    fs::create_dir_all(&resolved_dir)
-        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+    fs::create_dir_all(&resolved_dir).map_err(|err| {
+        AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
+    })?;
 
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let output_path = PathBuf::from(&resolved_dir)
-        .join(format!("logcat_{}_{}.txt", serial, timestamp));
+    let output_path =
+        PathBuf::from(&resolved_dir).join(format!("logcat_{}_{}.txt", serial, timestamp));
     let payload = lines.join("\n");
-    fs::write(&output_path, payload)
-        .map_err(|err| AppError::system(format!("Failed to write logcat file: {err}"), &trace_id))?;
+    fs::write(&output_path, payload).map_err(|err| {
+        AppError::system(format!("Failed to write logcat file: {err}"), &trace_id)
+    })?;
 
     Ok(CommandResponse {
         trace_id,
@@ -2334,10 +2487,14 @@ pub fn start_bluetooth_monitor(
         .lock()
         .map_err(|_| AppError::system("Bluetooth monitor registry locked", &trace_id))?;
     if guard.contains_key(&serial) {
-        return Err(AppError::validation("Bluetooth monitor already running", &trace_id));
+        return Err(AppError::validation(
+            "Bluetooth monitor already running",
+            &trace_id,
+        ));
     }
 
-    let handle = start_bluetooth_monitor_service(app, serial.clone(), trace_id.clone(), adb_program);
+    let handle =
+        start_bluetooth_monitor_service(app, serial.clone(), trace_id.clone(), adb_program);
     guard.insert(serial, handle);
 
     Ok(CommandResponse {
@@ -2361,7 +2518,12 @@ pub fn stop_bluetooth_monitor(
         .map_err(|_| AppError::system("Bluetooth monitor registry locked", &trace_id))?;
     let handle = match guard.remove(&serial) {
         Some(handle) => handle,
-        None => return Err(AppError::validation("Bluetooth monitor not running", &trace_id)),
+        None => {
+            return Err(AppError::validation(
+                "Bluetooth monitor not running",
+                &trace_id,
+            ))
+        }
     };
     handle.stop();
 
@@ -2384,8 +2546,9 @@ pub fn generate_bugreport(
     ensure_non_empty(&output_dir, "output_dir", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    fs::create_dir_all(&output_dir)
-        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), &trace_id))?;
+    fs::create_dir_all(&output_dir).map_err(|err| {
+        AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
+    })?;
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
     let filename = format!("bugreport_{}_{}.zip", serial, timestamp);
     let output_path = PathBuf::from(output_dir).join(filename);
@@ -2554,7 +2717,9 @@ fn run_bugreport_streaming(
         let mut guard = child_holder
             .lock()
             .map_err(|_| "Bugreport registry locked".to_string())?;
-        let child = guard.as_mut().ok_or_else(|| "Bugreport process missing".to_string())?;
+        let child = guard
+            .as_mut()
+            .ok_or_else(|| "Bugreport process missing".to_string())?;
         child
             .stdout
             .take()

@@ -1,6 +1,5 @@
 import { memo, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -212,7 +211,8 @@ function App() {
   >(null);
   const [uiHtml, setUiHtml] = useState("");
   const [uiXml, setUiXml] = useState("");
-  const [uiScreenshotPath, setUiScreenshotPath] = useState("");
+  const [uiScreenshotDataUrl, setUiScreenshotDataUrl] = useState("");
+  const [uiScreenshotError, setUiScreenshotError] = useState("");
   const [uiInspectorTab, setUiInspectorTab] = useState<"hierarchy" | "xml">("hierarchy");
   const [uiInspectorSearch, setUiInspectorSearch] = useState("");
   const [uiExportResult, setUiExportResult] = useState("");
@@ -421,10 +421,7 @@ function App() {
     }
   }, [logcatPresets, logcatPresetSelected]);
 
-  const uiScreenshotSrc = useMemo(
-    () => (uiScreenshotPath ? convertFileSrc(uiScreenshotPath) : ""),
-    [uiScreenshotPath],
-  );
+  const uiScreenshotSrc = uiScreenshotDataUrl;
 
   const filteredUiXml = useMemo(() => {
     const query = uiInspectorSearch.trim().toLowerCase();
@@ -2061,17 +2058,11 @@ function App() {
       const response = await captureUiHierarchy(activeSerial);
       setUiHtml(response.data.html);
       setUiXml(response.data.xml);
+      setUiScreenshotDataUrl(response.data.screenshot_data_url ?? "");
+      setUiScreenshotError(response.data.screenshot_error ?? "");
       setUiInspectorTab("hierarchy");
       setUiInspectorSearch("");
       setUiExportResult("");
-
-      const outputDir = config?.file_gen_output_path || config?.output_path || "";
-      if (outputDir) {
-        const screenshotResponse = await captureScreenshot(activeSerial, outputDir);
-        setUiScreenshotPath(screenshotResponse.data);
-      } else {
-        setUiScreenshotPath("");
-      }
       pushToast("UI hierarchy captured.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -3929,7 +3920,7 @@ function App() {
                         <div className="panel-header">
                           <h3>Screenshot</h3>
                           <span className="muted">
-                            {uiScreenshotPath ? "Captured" : "No screenshot"}
+                            {uiScreenshotSrc ? "Captured" : "No screenshot"}
                           </span>
                         </div>
                         <div className="form-row">
@@ -3952,7 +3943,11 @@ function App() {
                               style={{ transform: `scale(${uiZoom})`, transformOrigin: "top left" }}
                             />
                           ) : (
-                            <p className="muted">Capture UI hierarchy to include a screenshot.</p>
+                            <p className="muted">
+                              {uiScreenshotError
+                                ? `Screenshot unavailable: ${uiScreenshotError}`
+                                : "Capture UI hierarchy to include a screenshot."}
+                            </p>
                           )}
                         </div>
                       </div>

@@ -59,6 +59,8 @@ export type AdbInfo = {
 export type UiHierarchyCaptureResult = {
   html: string;
   xml: string;
+  screenshot_data_url?: string | null;
+  screenshot_error?: string | null;
 };
 
 export type UiHierarchyExportResult = {

@@ -11,7 +11,7 @@ Lazy Blacktea is a desktop console for Android device automation. This edition u
 - Screenshot and screen recording with configurable settings
 - Logcat streaming with filters, presets, search, and export
 - Device file browsing, pull, upload, rename/delete, and preview
-- UI hierarchy capture with screenshot + XML/HTML export
+- UI hierarchy capture with inline screenshot preview + XML/HTML export
 - Wireless ADB pairing helper (QR/pairing code flow)
 - App management (list, uninstall, force stop, clear data, enable/disable, open info)
 - Bugreport generation with streaming progress and cancel
@@ -49,6 +49,7 @@ cargo test --all --all-features
 - Default output paths can be configured in Settings.
 - Task Center keeps the last 50 tasks and persists across restarts.
 - File transfers report progress in Task Center when the installed `adb` supports `-p` (falls back automatically).
+- UI Inspector capture includes an embedded screenshot preview; export writes XML/HTML/PNG files to the configured output folder.
 - App shell + routing are implemented in `src/App.tsx` with `HashRouter` in `src/main.tsx`.
 - UI layout uses compact density, grouped sidebar navigation, and a device status top bar.
 - Active device auto-selects the first online device after refresh; the top bar selector includes a Manage shortcut.

@@ -2048,6 +2048,7 @@ dependencies = [
 name = "lazy_blacktea_rust"
 version = "0.0.50"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "mime_guess",
  "regex",

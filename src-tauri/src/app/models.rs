@@ -70,6 +70,8 @@ pub struct AdbInfo {
 pub struct UiHierarchyCaptureResult {
     pub html: String,
     pub xml: String,
+    pub screenshot_data_url: Option<String>,
+    pub screenshot_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,14 +162,20 @@ impl ApkInstallErrorCode {
             ApkInstallErrorCode::InstallFailedUpdateIncompatible => {
                 "INSTALL_FAILED_UPDATE_INCOMPATIBLE"
             }
-            ApkInstallErrorCode::InstallFailedDuplicatePackage => "INSTALL_FAILED_DUPLICATE_PACKAGE",
+            ApkInstallErrorCode::InstallFailedDuplicatePackage => {
+                "INSTALL_FAILED_DUPLICATE_PACKAGE"
+            }
             ApkInstallErrorCode::InstallFailedOlderSdk => "INSTALL_FAILED_OLDER_SDK",
             ApkInstallErrorCode::InstallFailedNewerSdk => "INSTALL_FAILED_NEWER_SDK",
-            ApkInstallErrorCode::InstallFailedVersionDowngrade => "INSTALL_FAILED_VERSION_DOWNGRADE",
+            ApkInstallErrorCode::InstallFailedVersionDowngrade => {
+                "INSTALL_FAILED_VERSION_DOWNGRADE"
+            }
             ApkInstallErrorCode::InstallFailedInsufficientStorage => {
                 "INSTALL_FAILED_INSUFFICIENT_STORAGE"
             }
-            ApkInstallErrorCode::InstallFailedMediaUnavailable => "INSTALL_FAILED_MEDIA_UNAVAILABLE",
+            ApkInstallErrorCode::InstallFailedMediaUnavailable => {
+                "INSTALL_FAILED_MEDIA_UNAVAILABLE"
+            }
             ApkInstallErrorCode::InstallFailedUserRestricted => "INSTALL_FAILED_USER_RESTRICTED",
             ApkInstallErrorCode::InstallFailedVerificationFailure => {
                 "INSTALL_FAILED_VERIFICATION_FAILURE"
@@ -200,13 +208,13 @@ impl ApkInstallErrorCode {
             ApkInstallErrorCode::InstallFailedUpdateIncompatible => {
                 "Update incompatible with existing installation"
             }
-            ApkInstallErrorCode::InstallFailedDuplicatePackage => "Package already exists on device",
+            ApkInstallErrorCode::InstallFailedDuplicatePackage => {
+                "Package already exists on device"
+            }
             ApkInstallErrorCode::InstallFailedOlderSdk => {
                 "Device Android version too old for this APK"
             }
-            ApkInstallErrorCode::InstallFailedNewerSdk => {
-                "APK requires older Android version"
-            }
+            ApkInstallErrorCode::InstallFailedNewerSdk => "APK requires older Android version",
             ApkInstallErrorCode::InstallFailedVersionDowngrade => {
                 "Cannot downgrade - use -d flag or uninstall first"
             }
@@ -217,9 +225,7 @@ impl ApkInstallErrorCode {
             ApkInstallErrorCode::InstallFailedUserRestricted => {
                 "User restricted from installing apps"
             }
-            ApkInstallErrorCode::InstallFailedVerificationFailure => {
-                "Package verification failed"
-            }
+            ApkInstallErrorCode::InstallFailedVerificationFailure => "Package verification failed",
             ApkInstallErrorCode::InstallParseFailedNotApk => "File is not a valid APK",
             ApkInstallErrorCode::InstallParseFailedBadManifest => {
                 "Invalid AndroidManifest.xml in APK"
@@ -233,9 +239,7 @@ impl ApkInstallErrorCode {
             ApkInstallErrorCode::InstallFailedNoMatchingAbis => {
                 "APK not compatible with device CPU architecture"
             }
-            ApkInstallErrorCode::InstallFailedTestOnly => {
-                "Test-only APK - use -t flag to install"
-            }
+            ApkInstallErrorCode::InstallFailedTestOnly => "Test-only APK - use -t flag to install",
             ApkInstallErrorCode::UnknownError => "Unknown installation error",
         }
     }
