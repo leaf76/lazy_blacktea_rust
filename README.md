@@ -50,6 +50,7 @@ cargo test --all --all-features
 - Task Center keeps the last 50 tasks and persists across restarts.
 - File transfers report progress in Task Center when the installed `adb` supports `-p` (falls back automatically).
 - UI Inspector capture includes an embedded screenshot preview; export writes XML/HTML/PNG files to the configured output folder.
+- Form rows align labels with a fixed width and tighten spacing in smaller windows.
 - App shell + routing are implemented in `src/App.tsx` with `HashRouter` in `src/main.tsx`.
 - UI layout uses compact density, grouped sidebar navigation, and a device status top bar.
 - Primary device auto-selects the first online device after refresh; the top bar device context popover includes a Manage shortcut.

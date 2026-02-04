@@ -1560,6 +1560,24 @@ textarea {
     --form-control-height: 30px;
   }
 
+  .page {
+    padding: 14px 16px 32px;
+    gap: 12px;
+  }
+
+  .page-section {
+    gap: 12px;
+  }
+
+  .panel {
+    padding: 12px;
+    gap: 8px;
+  }
+
+  .panel-header h2 {
+    font-size: 14px;
+  }
+
   .form-row > label:not(.toggle) {
     font-size: 11px;
   }
