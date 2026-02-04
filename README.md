@@ -46,7 +46,7 @@ cargo test --all --all-features
 
 - Configuration is stored at `~/.lazy_blacktea_config.json` (or `%USERPROFILE%\\.lazy_blacktea_config.json` on Windows). Override with `LAZY_BLACKTEA_CONFIG_PATH`.
 - Logs are JSON-formatted in release builds.
-- Default output paths can be configured in Settings.
+- Default output paths are set to your system Downloads folder and can be changed in Settings.
 - Task Center keeps the last 50 tasks and persists across restarts.
 - File transfers report progress in Task Center when the installed `adb` supports `-p` (falls back automatically).
 - UI Inspector capture includes an embedded screenshot preview; export writes XML/HTML/PNG files to the configured output folder.

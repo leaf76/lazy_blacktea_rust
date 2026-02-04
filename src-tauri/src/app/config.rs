@@ -5,6 +5,20 @@ use std::path::{Path, PathBuf};
 
 use crate::app::error::AppError;
 
+fn resolve_default_output_dir(download_dir: Option<PathBuf>, home_dir: Option<PathBuf>) -> String {
+    if let Some(dir) = download_dir {
+        return dir.to_string_lossy().to_string();
+    }
+    if let Some(home) = home_dir {
+        return home.join("Downloads").to_string_lossy().to_string();
+    }
+    "Downloads".to_string()
+}
+
+fn default_output_dir() -> String {
+    resolve_default_output_dir(dirs::download_dir(), dirs::home_dir())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiSettings {
     pub window_width: i32,
@@ -31,7 +45,7 @@ impl Default for UiSettings {
             font_size: 10,
             show_console_panel: false,
             single_selection: true,
-            default_output_path: String::new(),
+            default_output_path: default_output_dir(),
         }
     }
 }
@@ -278,6 +292,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let output_dir = default_output_dir();
         Self {
             ui: UiSettings::default(),
             device: DeviceSettings::default(),
@@ -292,8 +307,8 @@ impl Default for AppConfig {
             logcat_viewer: LogcatViewerSettings::default(),
             command_history: Vec::new(),
             device_groups: HashMap::new(),
-            output_path: String::new(),
-            file_gen_output_path: String::new(),
+            output_path: output_dir.clone(),
+            file_gen_output_path: output_dir,
             version: "0.0.50".to_string(),
         }
     }
@@ -375,10 +390,7 @@ fn apply_legacy_overrides(mut config: AppConfig, value: &serde_json::Value) -> A
     if let Some(output_path) = value.get("output_path").and_then(|v| v.as_str()) {
         config.output_path = output_path.to_string();
     }
-    if let Some(file_gen_output_path) = value
-        .get("file_gen_output_path")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(file_gen_output_path) = value.get("file_gen_output_path").and_then(|v| v.as_str()) {
         config.file_gen_output_path = file_gen_output_path.to_string();
     }
     if let Some(groups) = value.get("device_groups").and_then(|v| v.as_object()) {
@@ -409,6 +421,9 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     if !(0.5..=3.0).contains(&config.ui.ui_scale) {
         config.ui.ui_scale = 1.0;
     }
+    if config.ui.default_output_path.trim().is_empty() {
+        config.ui.default_output_path = default_output_dir();
+    }
     if config.device.refresh_interval < 1 {
         config.device.refresh_interval = 30;
     }
@@ -429,6 +444,12 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     }
     if config.command.max_history_size == 0 {
         config.command.max_history_size = 50;
+    }
+    if config.output_path.trim().is_empty() {
+        config.output_path = default_output_dir();
+    }
+    if config.file_gen_output_path.trim().is_empty() {
+        config.file_gen_output_path = config.output_path.clone();
     }
     config
 }
@@ -470,5 +491,20 @@ mod tests {
         assert_eq!(validated.device.refresh_interval, 30);
         assert_eq!(validated.logcat.max_lines, 1000);
         assert_eq!(validated.command.max_history_size, 50);
+    }
+
+    #[test]
+    fn default_output_dir_prefers_download_dir() {
+        let resolved = resolve_default_output_dir(
+            Some(PathBuf::from("/tmp/Downloads")),
+            Some(PathBuf::from("/tmp/home")),
+        );
+        assert_eq!(resolved, "/tmp/Downloads");
+    }
+
+    #[test]
+    fn default_output_dir_falls_back_to_home_downloads() {
+        let resolved = resolve_default_output_dir(None, Some(PathBuf::from("/tmp/home")));
+        assert_eq!(resolved, "/tmp/home/Downloads");
     }
 }

@@ -1359,6 +1359,24 @@ textarea {
   display: block;
 }
 
+.inspector-screenshot-stage {
+  position: relative;
+  display: inline-block;
+}
+
+.inspector-screenshot-stage img {
+  max-width: none;
+  height: auto;
+  display: block;
+}
+
+.inspector-screenshot-stage canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
 .inspector-xml {
   max-height: 420px;
   overflow: auto;

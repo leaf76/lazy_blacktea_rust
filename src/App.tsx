@@ -96,6 +96,7 @@ type FileTransferProgress = {
   trace_id: string;
 };
 type LogcatLineEntry = { id: number; text: string };
+type UiBoundsRect = { x: number; y: number; w: number; h: number };
 type QuickActionId =
   | "screenshot"
   | "reboot"
@@ -120,6 +121,31 @@ const truncateText = (value: string, maxLen: number) => {
   }
   const limit = Math.max(0, maxLen - 1);
   return `${value.slice(0, limit)}…`;
+};
+
+const parseUiBoundsRects = (xml: string, limit = 2500) => {
+  const boundsRegex = /bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"/g;
+  const rects: UiBoundsRect[] = [];
+  let truncated = false;
+  let match: RegExpExecArray | null;
+  while ((match = boundsRegex.exec(xml)) !== null) {
+    const x1 = Number(match[1]);
+    const y1 = Number(match[2]);
+    const x2 = Number(match[3]);
+    const y2 = Number(match[4]);
+    if (!Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) {
+      continue;
+    }
+    if (x2 <= x1 || y2 <= y1) {
+      continue;
+    }
+    rects.push({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
+    if (rects.length >= limit) {
+      truncated = true;
+      break;
+    }
+  }
+  return { rects, truncated };
 };
 
 function renderHighlightedLogcatLine(line: string, searchPattern: RegExp | null) {
@@ -217,6 +243,8 @@ function App() {
   const [uiInspectorSearch, setUiInspectorSearch] = useState("");
   const [uiExportResult, setUiExportResult] = useState("");
   const [uiZoom, setUiZoom] = useState(1);
+  const [uiBoundsEnabled, setUiBoundsEnabled] = useState(true);
+  const [uiScreenshotSize, setUiScreenshotSize] = useState({ width: 0, height: 0 });
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [groupMap, setGroupMap] = useState<Record<string, string>>({});
   const [groupName, setGroupName] = useState("");
@@ -255,6 +283,8 @@ function App() {
   const [actionDraftConfig, setActionDraftConfig] = useState<AppConfig | null>(null);
   const [logcatMatchIndex, setLogcatMatchIndex] = useState(0);
   const logcatOutputRef = useRef<HTMLDivElement | null>(null);
+  const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
+  const uiBoundsCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSelectedIndexRef = useRef<number | null>(null);
   const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
@@ -422,6 +452,7 @@ function App() {
   }, [logcatPresets, logcatPresetSelected]);
 
   const uiScreenshotSrc = uiScreenshotDataUrl;
+  const uiBoundsParse = useMemo(() => parseUiBoundsRects(uiXml), [uiXml]);
 
   const filteredUiXml = useMemo(() => {
     const query = uiInspectorSearch.trim().toLowerCase();
@@ -433,6 +464,54 @@ function App() {
       .filter((line) => line.toLowerCase().includes(query))
       .join("\n");
   }, [uiXml, uiInspectorSearch]);
+
+  useEffect(() => {
+    if (!uiScreenshotSrc) {
+      setUiScreenshotSize({ width: 0, height: 0 });
+    }
+  }, [uiScreenshotSrc]);
+
+  useEffect(() => {
+    const canvas = uiBoundsCanvasRef.current;
+    const { width, height } = uiScreenshotSize;
+    if (!canvas || width <= 0 || height <= 0) {
+      return;
+    }
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    ctx.clearRect(0, 0, width, height);
+    if (!uiBoundsEnabled) {
+      return;
+    }
+    if (!uiBoundsParse.rects.length) {
+      return;
+    }
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(59, 130, 246, 0.9)";
+    ctx.fillStyle = "rgba(59, 130, 246, 0.08)";
+
+    for (const rect of uiBoundsParse.rects) {
+      const x1 = Math.max(0, Math.min(width, rect.x));
+      const y1 = Math.max(0, Math.min(height, rect.y));
+      const x2 = Math.max(0, Math.min(width, rect.x + rect.w));
+      const y2 = Math.max(0, Math.min(height, rect.y + rect.h));
+      const w = x2 - x1;
+      const h = y2 - y1;
+      if (w <= 0 || h <= 0) {
+        continue;
+      }
+      ctx.fillRect(x1, y1, w, h);
+      ctx.strokeRect(x1 + 0.5, y1 + 0.5, w, h);
+    }
+  }, [uiBoundsEnabled, uiBoundsParse, uiScreenshotSize]);
 
   const handleSelectActiveSerial = (serial: string) => {
     if (!serial) {
@@ -3937,11 +4016,27 @@ function App() {
                         </div>
                         <div className="preview-panel inspector-preview">
                           {uiScreenshotSrc ? (
-                            <img
-                              src={uiScreenshotSrc}
-                              alt="UI Screenshot"
+                            <div
+                              className="inspector-screenshot-stage"
                               style={{ transform: `scale(${uiZoom})`, transformOrigin: "top left" }}
-                            />
+                            >
+                              <img
+                                ref={uiScreenshotImgRef}
+                                src={uiScreenshotSrc}
+                                alt="UI Screenshot"
+                                onLoad={() => {
+                                  const img = uiScreenshotImgRef.current;
+                                  if (!img) {
+                                    return;
+                                  }
+                                  setUiScreenshotSize({
+                                    width: img.naturalWidth,
+                                    height: img.naturalHeight,
+                                  });
+                                }}
+                              />
+                              <canvas ref={uiBoundsCanvasRef} aria-hidden="true" />
+                            </div>
                           ) : (
                             <p className="muted">
                               {uiScreenshotError
@@ -3949,6 +4044,23 @@ function App() {
                                 : "Capture UI hierarchy to include a screenshot."}
                             </p>
                           )}
+                        </div>
+                        <div className="form-row">
+                          <label>Bounds</label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={uiBoundsEnabled}
+                              onChange={(event) => setUiBoundsEnabled(event.target.checked)}
+                              disabled={!uiScreenshotSrc}
+                            />
+                            Show hierarchy bounds
+                          </label>
+                          <span className="muted">
+                            {uiScreenshotSrc
+                              ? `${uiBoundsParse.rects.length}${uiBoundsParse.truncated ? "+" : ""} nodes`
+                              : "--"}
+                          </span>
                         </div>
                       </div>
                       <div className="panel-sub">
