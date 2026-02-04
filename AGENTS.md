@@ -37,9 +37,11 @@ lazy_blacktea_rust/
 | Frontend API | `src/api.ts` | Tauri invoke wrappers |
 | Frontend UI | `src/App.tsx` | Device console layout |
 | App shell + routing | `src/App.tsx`, `src/App.css`, `src/main.tsx` | Sidebar, dashboard, HashRouter |
-| Active device selector | `src/App.tsx`, `src/App.css` | Auto-selects first online device after refresh, top bar switcher |
+| Primary device selector | `src/App.tsx`, `src/App.css` | Auto-selects first online device after refresh; top bar device context popover |
+| Global device selection panel | `src/App.tsx`, `src/App.css` | Top bar device context popover for multi-select across pages, with recent/group sections and keyboard navigation |
 | Device Manager layout | `src/App.tsx`, `src/App.css` | Filter toolbar, grid device rows, sticky command bar, Shift/Ctrl selection |
 | Layout tokens | `src/App.css` | Compact density, page-section/page-header styles, system theme variables |
+| Settings layout | `src/App.tsx`, `src/App.css` | Settings page grid, fixed label column, responsive density, and actions layout |
 | Logcat layout | `src/App.tsx`, `src/App.css` | Compact advanced panel with scroll to preserve log viewport |
 | Logcat toolbar | `src/App.tsx`, `src/App.css` | Grouped primary/secondary actions, compact spacing |
 | Logcat filters | `src/App.tsx`, `src/App.css` | Live filters always visible, presets via dropdown + save row |

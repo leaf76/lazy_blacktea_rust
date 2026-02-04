@@ -1,4 +1,13 @@
-import { memo, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -83,6 +92,7 @@ import {
   summarizeTask,
   tasksReducer,
   type TaskKind,
+  type TaskStatus,
 } from "./tasks";
 import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
 import "./App.css";
@@ -245,6 +255,9 @@ function App() {
   const [selectedApp, setSelectedApp] = useState<AppInfo | null>(null);
   const [bugreportProgress, setBugreportProgress] = useState<number | null>(null);
   const [bugreportResult, setBugreportResult] = useState<BugreportResult | null>(null);
+  const [latestBugreportTaskId, setLatestBugreportTaskId] = useState<string | null>(null);
+  const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
+  const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
   const [bluetoothEvents, setBluetoothEvents] = useState<string[]>([]);
   const [bluetoothState, setBluetoothStateText] = useState<string>("");
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
@@ -261,6 +274,8 @@ function App() {
   const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
   const uiBoundsCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSelectedIndexRef = useRef<number | null>(null);
+  const devicePopoverRef = useRef<HTMLDivElement | null>(null);
+  const devicePopoverTriggerRef = useRef<HTMLButtonElement | null>(null);
   const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
   const logcatPendingRef = useRef<Record<string, string[]>>({});
@@ -272,7 +287,11 @@ function App() {
     path: string;
     overwrite: boolean;
     existingNames: string[];
-  }>({ pathname: "/", serial: "", path: "/sdcard", overwrite: true, existingNames: [] });
+    selection_count: number;
+  }>({ pathname: "/", serial: "", path: "/sdcard", overwrite: true, existingNames: [], selection_count: 0 });
+  const bugreportBatchRef = useRef<
+    Record<string, { total: number; done: number; hasError: boolean; hasCancelled: boolean }>
+  >({});
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -284,6 +303,19 @@ function App() {
   const hasDevices = devices.length > 0;
   const selectedCount = selectedSerials.length;
   const deviceStatus = activeDevice?.summary.state ?? "offline";
+  const selectedSummaryLabel =
+    selectedCount === 0
+      ? "No devices selected"
+      : selectedCount === 1
+        ? activeSerial ?? "No device selected"
+        : `${selectedCount} devices selected`;
+  const primaryDeviceLabel =
+    activeDevice?.detail?.model ?? activeDevice?.summary.model ?? activeSerial ?? "Select a device";
+  const requiresSingleSelection = useMemo(
+    () => ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat"].includes(location.pathname),
+    [location.pathname],
+  );
+  const singleSelectionWarning = requiresSingleSelection && selectedCount > 1;
   const deviceStatusLabel = useMemo(() => {
     if (!activeSerial) {
       return "No device";
@@ -311,6 +343,94 @@ function App() {
     }
     return "warn";
   }, [activeSerial, deviceStatus]);
+  const deviceBySerial = useMemo(() => {
+    const map = new Map<string, DeviceInfo>();
+    devices.forEach((device) => {
+      map.set(device.summary.serial, device);
+    });
+    return map;
+  }, [devices]);
+  const recentDeviceSerials = useMemo(() => {
+    const serials: string[] = [];
+    const tasks = [...taskState.items].sort((a, b) => b.started_at - a.started_at);
+    for (const task of tasks) {
+      for (const serial of Object.keys(task.devices)) {
+        if (!serials.includes(serial)) {
+          serials.push(serial);
+        }
+        if (serials.length >= 5) {
+          break;
+        }
+      }
+      if (serials.length >= 5) {
+        break;
+      }
+    }
+    return serials;
+  }, [taskState.items]);
+  const recentDevices = useMemo(
+    () =>
+      recentDeviceSerials
+        .map((serial) => deviceBySerial.get(serial))
+        .filter((device): device is DeviceInfo => Boolean(device)),
+    [deviceBySerial, recentDeviceSerials],
+  );
+  const groupedDevices = useMemo(() => {
+    const grouped = new Map<string, DeviceInfo[]>();
+    const ungrouped: DeviceInfo[] = [];
+    devices.forEach((device) => {
+      const serial = device.summary.serial;
+      const group = groupMap[serial];
+      if (group) {
+        const list = grouped.get(group) ?? [];
+        list.push(device);
+        grouped.set(group, list);
+      } else {
+        ungrouped.push(device);
+      }
+    });
+    const groupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
+    return { groupNames, grouped, ungrouped };
+  }, [devices, groupMap]);
+  const recentSerialSet = useMemo(() => new Set(recentDeviceSerials), [recentDeviceSerials]);
+  const groupedDevicesFiltered = useMemo(() => {
+    const grouped = new Map<string, DeviceInfo[]>();
+    groupedDevices.grouped.forEach((list, group) => {
+      const filtered = list.filter((device) => !recentSerialSet.has(device.summary.serial));
+      if (filtered.length > 0) {
+        grouped.set(group, filtered);
+      }
+    });
+    const ungrouped = groupedDevices.ungrouped.filter(
+      (device) => !recentSerialSet.has(device.summary.serial),
+    );
+    const groupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
+    return { groupNames, grouped, ungrouped };
+  }, [groupedDevices, recentSerialSet]);
+  const latestBugreportTask = useMemo(() => {
+    if (!latestBugreportTaskId) {
+      return null;
+    }
+    return taskState.items.find((task) => task.id === latestBugreportTaskId) ?? null;
+  }, [latestBugreportTaskId, taskState.items]);
+  const latestBugreportEntries = useMemo(() => {
+    if (!latestBugreportTask) {
+      return [];
+    }
+    return Object.values(latestBugreportTask.devices).sort((a, b) => a.serial.localeCompare(b.serial));
+  }, [latestBugreportTask]);
+  const latestBugreportProgress = useMemo(() => {
+    if (!latestBugreportEntries.length) {
+      return null;
+    }
+    const values = latestBugreportEntries
+      .map((entry) => entry.progress)
+      .filter((value): value is number => value != null);
+    if (!values.length) {
+      return null;
+    }
+    return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+  }, [latestBugreportEntries]);
 
   useEffect(() => {
     filesDragContextRef.current = {
@@ -319,8 +439,73 @@ function App() {
       path: filesPath,
       overwrite: filesOverwriteEnabled,
       existingNames: files.map((entry) => entry.name),
+      selection_count: selectedSerials.length,
     };
-  }, [activeSerial, files, filesOverwriteEnabled, filesPath, location.pathname]);
+  }, [activeSerial, files, filesOverwriteEnabled, filesPath, location.pathname, selectedSerials]);
+
+  useEffect(() => {
+    if (!devicePopoverOpen) {
+      return;
+    }
+    const handlePointer = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+      if (
+        devicePopoverRef.current?.contains(target) ||
+        devicePopoverTriggerRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setDevicePopoverOpen(false);
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDevicePopoverOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handlePointer);
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("mousedown", handlePointer);
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [devicePopoverOpen]);
+
+  useLayoutEffect(() => {
+    if (!devicePopoverOpen) {
+      setDevicePopoverLeft(null);
+      return;
+    }
+    const updatePosition = () => {
+      const popover = devicePopoverRef.current;
+      const trigger = devicePopoverTriggerRef.current;
+      if (!popover || !trigger) {
+        return;
+      }
+      const container = popover.offsetParent as HTMLElement | null;
+      const containerLeft = container?.getBoundingClientRect().left ?? 0;
+      const popoverRect = popover.getBoundingClientRect();
+      const triggerRect = trigger.getBoundingClientRect();
+      const margin = 16;
+      const centeredLeft = triggerRect.left + triggerRect.width / 2 - popoverRect.width / 2;
+      const maxLeft = window.innerWidth - popoverRect.width - margin;
+      const shouldAlignLeft = centeredLeft < margin || centeredLeft > maxLeft;
+      const left = (shouldAlignLeft ? triggerRect.left : centeredLeft) - containerLeft;
+      setDevicePopoverLeft(Math.max(0, left));
+    };
+    const frame = window.requestAnimationFrame(updatePosition);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [devicePopoverOpen, devices, groupMap, taskState.items]);
+
+  useEffect(() => {
+    setDevicePopoverOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     const key = "lazy_blacktea_tasks_v1";
@@ -550,6 +735,18 @@ function App() {
       const remaining = prev.filter((item) => item !== serial);
       return [serial, ...remaining];
     });
+  };
+
+  const ensureSingleSelection = (context: string) => {
+    if (!selectedSerials.length) {
+      pushToast(`Select one device for ${context}.`, "error");
+      return null;
+    }
+    if (selectedSerials.length > 1) {
+      pushToast(`${context} supports only one device.`, "error");
+      return null;
+    }
+    return activeSerial;
   };
 
   const openPairingModal = () => dispatchPairing({ type: "OPEN" });
@@ -904,12 +1101,13 @@ function App() {
       }
       const errorText = payload.result.error?.trim() ?? "";
       const cancelled = errorText.toLowerCase().includes("cancel");
+      const status: TaskStatus = payload.result.success ? "success" : cancelled ? "cancelled" : "error";
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
         serial,
         patch: {
-          status: payload.result.success ? "success" : cancelled ? "cancelled" : "error",
+          status,
           progress: payload.result.progress ?? null,
           output_path: payload.result.output_path ?? null,
           message: payload.result.success
@@ -919,11 +1117,27 @@ function App() {
               : payload.result.error ?? "Bugreport failed.",
         },
       });
-      dispatchTasks({
-        type: "TASK_SET_STATUS",
-        id: taskId,
-        status: payload.result.success ? "success" : cancelled ? "cancelled" : "error",
-      });
+      const summary = bugreportBatchRef.current[taskId];
+      if (summary) {
+        summary.done += 1;
+        if (status === "error") {
+          summary.hasError = true;
+        }
+        if (status === "cancelled") {
+          summary.hasCancelled = true;
+        }
+        if (summary.done >= summary.total) {
+          const finalStatus: TaskStatus = summary.hasError
+            ? "error"
+            : summary.hasCancelled
+              ? "cancelled"
+              : "success";
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: finalStatus });
+          delete bugreportBatchRef.current[taskId];
+        }
+      } else {
+        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status });
+      }
       delete bugreportTaskBySerialRef.current[serial];
     });
 
@@ -1002,6 +1216,10 @@ function App() {
 
   const selectAllVisible = () => {
     setSelectedSerials(visibleDevices.map((device) => device.summary.serial));
+  };
+
+  const selectAllDevices = () => {
+    setSelectedSerials(devices.map((device) => device.summary.serial));
   };
 
   const clearSelection = () => {
@@ -1264,8 +1482,8 @@ function App() {
   };
 
 	  const handleBugreport = async () => {
-	    if (!activeSerial) {
-	      pushToast("Select one device for bugreport.", "error");
+	    if (!selectedSerials.length) {
+	      pushToast("Select at least one device for bugreport.", "error");
 	      return;
 	    }
 	    let outputDir = config?.output_path || "";
@@ -1280,61 +1498,99 @@ function App() {
 	      }
 	      outputDir = selected;
 	    }
+	    const serials = Array.from(new Set(selectedSerials));
 	    const taskId = beginTask({
 	      kind: "bugreport",
-	      title: `Bugreport: ${activeSerial}`,
-	      serials: [activeSerial],
+	      title: `Bugreport (${serials.length})`,
+	      serials,
 	    });
-	    bugreportTaskBySerialRef.current[activeSerial] = taskId;
-	    dispatchTasks({
-	      type: "TASK_UPDATE_DEVICE",
-	      id: taskId,
-	      serial: activeSerial,
-	      patch: { status: "running", progress: 0, message: "Starting bugreport…" },
+	    setLatestBugreportTaskId(taskId);
+	    setBugreportResult(null);
+	    bugreportBatchRef.current[taskId] = {
+	      total: serials.length,
+	      done: 0,
+	      hasError: false,
+	      hasCancelled: false,
+	    };
+	    serials.forEach((serial) => {
+	      bugreportTaskBySerialRef.current[serial] = taskId;
+	      dispatchTasks({
+	        type: "TASK_UPDATE_DEVICE",
+	        id: taskId,
+	        serial,
+	        patch: { status: "running", progress: 0, message: "Starting bugreport…" },
+	      });
 	    });
 	    setBusy(true);
 	    setBugreportProgress(0);
 	    try {
-	      const response = await generateBugreport(activeSerial, outputDir);
-	      setBugreportResult(response.data);
-	      // Task status is finalized via the bugreport-complete event.
-	      if (response.data.success) {
-	        pushToast(`Bugreport saved to ${response.data.output_path}`, "info");
-	      } else {
-	        pushToast(response.data.error || "Bugreport failed", "error");
-	      }
-	    } catch (error) {
-	      dispatchTasks({
-	        type: "TASK_UPDATE_DEVICE",
-	        id: taskId,
-	        serial: activeSerial,
-	        patch: { status: "error", message: formatError(error) },
+	      const results = await Promise.all(
+	        serials.map(async (serial) => {
+	          try {
+	            const response = await generateBugreport(serial, outputDir);
+	            setBugreportResult(response.data);
+	            return { serial, ok: true };
+	          } catch (error) {
+	            return { serial, ok: false, error };
+	          }
+	        }),
+	      );
+	      const failed = results.filter((item) => !item.ok);
+	      failed.forEach((item) => {
+	        dispatchTasks({
+	          type: "TASK_UPDATE_DEVICE",
+	          id: taskId,
+	          serial: item.serial,
+	          patch: { status: "error", message: formatError(item.error) },
+	        });
+	        const summary = bugreportBatchRef.current[taskId];
+	        if (summary) {
+	          summary.done += 1;
+	          summary.hasError = true;
+	          if (summary.done >= summary.total) {
+	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+	            delete bugreportBatchRef.current[taskId];
+	          }
+	        }
+	        delete bugreportTaskBySerialRef.current[item.serial];
 	      });
-	      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-	      delete bugreportTaskBySerialRef.current[activeSerial];
-	      pushToast(formatError(error), "error");
+	      pushToast(
+	        failed.length
+	          ? `Bugreport completed with ${failed.length} failures.`
+	          : `Bugreport completed for ${serials.length} device${serials.length > 1 ? "s" : ""}.`,
+	        failed.length ? "error" : "info",
+	      );
 	    } finally {
 	      setBusy(false);
 	    }
 	  };
 
 	  const handleCancelBugreport = async () => {
-	    if (!activeSerial) {
+	    if (!selectedSerials.length) {
+	      pushToast("Select at least one device to cancel bugreport.", "error");
 	      return;
 	    }
+	    const serials = [...selectedSerials];
 	    try {
-	      await cancelBugreport(activeSerial);
-	      const taskId = bugreportTaskBySerialRef.current[activeSerial];
-	      if (taskId) {
-	        dispatchTasks({
-	          type: "TASK_UPDATE_DEVICE",
-	          id: taskId,
-	          serial: activeSerial,
-	          patch: { status: "cancelled", message: "Bugreport cancel requested." },
-	        });
-	        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "cancelled" });
-	      }
-	      pushToast("Bugreport cancelled.", "info");
+	      await Promise.all(
+	        serials.map(async (serial) => {
+	          try {
+	            await cancelBugreport(serial);
+	            const taskId = bugreportTaskBySerialRef.current[serial];
+	            if (taskId) {
+	              dispatchTasks({
+	                type: "TASK_UPDATE_DEVICE",
+	                id: taskId,
+	                serial,
+	                patch: { status: "cancelled", message: "Bugreport cancel requested." },
+	              });
+	            }
+	          } catch (error) {
+	            pushToast(formatError(error), "error");
+	          }
+	        }),
+	      );
+	      pushToast("Bugreport cancel requested.", "info");
 	    } catch (error) {
 	      pushToast(formatError(error), "error");
 	    }
@@ -1392,8 +1648,8 @@ function App() {
   };
 
   const handleLogcatStart = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for logcat.", "error");
+    const serial = ensureSingleSelection("logcat");
+    if (!serial) {
       return;
     }
     const sourceValue = logcatSourceValue.trim();
@@ -1404,7 +1660,7 @@ function App() {
         return;
       }
       try {
-        const response = await runShell([activeSerial], `pidof ${sourceValue}`, false);
+        const response = await runShell([serial], `pidof ${sourceValue}`, false);
         const stdout = response.data?.[0]?.stdout ?? "";
         const pids = parsePidOutput(stdout);
         if (!pids.length) {
@@ -1429,7 +1685,7 @@ function App() {
 
     setBusy(true);
     try {
-      await startLogcat(activeSerial, filter || undefined);
+      await startLogcat(serial, filter || undefined);
       setLogcatActiveFilterSummary(filter || "All");
       pushToast("Logcat started.", "info");
     } catch (error) {
@@ -1440,13 +1696,13 @@ function App() {
   };
 
   const handleLogcatStop = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for logcat.", "error");
+    const serial = ensureSingleSelection("logcat");
+    if (!serial) {
       return;
     }
     setBusy(true);
     try {
-      await stopLogcat(activeSerial);
+      await stopLogcat(serial);
       pushToast("Logcat stopped.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -1456,14 +1712,14 @@ function App() {
   };
 
   const handleLogcatClearBuffer = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for logcat.", "error");
+    const serial = ensureSingleSelection("logcat");
+    if (!serial) {
       return;
     }
     setBusy(true);
     try {
-      await clearLogcat(activeSerial);
-      setLogcatLines((prev) => ({ ...prev, [activeSerial]: [] }));
+      await clearLogcat(serial);
+      setLogcatLines((prev) => ({ ...prev, [serial]: [] }));
       pushToast("Logcat buffer cleared.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -1473,15 +1729,16 @@ function App() {
   };
 
   const handleLogcatClearView = () => {
-    if (!activeSerial) {
+    const serial = ensureSingleSelection("logcat");
+    if (!serial) {
       return;
     }
-    setLogcatLines((prev) => ({ ...prev, [activeSerial]: [] }));
+    setLogcatLines((prev) => ({ ...prev, [serial]: [] }));
   };
 
   const handleLogcatExport = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for logcat export.", "error");
+    const serial = ensureSingleSelection("logcat export");
+    if (!serial) {
       return;
     }
     if (!logcatFiltered.lines.length) {
@@ -1491,7 +1748,7 @@ function App() {
     setBusy(true);
     try {
       const response = await exportLogcat(
-        activeSerial,
+        serial,
         logcatFiltered.lines.map((entry) => entry.text),
         config?.file_gen_output_path || config?.output_path,
       );
@@ -1602,8 +1859,8 @@ function App() {
   };
 
   const handleFilesRefresh = async (pathOverride?: string) => {
-    if (!activeSerial) {
-      pushToast("Select one device for file browse.", "error");
+    const serial = ensureSingleSelection("file browse");
+    if (!serial) {
       return;
     }
     const targetPath = (pathOverride ?? filesPath).trim();
@@ -1613,7 +1870,7 @@ function App() {
     }
     setBusy(true);
     try {
-      const response = await listDeviceFiles(activeSerial, targetPath);
+      const response = await listDeviceFiles(serial, targetPath);
       setFilesPath(targetPath);
       setFiles(response.data);
       setFilePreview(null);
@@ -1679,8 +1936,8 @@ function App() {
   };
 
   const handleFilesPullSelected = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for file pull.", "error");
+    const serial = ensureSingleSelection("file pull");
+    if (!serial) {
       return;
     }
     const selected = new Set(filesSelectedPaths);
@@ -1710,17 +1967,17 @@ function App() {
         const taskId = beginTask({
           kind: "file_pull",
           title: `Pull File: ${entry.name}`,
-          serials: [activeSerial],
+          serials: [serial],
         });
         const traceId = crypto.randomUUID();
         dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
         fileTransferTaskByTraceIdRef.current[traceId] = taskId;
         try {
-          const response = await pullDeviceFile(activeSerial, entry.path, outputDir, traceId);
+          const response = await pullDeviceFile(serial, entry.path, outputDir, traceId);
           dispatchTasks({
             type: "TASK_UPDATE_DEVICE",
             id: taskId,
-            serial: activeSerial,
+            serial,
             patch: {
               status: "success",
               progress: 100,
@@ -1733,7 +1990,7 @@ function App() {
           dispatchTasks({
             type: "TASK_UPDATE_DEVICE",
             id: taskId,
-            serial: activeSerial,
+            serial,
             patch: { status: "error", message: formatError(error), progress: null },
           });
           dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -1748,8 +2005,8 @@ function App() {
   };
 
   const handleFilesMkdirSubmit = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for folder create.", "error");
+    const serial = ensureSingleSelection("folder create");
+    if (!serial) {
       return;
     }
     if (!filesModal || filesModal.type !== "mkdir") {
@@ -1764,16 +2021,16 @@ function App() {
     const taskId = beginTask({
       kind: "file_mkdir",
       title: `New Folder: ${filesModal.name.trim()}`,
-      serials: [activeSerial],
+      serials: [serial],
     });
     setBusy(true);
     try {
-      const response = await mkdirDeviceDir(activeSerial, targetDir);
+      const response = await mkdirDeviceDir(serial, targetDir);
       dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "success", message: `Created ${response.data}` },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
@@ -1784,7 +2041,7 @@ function App() {
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "error", message: formatError(error) },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -1795,8 +2052,8 @@ function App() {
   };
 
   const handleFilesRenameSubmit = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for rename.", "error");
+    const serial = ensureSingleSelection("rename");
+    if (!serial) {
       return;
     }
     if (!filesModal || filesModal.type !== "rename") {
@@ -1813,16 +2070,16 @@ function App() {
     const taskId = beginTask({
       kind: "file_rename",
       title: `Rename: ${filesModal.entry.name}`,
-      serials: [activeSerial],
+      serials: [serial],
     });
     setBusy(true);
     try {
-      const response = await renameDevicePath(activeSerial, fromPath, toPath);
+      const response = await renameDevicePath(serial, fromPath, toPath);
       dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "success", message: `Renamed to ${response.data}` },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
@@ -1833,7 +2090,7 @@ function App() {
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "error", message: formatError(error) },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -1844,8 +2101,8 @@ function App() {
   };
 
   const handleFilesDeleteSubmit = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for delete.", "error");
+    const serial = ensureSingleSelection("delete");
+    if (!serial) {
       return;
     }
     if (!filesModal || filesModal.type !== "delete") {
@@ -1862,16 +2119,16 @@ function App() {
     const taskId = beginTask({
       kind: "file_delete",
       title: `Delete: ${filesModal.entry.name}`,
-      serials: [activeSerial],
+      serials: [serial],
     });
     setBusy(true);
     try {
-      const response = await deleteDevicePath(activeSerial, filesModal.entry.path, filesModal.recursive);
+      const response = await deleteDevicePath(serial, filesModal.entry.path, filesModal.recursive);
       dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "success", message: `Deleted ${response.data}` },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
@@ -1882,7 +2139,7 @@ function App() {
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "error", message: formatError(error) },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -1893,8 +2150,8 @@ function App() {
   };
 
   const handleFilesDeleteManySubmit = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for delete.", "error");
+    const serial = ensureSingleSelection("delete");
+    if (!serial) {
       return;
     }
     if (!filesModal || filesModal.type !== "delete_many") {
@@ -1916,15 +2173,15 @@ function App() {
         const taskId = beginTask({
           kind: "file_delete",
           title: `Delete: ${entry.name}`,
-          serials: [activeSerial],
+          serials: [serial],
         });
         try {
-          const response = await deleteDevicePath(activeSerial, entry.path, filesModal.recursive);
+          const response = await deleteDevicePath(serial, entry.path, filesModal.recursive);
           dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
           dispatchTasks({
             type: "TASK_UPDATE_DEVICE",
             id: taskId,
-            serial: activeSerial,
+            serial,
             patch: { status: "success", message: `Deleted ${response.data}` },
           });
           dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
@@ -1932,7 +2189,7 @@ function App() {
           dispatchTasks({
             type: "TASK_UPDATE_DEVICE",
             id: taskId,
-            serial: activeSerial,
+            serial,
             patch: { status: "error", message: formatError(error) },
           });
           dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -1947,8 +2204,8 @@ function App() {
   };
 
   const handleFileUpload = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for file upload.", "error");
+    const serial = ensureSingleSelection("file upload");
+    if (!serial) {
       return;
     }
 
@@ -1971,23 +2228,23 @@ function App() {
     const taskId = beginTask({
       kind: "file_push",
       title: `Upload File: ${filename}`,
-      serials: [activeSerial],
+      serials: [serial],
     });
     dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
     fileTransferTaskByTraceIdRef.current[traceId] = taskId;
     setBusy(true);
     try {
-      const response = await pushDeviceFile(activeSerial, selected, remotePath, traceId);
+      const response = await pushDeviceFile(serial, selected, remotePath, traceId);
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "success", progress: 100, message: `Uploaded to ${response.data}` },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
       pushToast(`Uploaded to ${response.data}`, "info");
       try {
-        const listResponse = await listDeviceFiles(activeSerial, filesPath.trim());
+        const listResponse = await listDeviceFiles(serial, filesPath.trim());
         setFiles(listResponse.data);
         setFilePreview(null);
       } catch (error) {
@@ -2030,7 +2287,7 @@ function App() {
       if (!payload.paths.length) {
         return;
       }
-      if (!ctx.serial) {
+      if (ctx.selection_count !== 1 || !ctx.serial) {
         pushToast("Select one device for file upload.", "error");
         return;
       }
@@ -2090,8 +2347,8 @@ function App() {
   }, []);
 
 		  const handleFilePull = async (entry: DeviceFileEntry) => {
-		    if (!activeSerial) {
-		      pushToast("Select one device for file pull.", "error");
+		    const serial = ensureSingleSelection("file pull");
+		    if (!serial) {
 		      return;
 		    }
 		    let outputDir = config?.file_gen_output_path || config?.output_path || "";
@@ -2110,17 +2367,17 @@ function App() {
 		    const taskId = beginTask({
 		      kind: "file_pull",
 		      title: `Pull File: ${entry.name}`,
-		      serials: [activeSerial],
+		      serials: [serial],
 		    });
 		    dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
 		    fileTransferTaskByTraceIdRef.current[traceId] = taskId;
 		    setBusy(true);
 		    try {
-		      const response = await pullDeviceFile(activeSerial, entry.path, outputDir, traceId);
+		      const response = await pullDeviceFile(serial, entry.path, outputDir, traceId);
 		      dispatchTasks({
 		        type: "TASK_UPDATE_DEVICE",
 		        id: taskId,
-		        serial: activeSerial,
+		        serial,
 		        patch: {
 		          status: "success",
 		          output_path: response.data,
@@ -2137,7 +2394,7 @@ function App() {
 	        dispatchTasks({
 	          type: "TASK_UPDATE_DEVICE",
 	          id: taskId,
-	          serial: activeSerial,
+	          serial,
 	          patch: { message: `Pulled. Preview failed: ${formatError(error)}` },
 	        });
 	      }
@@ -2145,7 +2402,7 @@ function App() {
 		      dispatchTasks({
 		        type: "TASK_UPDATE_DEVICE",
 		        id: taskId,
-		        serial: activeSerial,
+		        serial,
 		        patch: { status: "error", message: formatError(error), progress: null },
 		      });
 		      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -2157,13 +2414,13 @@ function App() {
 		  };
 
   const handleUiInspect = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for UI inspector.", "error");
+    const serial = ensureSingleSelection("UI inspector");
+    if (!serial) {
       return;
     }
     setBusy(true);
     try {
-      const response = await captureUiHierarchy(activeSerial);
+      const response = await captureUiHierarchy(serial);
       setUiHtml(response.data.html);
       setUiXml(response.data.xml);
       setUiScreenshotDataUrl(response.data.screenshot_data_url ?? "");
@@ -2180,13 +2437,13 @@ function App() {
   };
 
   const handleUiExport = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device for UI inspector export.", "error");
+    const serial = ensureSingleSelection("UI inspector export");
+    if (!serial) {
       return;
     }
     setBusy(true);
     try {
-      const response = await exportUiHierarchy(activeSerial, config?.file_gen_output_path || config?.output_path);
+      const response = await exportUiHierarchy(serial, config?.file_gen_output_path || config?.output_path);
       setUiExportResult(response.data.html_path);
       pushToast("UI inspector export completed.", "info");
     } catch (error) {
@@ -2197,14 +2454,14 @@ function App() {
   };
 
   const handleLoadApps = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device.", "error");
+    const serial = ensureSingleSelection("app list");
+    if (!serial) {
       return;
     }
     setBusy(true);
     try {
       const response = await listApps(
-        activeSerial,
+        serial,
         appsThirdPartyOnly ? true : undefined,
         appsIncludeVersions,
       );
@@ -2218,24 +2475,25 @@ function App() {
   };
 
   const handleAppAction = async (action: "uninstall" | "forceStop" | "clear" | "enable" | "disable" | "info") => {
-    if (!activeSerial || !selectedApp) {
+    const serial = ensureSingleSelection("app management");
+    if (!serial || !selectedApp) {
       pushToast("Select an app.", "error");
       return;
     }
     setBusy(true);
     try {
       if (action === "uninstall") {
-        await uninstallApp(activeSerial, selectedApp.package_name, false);
+        await uninstallApp(serial, selectedApp.package_name, false);
       } else if (action === "forceStop") {
-        await forceStopApp(activeSerial, selectedApp.package_name);
+        await forceStopApp(serial, selectedApp.package_name);
       } else if (action === "clear") {
-        await clearAppData(activeSerial, selectedApp.package_name);
+        await clearAppData(serial, selectedApp.package_name);
       } else if (action === "enable") {
-        await setAppEnabled(activeSerial, selectedApp.package_name, true);
+        await setAppEnabled(serial, selectedApp.package_name, true);
       } else if (action === "disable") {
-        await setAppEnabled(activeSerial, selectedApp.package_name, false);
+        await setAppEnabled(serial, selectedApp.package_name, false);
       } else if (action === "info") {
-        await openAppInfo(activeSerial, selectedApp.package_name);
+        await openAppInfo(serial, selectedApp.package_name);
       }
       pushToast("App action sent.", "info");
       if (action === "uninstall") {
@@ -2301,8 +2559,14 @@ function App() {
       return;
     }
     const errors: string[] = [];
-    if (!activeSerial && actionForm.actionId !== "reboot") {
-      errors.push("Select an active device to run this action.");
+    const requiresSelection = actionForm.actionId !== "reboot";
+    const requiresSingle =
+      actionForm.actionId === "record" || actionForm.actionId === "logcat-clear";
+    if (requiresSelection && !selectedSerials.length) {
+      errors.push("Select at least one device to run this action.");
+    }
+    if (requiresSingle && selectedSerials.length !== 1) {
+      errors.push("Select exactly one device to run this action.");
     }
     if (actionForm.actionId === "reboot" && !selectedSerials.length) {
       errors.push("Select at least one device to reboot.");
@@ -2332,18 +2596,61 @@ function App() {
     setBusy(true);
     setActionForm((prev) => ({ ...prev, errors: [] }));
     try {
+      const singleSerial = selectedSerials.length === 1 ? selectedSerials[0] : null;
       if (actionForm.actionId === "screenshot") {
         await persistActionConfig();
         const outputDir = await resolveOutputDir(actionOutputDir);
         if (!outputDir) {
           return;
         }
-        const response = await captureScreenshot(activeSerial!, outputDir);
-        pushToast(`Screenshot saved to ${response.data}`, "info");
+        const serials = Array.from(new Set(selectedSerials));
+        const taskId = beginTask({
+          kind: "screenshot",
+          title: `Screenshot (${serials.length})`,
+          serials,
+        });
+        let hasError = false;
+        let traceSet = false;
+        await Promise.all(
+          serials.map(async (serial) => {
+            try {
+              const response = await captureScreenshot(serial, outputDir);
+              if (!traceSet && response.trace_id) {
+                traceSet = true;
+                dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+              }
+              dispatchTasks({
+                type: "TASK_UPDATE_DEVICE",
+                id: taskId,
+                serial,
+                patch: { status: "success", output_path: response.data, message: `Saved to ${response.data}` },
+              });
+            } catch (error) {
+              hasError = true;
+              dispatchTasks({
+                type: "TASK_UPDATE_DEVICE",
+                id: taskId,
+                serial,
+                patch: { status: "error", message: formatError(error) },
+              });
+            }
+          }),
+        );
+        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
+        pushToast(
+          hasError
+            ? "Screenshot completed with errors. Check Task Center."
+            : "Screenshot completed. Check Task Center.",
+          hasError ? "error" : "info",
+        );
       } else if (actionForm.actionId === "reboot") {
         await handleReboot(actionRebootMode === "normal" ? undefined : actionRebootMode);
 	      } else if (actionForm.actionId === "record") {
 	        await persistActionConfig();
+	        if (!singleSerial) {
+	          pushToast("Select exactly one device for screen recording.", "error");
+	          return;
+	        }
 	        if (screenRecordRemote) {
 	          const outputDir = await resolveOutputDir(actionOutputDir);
 	          if (!outputDir) {
@@ -2351,17 +2658,17 @@ function App() {
 	          }
 	          const taskId = beginTask({
 	            kind: "screen_record_stop",
-	            title: `Screen Record Stop: ${activeSerial!}`,
-	            serials: [activeSerial!],
+	            title: `Screen Record Stop: ${singleSerial}`,
+	            serials: [singleSerial],
 	          });
 	          try {
-	            const response = await stopScreenRecord(activeSerial!, outputDir);
+	            const response = await stopScreenRecord(singleSerial, outputDir);
 	            setScreenRecordRemote(null);
 	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
 	            dispatchTasks({
 	              type: "TASK_UPDATE_DEVICE",
 	              id: taskId,
-	              serial: activeSerial!,
+	              serial: singleSerial,
 	              patch: {
 	                status: "success",
 	                output_path: response.data || null,
@@ -2374,7 +2681,7 @@ function App() {
 	            dispatchTasks({
 	              type: "TASK_UPDATE_DEVICE",
 	              id: taskId,
-	              serial: activeSerial!,
+	              serial: singleSerial,
 	              patch: { status: "error", message: formatError(error) },
 	            });
 	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -2383,17 +2690,17 @@ function App() {
 	        } else {
 	          const taskId = beginTask({
 	            kind: "screen_record_start",
-	            title: `Screen Record Start: ${activeSerial!}`,
-	            serials: [activeSerial!],
+	            title: `Screen Record Start: ${singleSerial}`,
+	            serials: [singleSerial],
 	          });
 	          try {
-	            const response = await startScreenRecord(activeSerial!);
+	            const response = await startScreenRecord(singleSerial);
 	            setScreenRecordRemote(response.data);
 	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
 	            dispatchTasks({
 	              type: "TASK_UPDATE_DEVICE",
 	              id: taskId,
-	              serial: activeSerial!,
+	              serial: singleSerial,
 	              patch: { status: "success", message: `Remote: ${response.data}` },
 	            });
 	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
@@ -2402,7 +2709,7 @@ function App() {
 	            dispatchTasks({
 	              type: "TASK_UPDATE_DEVICE",
 	              id: taskId,
-	              serial: activeSerial!,
+	              serial: singleSerial,
 	              patch: { status: "error", message: formatError(error) },
 	            });
 	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -2410,8 +2717,12 @@ function App() {
 	          }
 	        }
       } else if (actionForm.actionId === "logcat-clear") {
-        await clearLogcat(activeSerial!);
-        setLogcatLines((prev) => ({ ...prev, [activeSerial!]: [] }));
+        if (!singleSerial) {
+          pushToast("Select exactly one device for logcat clear.", "error");
+          return;
+        }
+        await clearLogcat(singleSerial);
+        setLogcatLines((prev) => ({ ...prev, [singleSerial]: [] }));
         pushToast("Logcat cleared.", "info");
       } else if (actionForm.actionId === "mirror") {
         await persistActionConfig();
@@ -2426,16 +2737,16 @@ function App() {
   };
 
   const handleBluetoothMonitor = async (enable: boolean) => {
-    if (!activeSerial) {
-      pushToast("Select one device.", "error");
+    const serial = ensureSingleSelection("bluetooth monitor");
+    if (!serial) {
       return;
     }
     setBusy(true);
     try {
       if (enable) {
-        await startBluetoothMonitor(activeSerial);
+        await startBluetoothMonitor(serial);
       } else {
-        await stopBluetoothMonitor(activeSerial);
+        await stopBluetoothMonitor(serial);
       }
       pushToast(enable ? "Bluetooth monitor started." : "Bluetooth monitor stopped.", "info");
     } catch (error) {
@@ -2528,11 +2839,11 @@ function App() {
   };
 
   const handleCopyDeviceInfo = async () => {
-    if (!activeSerial) {
-      pushToast("Select one device.", "error");
+    const serial = ensureSingleSelection("device info copy");
+    if (!serial) {
       return;
     }
-    const device = devices.find((item) => item.summary.serial === activeSerial);
+    const device = devices.find((item) => item.summary.serial === serial);
     if (!device) {
       return;
     }
@@ -2568,16 +2879,16 @@ function App() {
     {
       id: "screenshot",
       title: "Screenshot",
-      description: "Capture the current screen to the output folder.",
+      description: "Capture screenshots from selected devices.",
       onClick: () => openActionForm("screenshot"),
-      disabled: busy || !activeSerial,
+      disabled: busy || selectedSerials.length === 0,
     },
     {
       id: "reboot",
       title: "Reboot",
-      description: "Restart the active device.",
+      description: "Restart selected devices.",
       onClick: () => openActionForm("reboot"),
-      disabled: busy || !activeSerial,
+      disabled: busy || selectedSerials.length === 0,
     },
     {
       id: "record",
@@ -2586,14 +2897,14 @@ function App() {
         ? "Finish and save the ongoing screen recording."
         : "Record the device screen for a short clip.",
       onClick: () => openActionForm("record"),
-      disabled: busy || !activeSerial,
+      disabled: busy || selectedSerials.length !== 1,
     },
     {
       id: "logcat-clear",
       title: "Clear Logcat",
-      description: "Clear the logcat buffer for the active device.",
+      description: "Clear the logcat buffer for the primary device.",
       onClick: () => openActionForm("logcat-clear"),
-      disabled: busy || !activeSerial,
+      disabled: busy || selectedSerials.length !== 1,
     },
     {
       id: "mirror",
@@ -2713,7 +3024,7 @@ function App() {
             </div>
             <div className="device-summary">
               <div className="device-primary">
-                <p className="eyebrow">Active Device</p>
+                <p className="eyebrow">Primary Device</p>
                 <strong>{deviceName}</strong>
                 <p className="muted">{activeSerial ?? "Select a device"}</p>
               </div>
@@ -2745,7 +3056,7 @@ function App() {
               </div>
             </div>
             <div className="button-row">
-              <button className="ghost" onClick={handleCopyDeviceInfo} disabled={busy || !activeSerial}>
+              <button className="ghost" onClick={handleCopyDeviceInfo} disabled={busy || selectedSerials.length !== 1}>
                 Copy Device Info
               </button>
             </div>
@@ -2811,7 +3122,7 @@ function App() {
             {apps.length === 0 ? (
               <div className="empty-inline">
                 <p className="muted">No app list loaded yet.</p>
-                <button className="ghost" onClick={handleLoadApps} disabled={busy || !activeSerial}>
+                <button className="ghost" onClick={handleLoadApps} disabled={busy || selectedSerials.length !== 1}>
                   Load Apps
                 </button>
               </div>
@@ -2854,6 +3165,130 @@ function App() {
     actionForm.actionId === "screenshot" ||
     actionForm.actionId === "record" ||
     actionForm.actionId === "mirror";
+  const actionRequiresSelection = actionForm.actionId != null;
+  const actionRequiresSingle =
+    actionForm.actionId === "record" || actionForm.actionId === "logcat-clear";
+  const actionSelectionInvalid =
+    (actionRequiresSelection && selectedSerials.length === 0) ||
+    (actionRequiresSingle && selectedSerials.length !== 1);
+
+  const getPopoverFocusable = () => {
+    const root = devicePopoverRef.current;
+    if (!root) {
+      return [] as HTMLElement[];
+    }
+    const items = Array.from(
+      root.querySelectorAll<HTMLElement>(
+        "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+      ),
+    );
+    return items.filter((el) => !el.hasAttribute("disabled") && el.tabIndex >= 0);
+  };
+
+  const handlePopoverKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Tab") {
+      const focusables = getPopoverFocusable();
+      if (focusables.length === 0) {
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const target = event.target as HTMLElement | null;
+      if (!event.shiftKey && target === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && target === first) {
+        event.preventDefault();
+        last.focus();
+      }
+      return;
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
+      const root = devicePopoverRef.current;
+      if (!root) {
+        return;
+      }
+      const rows = Array.from(root.querySelectorAll<HTMLElement>(".device-popover-row"));
+      if (rows.length === 0) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const current = target?.closest?.(".device-popover-row") as HTMLElement | null;
+      const currentIndex = current ? rows.indexOf(current) : -1;
+      let nextIndex = 0;
+      if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = rows.length - 1;
+      } else if (event.key === "ArrowDown") {
+        nextIndex = Math.min(rows.length - 1, currentIndex + 1);
+      } else {
+        nextIndex = Math.max(0, currentIndex <= 0 ? 0 : currentIndex - 1);
+      }
+      event.preventDefault();
+      rows[nextIndex]?.focus();
+    }
+  };
+
+  const renderDeviceRow = (device: DeviceInfo) => {
+    const serial = device.summary.serial;
+    const detail = device.detail;
+    const name = detail?.model ?? device.summary.model ?? serial;
+    const isSelected = selectedSerials.includes(serial);
+    const isActive = serial === activeSerial;
+    const stateTone =
+      device.summary.state === "device"
+        ? "ok"
+        : device.summary.state === "unauthorized"
+          ? "error"
+          : "warn";
+    return (
+      <div
+        key={serial}
+        className={`device-popover-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
+        onClick={() => handleSelectActiveSerial(serial)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            handleSelectActiveSerial(serial);
+          }
+        }}
+      >
+        <label className="device-check">
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onClick={(event) => event.stopPropagation()}
+            onChange={() => toggleDevice(serial)}
+            disabled={busy}
+            aria-label={`Select ${name}`}
+          />
+        </label>
+        <div className="device-popover-meta">
+          <span className="device-popover-name">{name}</span>
+          <span className="device-popover-serial">{serial}</span>
+        </div>
+        <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
+        {isActive && <span className="device-active-badge">Primary</span>}
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    if (!devicePopoverOpen) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const focusables = getPopoverFocusable();
+      if (focusables.length > 0) {
+        focusables[0].focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [devicePopoverOpen]);
 
   return (
     <div className="app-shell">
@@ -2914,19 +3349,28 @@ function App() {
         <header className="top-bar">
           <div className="device-context">
             <div className="device-selector">
-              <p className="eyebrow">Active Device</p>
+              <p className="eyebrow">Device Context</p>
               <div className="device-selector-row">
-                <select
-                  value={activeSerial ?? ""}
-                  onChange={(event) => handleSelectActiveSerial(event.target.value)}
+                <button
+                  type="button"
+                  ref={devicePopoverTriggerRef}
+                  className="device-context-trigger"
+                  aria-haspopup="dialog"
+                  aria-expanded={devicePopoverOpen}
+                  aria-controls="device-context-popover"
+                  onClick={() => setDevicePopoverOpen((prev) => !prev)}
+                  disabled={devices.length === 0}
                 >
-                  <option value="">Select a device</option>
-                  {devices.map((device) => (
-                    <option key={device.summary.serial} value={device.summary.serial}>
-                      {device.detail?.model ?? device.summary.model ?? device.summary.serial}
-                    </option>
-                  ))}
-                </select>
+                  <div className="device-context-main">
+                    <span className="device-context-title">{primaryDeviceLabel}</span>
+                    <span className="muted">
+                      {selectedCount ? `${selectedCount} selected` : "No selection"}
+                    </span>
+                  </div>
+                  <span className="device-context-caret" aria-hidden="true">
+                    ▾
+                  </span>
+                </button>
                 <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
                   Manage
                 </button>
@@ -2934,16 +3378,103 @@ function App() {
             </div>
             <div className="device-status-row">
               <span className={`status-pill ${deviceStatusTone}`}>{deviceStatusLabel}</span>
+              <span className="badge">
+                {selectedCount ? `${selectedCount} selected` : "No selection"}
+              </span>
               <span className="muted">
-                {activeSerial ? `Selected: ${activeSerial}` : "Select a device to enable actions"}
+                {activeSerial ? `Primary: ${activeSerial}` : "Select devices to set a primary"}
               </span>
             </div>
+            {devicePopoverOpen && (
+              <div
+                id="device-context-popover"
+                className="device-popover"
+                role="dialog"
+                aria-label="Device selection"
+                ref={devicePopoverRef}
+                style={devicePopoverLeft != null ? { left: devicePopoverLeft } : undefined}
+                onKeyDown={handlePopoverKeyDown}
+              >
+                <div className="device-popover-header">
+                  <div>
+                    <strong>Devices</strong>
+                    <span className="muted">{devices.length} connected</span>
+                  </div>
+                  <div className="button-row compact">
+                    <button
+                      className="ghost"
+                      onClick={selectAllDevices}
+                      disabled={busy || devices.length === 0}
+                    >
+                      Select all
+                    </button>
+                    <button
+                      className="ghost"
+                      onClick={clearSelection}
+                      disabled={busy || selectedCount === 0}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <p className="muted device-popover-note">
+                  Use checkboxes to include devices. Click a row to set the primary device.
+                </p>
+                <div className="device-popover-list">
+                  {devices.length === 0 ? (
+                    <p className="muted">No devices detected.</p>
+                  ) : (
+                    <>
+                      {recentDevices.length > 0 && (
+                        <div className="device-popover-section">
+                          <div className="device-popover-section-title">Recent</div>
+                          <div className="device-popover-section-body">
+                            {recentDevices.map(renderDeviceRow)}
+                          </div>
+                        </div>
+                      )}
+                      {groupedDevicesFiltered.groupNames.map((group) => (
+                        <div className="device-popover-section" key={group}>
+                          <div className="device-popover-section-title">{group}</div>
+                          <div className="device-popover-section-body">
+                            {groupedDevicesFiltered.grouped.get(group)?.map(renderDeviceRow)}
+                          </div>
+                        </div>
+                      ))}
+                      {groupedDevicesFiltered.ungrouped.length > 0 && (
+                        <div className="device-popover-section">
+                          <div className="device-popover-section-title">
+                            {groupedDevicesFiltered.groupNames.length > 0 ? "Ungrouped" : "Devices"}
+                          </div>
+                          <div className="device-popover-section-body">
+                            {groupedDevicesFiltered.ungrouped.map(renderDeviceRow)}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+                {singleSelectionWarning && (
+                  <div className="inline-alert info">
+                    This page requires a single device. Keep only one selected.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="top-actions">
-            <button className="ghost" onClick={() => openActionForm("screenshot")} disabled={busy || !activeSerial}>
+            <button
+              className="ghost"
+              onClick={() => openActionForm("screenshot")}
+              disabled={busy || selectedSerials.length === 0}
+            >
               Screenshot
             </button>
-            <button className="ghost" onClick={() => openActionForm("reboot")} disabled={busy || !selectedSerials.length}>
+            <button
+              className="ghost"
+              onClick={() => openActionForm("reboot")}
+              disabled={busy || selectedSerials.length === 0}
+            >
               Reboot
             </button>
             <button className="ghost" onClick={openPairingModal} disabled={busy}>
@@ -2952,7 +3483,11 @@ function App() {
             <button className="ghost" onClick={refreshDevices} disabled={busy}>
               Refresh
             </button>
-            <button className="ghost" onClick={() => openActionForm("mirror")} disabled={busy}>
+            <button
+              className="ghost"
+              onClick={() => openActionForm("mirror")}
+              disabled={busy || selectedSerials.length === 0}
+            >
               Live Mirror
             </button>
             <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working..." : "Idle"}</span>
@@ -3241,7 +3776,7 @@ function App() {
                         <button onClick={() => handleToggleBluetooth(false)} disabled={busy || selectedCount === 0}>
                           Bluetooth Off
                         </button>
-                        <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount === 0}>
+                        <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount !== 1}>
                           Copy Device Info
                         </button>
                       </div>
@@ -3261,10 +3796,10 @@ function App() {
                     </div>
                   </div>
                   <div className="stack">
-                    <section className="panel">
+                    <section className="panel settings-panel">
                       <div className="panel-header">
                         <h2>Shell Commands</h2>
-                        <span>{activeSerial ?? "No device selected"}</span>
+                        <span>{selectedSummaryLabel}</span>
                       </div>
                       {screenRecordRemote && (
                         <p className="muted">Recording in progress: {screenRecordRemote}</p>
@@ -3276,7 +3811,7 @@ function App() {
                           onChange={(event) => setShellCommand(event.target.value)}
                           placeholder="e.g. pm list packages"
                         />
-                        <button onClick={handleRunShell} disabled={busy}>
+                        <button onClick={handleRunShell} disabled={busy || selectedSerials.length === 0}>
                           Run
                         </button>
                       </div>
@@ -3549,23 +4084,27 @@ function App() {
 	                  <section className="panel">
 	                    <div className="panel-header">
 	                      <h2>Device Files</h2>
-	                      <span>{activeSerial ?? "No device selected"}</span>
+	                      <span>{selectedSummaryLabel}</span>
 	                    </div>
 	                    <div className="form-row">
 	                      <label>Path</label>
 	                      <input value={filesPath} onChange={(event) => setFilesPath(event.target.value)} />
-	                      <button className="ghost" onClick={handleFilesGoUp} disabled={busy}>
-	                        Up
-	                      </button>
-	                      <button onClick={() => void handleFilesRefresh()} disabled={busy}>
-	                        Load
-	                      </button>
-	                      <button className="ghost" onClick={openFilesMkdirModal} disabled={busy}>
-	                        New folder
-	                      </button>
-	                      <button onClick={handleFileUpload} disabled={busy}>
-	                        Upload
-	                      </button>
+                      <button className="ghost" onClick={handleFilesGoUp} disabled={busy || selectedSerials.length !== 1}>
+                        Up
+                      </button>
+                      <button onClick={() => void handleFilesRefresh()} disabled={busy || selectedSerials.length !== 1}>
+                        Load
+                      </button>
+                      <button
+                        className="ghost"
+                        onClick={openFilesMkdirModal}
+                        disabled={busy || selectedSerials.length !== 1}
+                      >
+                        New folder
+                      </button>
+                      <button onClick={handleFileUpload} disabled={busy || selectedSerials.length !== 1}>
+                        Upload
+                      </button>
 	                      <label className="toggle">
 	                        <input
 	                          type="checkbox"
@@ -3580,23 +4119,26 @@ function App() {
 	                        {filesSelectedPaths.length ? `${filesSelectedPaths.length} selected` : "No selection"}
 	                      </span>
 	                      <div className="file-toolbar-actions">
-	                        <button
-	                          className="ghost"
-	                          onClick={() => setFilesSelectedPaths([])}
-	                          disabled={busy || filesSelectedPaths.length === 0}
-	                        >
-	                          Clear
-	                        </button>
-	                        <button onClick={handleFilesPullSelected} disabled={busy || filesSelectedPaths.length === 0}>
-	                          Pull selected
-	                        </button>
-	                        <button
-	                          className="danger"
-	                          onClick={openFilesDeleteSelectedModal}
-	                          disabled={busy || filesSelectedPaths.length === 0}
-	                        >
-	                          Delete selected
-	                        </button>
+                        <button
+                          className="ghost"
+                          onClick={() => setFilesSelectedPaths([])}
+                          disabled={busy || selectedSerials.length !== 1 || filesSelectedPaths.length === 0}
+                        >
+                          Clear
+                        </button>
+                        <button
+                          onClick={handleFilesPullSelected}
+                          disabled={busy || selectedSerials.length !== 1 || filesSelectedPaths.length === 0}
+                        >
+                          Pull selected
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={openFilesDeleteSelectedModal}
+                          disabled={busy || selectedSerials.length !== 1 || filesSelectedPaths.length === 0}
+                        >
+                          Delete selected
+                        </button>
 	                      </div>
 	                    </div>
 	                    <div className="split">
@@ -3621,24 +4163,32 @@ function App() {
 	                              </div>
 	                              <div className="file-row-actions">
 	                                {entry.is_dir ? (
-	                                  <button
-	                                    className="ghost"
-	                                    onClick={() => void handleFilesRefresh(entry.path)}
-	                                    disabled={busy}
-	                                  >
-	                                    Open
-	                                  </button>
-	                                ) : (
-	                                  <button onClick={() => handleFilePull(entry)} disabled={busy}>
-	                                    Pull
-	                                  </button>
-	                                )}
-	                                <button className="ghost" onClick={() => openFilesRenameModal(entry)} disabled={busy}>
-	                                  Rename
-	                                </button>
-	                                <button className="danger" onClick={() => openFilesDeleteModal(entry)} disabled={busy}>
-	                                  Delete
-	                                </button>
+                                  <button
+                                    className="ghost"
+                                    onClick={() => void handleFilesRefresh(entry.path)}
+                                    disabled={busy || selectedSerials.length !== 1}
+                                  >
+                                    Open
+                                  </button>
+                                ) : (
+                                  <button onClick={() => handleFilePull(entry)} disabled={busy || selectedSerials.length !== 1}>
+                                    Pull
+                                  </button>
+                                )}
+                                <button
+                                  className="ghost"
+                                  onClick={() => openFilesRenameModal(entry)}
+                                  disabled={busy || selectedSerials.length !== 1}
+                                >
+                                  Rename
+                                </button>
+                                <button
+                                  className="danger"
+                                  onClick={() => openFilesDeleteModal(entry)}
+                                  disabled={busy || selectedSerials.length !== 1}
+                                >
+                                  Delete
+                                </button>
 	                              </div>
 	                            </div>
 	                          ))
@@ -3680,28 +4230,36 @@ function App() {
                     <div className="panel-header">
                       <div>
                         <h2>Logcat Stream</h2>
-                        <span>{activeSerial ?? "No device selected"}</span>
+                        <span>{selectedSummaryLabel}</span>
                       </div>
                     </div>
                     <div className="logcat-toolbar">
                       <div className="logcat-toolbar-row">
                         <div className="logcat-toolbar-cluster">
                           <div className="logcat-button-group">
-                            <button onClick={handleLogcatStart} disabled={busy}>
+                            <button onClick={handleLogcatStart} disabled={busy || selectedSerials.length !== 1}>
                               Start
                             </button>
-                            <button onClick={handleLogcatStop} disabled={busy}>
+                            <button onClick={handleLogcatStop} disabled={busy || selectedSerials.length !== 1}>
                               Stop
                             </button>
                           </div>
                           <div className="logcat-button-group">
-                            <button onClick={handleLogcatClearBuffer} disabled={busy}>
+                            <button onClick={handleLogcatClearBuffer} disabled={busy || selectedSerials.length !== 1}>
                               Clear Buffer
                             </button>
-                            <button className="ghost" onClick={handleLogcatClearView} disabled={busy}>
+                            <button
+                              className="ghost"
+                              onClick={handleLogcatClearView}
+                              disabled={busy || selectedSerials.length !== 1}
+                            >
                               Clear View
                             </button>
-                            <button className="ghost" onClick={handleLogcatExport} disabled={busy}>
+                            <button
+                              className="ghost"
+                              onClick={handleLogcatExport}
+                              disabled={busy || selectedSerials.length !== 1}
+                            >
                               Export
                             </button>
                           </div>
@@ -3996,19 +4554,19 @@ function App() {
                     <div className="panel-header">
                       <div>
                         <h2>Inspector Workspace</h2>
-                        <span>{activeSerial ?? "No device selected"}</span>
+                        <span>{selectedSummaryLabel}</span>
                       </div>
                       <div className="button-row compact">
-                        <button onClick={handleUiInspect} disabled={busy}>
+                        <button onClick={handleUiInspect} disabled={busy || selectedSerials.length !== 1}>
                           Refresh
                         </button>
-                        <button className="ghost" onClick={handleUiExport} disabled={busy}>
+                        <button className="ghost" onClick={handleUiExport} disabled={busy || selectedSerials.length !== 1}>
                           Export
                         </button>
                         <button
                           className="ghost"
                           onClick={handleScrcpyLaunch}
-                          disabled={busy || !scrcpyInfo?.available}
+                          disabled={busy || !scrcpyInfo?.available || selectedSerials.length !== 1}
                         >
                           Live Mirror
                         </button>
@@ -4248,7 +4806,7 @@ function App() {
                   <section className="panel">
                     <div className="panel-header">
                       <h2>App Management</h2>
-                      <span>{activeSerial ?? "No device selected"}</span>
+                      <span>{selectedSummaryLabel}</span>
                     </div>
                     <div className="toolbar">
                       <input
@@ -4272,7 +4830,7 @@ function App() {
                         />
                         Include versions
                       </label>
-                      <button onClick={handleLoadApps} disabled={busy}>
+                      <button onClick={handleLoadApps} disabled={busy || selectedSerials.length !== 1}>
                         Load Apps
                       </button>
                     </div>
@@ -4297,22 +4855,22 @@ function App() {
                             <p>{selectedApp.package_name}</p>
                             <p className="muted">Version: {selectedApp.version_name ?? "--"}</p>
                             <div className="button-row">
-                              <button onClick={() => handleAppAction("forceStop")} disabled={busy}>
+                              <button onClick={() => handleAppAction("forceStop")} disabled={busy || selectedSerials.length !== 1}>
                                 Force Stop
                               </button>
-                              <button onClick={() => handleAppAction("clear")} disabled={busy}>
+                              <button onClick={() => handleAppAction("clear")} disabled={busy || selectedSerials.length !== 1}>
                                 Clear Data
                               </button>
-                              <button onClick={() => handleAppAction("info")} disabled={busy}>
+                              <button onClick={() => handleAppAction("info")} disabled={busy || selectedSerials.length !== 1}>
                                 Open Info
                               </button>
-                              <button onClick={() => handleAppAction("enable")} disabled={busy}>
+                              <button onClick={() => handleAppAction("enable")} disabled={busy || selectedSerials.length !== 1}>
                                 Enable
                               </button>
-                              <button onClick={() => handleAppAction("disable")} disabled={busy}>
+                              <button onClick={() => handleAppAction("disable")} disabled={busy || selectedSerials.length !== 1}>
                                 Disable
                               </button>
-                              <button onClick={() => handleAppAction("uninstall")} disabled={busy}>
+                              <button onClick={() => handleAppAction("uninstall")} disabled={busy || selectedSerials.length !== 1}>
                                 Uninstall
                               </button>
                             </div>
@@ -4339,29 +4897,78 @@ function App() {
                   <section className="panel">
                     <div className="panel-header">
                       <h2>Bugreport</h2>
-                      <span>{activeSerial ?? "No device selected"}</span>
+                      <span>{selectedSummaryLabel}</span>
                     </div>
                     <div className="button-row">
-                      <button onClick={handleBugreport} disabled={busy}>
+                      <button onClick={handleBugreport} disabled={busy || selectedSerials.length === 0}>
                         Generate Bugreport
                       </button>
-                      <button onClick={handleCancelBugreport} disabled={busy}>
+                      <button onClick={handleCancelBugreport} disabled={busy || selectedSerials.length === 0}>
                         Cancel
                       </button>
                     </div>
-                    <div className="progress">
-                      <div className="progress-bar">
-                        <div className="progress-fill" style={{ width: `${bugreportProgress ?? 0}%` }} />
+                    {latestBugreportTask ? (
+                      <div className="stack">
+                        <div className="progress">
+                          <div className="progress-bar">
+                            <div
+                              className="progress-fill"
+                              style={{ width: `${latestBugreportProgress ?? 0}%` }}
+                            />
+                          </div>
+                          <span>
+                            {latestBugreportProgress != null ? `${latestBugreportProgress}%` : "Idle"}
+                          </span>
+                        </div>
+                        <div className="task-devices">
+                          {latestBugreportEntries.map((entry) => {
+                            const entryTone =
+                              entry.status === "running"
+                                ? "busy"
+                                : entry.status === "success"
+                                  ? "ok"
+                                  : entry.status === "cancelled"
+                                    ? "warn"
+                                    : "error";
+                            return (
+                              <div key={entry.serial} className="task-device-row">
+                                <div className="task-device-main">
+                                  <strong>{entry.serial}</strong>
+                                  <span className={`status-pill ${entryTone}`}>{entry.status}</span>
+                                  {entry.progress != null && (
+                                    <span className="muted">{Math.round(entry.progress)}%</span>
+                                  )}
+                                  {entry.message && <span className="muted">{entry.message}</span>}
+                                </div>
+                                <div className="task-device-meta">
+                                  {entry.output_path && (
+                                    <button className="ghost" onClick={() => openPath(entry.output_path!)}>
+                                      Open output
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                      <span>{bugreportProgress != null ? `${bugreportProgress}%` : "Idle"}</span>
-                    </div>
-                    {bugreportResult && (
-                      <div className="output-block">
-                        <h3>Last Result</h3>
-                        <p>Status: {bugreportResult.success ? "Success" : "Failed"}</p>
-                        <p>Output: {bugreportResult.output_path ?? "--"}</p>
-                        <p>Error: {bugreportResult.error ?? "--"}</p>
-                      </div>
+                    ) : (
+                      <>
+                        <div className="progress">
+                          <div className="progress-bar">
+                            <div className="progress-fill" style={{ width: `${bugreportProgress ?? 0}%` }} />
+                          </div>
+                          <span>{bugreportProgress != null ? `${bugreportProgress}%` : "Idle"}</span>
+                        </div>
+                        {bugreportResult && (
+                          <div className="output-block">
+                            <h3>Last Result</h3>
+                            <p>Status: {bugreportResult.success ? "Success" : "Failed"}</p>
+                            <p>Output: {bugreportResult.output_path ?? "--"}</p>
+                            <p>Error: {bugreportResult.error ?? "--"}</p>
+                          </div>
+                        )}
+                      </>
                     )}
                   </section>
                 </div>
@@ -4380,13 +4987,13 @@ function App() {
                   <section className="panel">
                     <div className="panel-header">
                       <h2>Bluetooth Monitor</h2>
-                      <span>{activeSerial ?? "No device selected"}</span>
+                      <span>{selectedSummaryLabel}</span>
                     </div>
                     <div className="button-row">
-                      <button onClick={() => handleBluetoothMonitor(true)} disabled={busy}>
+                      <button onClick={() => handleBluetoothMonitor(true)} disabled={busy || selectedSerials.length !== 1}>
                         Start Monitor
                       </button>
-                      <button onClick={() => handleBluetoothMonitor(false)} disabled={busy}>
+                      <button onClick={() => handleBluetoothMonitor(false)} disabled={busy || selectedSerials.length !== 1}>
                         Stop Monitor
                       </button>
                     </div>
@@ -4420,7 +5027,7 @@ function App() {
                         <span>Saved locally</span>
                       </div>
                       <div className="settings-grid">
-                        <div>
+                        <div className="settings-group settings-span-2">
                           <h3>ADB</h3>
                           <label>
                             ADB executable path
@@ -4458,7 +5065,7 @@ function App() {
                             </div>
                           )}
                         </div>
-                        <div>
+                        <div className="settings-group">
                           <h3>Output Paths</h3>
                           <label>
                             Default Output
@@ -4481,7 +5088,7 @@ function App() {
                             />
                           </label>
                         </div>
-                        <div>
+                        <div className="settings-group">
                           <h3>Commands</h3>
                           <label>
                             Timeout (sec)
@@ -4518,7 +5125,7 @@ function App() {
                             Parallel execution
                           </label>
                         </div>
-                        <div>
+                        <div className="settings-group">
                           <h3>Screenrecord</h3>
                           <label>
                             Bit rate
@@ -4567,7 +5174,7 @@ function App() {
                             Use HEVC
                           </label>
                         </div>
-                        <div>
+                        <div className="settings-group">
                           <h3>scrcpy</h3>
                           <label className="toggle">
                             <input
@@ -4609,7 +5216,7 @@ function App() {
                           </label>
                         </div>
                       </div>
-                      <div className="button-row">
+                      <div className="button-row settings-actions">
                         <button onClick={handleSaveConfig} disabled={busy}>
                           Save Settings
                         </button>
@@ -4652,6 +5259,7 @@ function App() {
                 Close
               </button>
             </div>
+            <p className="muted">Targets: {selectedSummaryLabel}</p>
             {actionForm.errors.length > 0 && (
               <div className="inline-alert error">
                 {actionForm.errors.map((error) => (
@@ -4898,7 +5506,7 @@ function App() {
 
             {actionForm.actionId === "logcat-clear" && (
               <div className="stack">
-                <p className="muted">This clears the logcat buffer for the active device.</p>
+                <p className="muted">This clears the logcat buffer for the primary device.</p>
               </div>
             )}
 
@@ -5029,7 +5637,10 @@ function App() {
             )}
 
             <div className="button-row">
-              <button onClick={handleActionSubmit} disabled={busy || (actionNeedsConfig && !actionDraftConfig)}>
+              <button
+                onClick={handleActionSubmit}
+                disabled={busy || (actionNeedsConfig && !actionDraftConfig) || actionSelectionInvalid}
+              >
                 Run Action
               </button>
               <button className="ghost" onClick={closeActionForm}>

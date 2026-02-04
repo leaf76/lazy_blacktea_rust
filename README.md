@@ -52,7 +52,8 @@ cargo test --all --all-features
 - UI Inspector capture includes an embedded screenshot preview; export writes XML/HTML/PNG files to the configured output folder.
 - App shell + routing are implemented in `src/App.tsx` with `HashRouter` in `src/main.tsx`.
 - UI layout uses compact density, grouped sidebar navigation, and a device status top bar.
-- Active device auto-selects the first online device after refresh; the top bar selector includes a Manage shortcut.
+- Primary device auto-selects the first online device after refresh; the top bar device context popover includes a Manage shortcut.
+- The top bar device context popover provides global multi-select with checkboxes, recent devices from task history, grouped sections, and keyboard navigation; single-device pages use the primary selection.
 - Device Manager uses a filter toolbar + command bar layout with grid-aligned device rows.
 - Device Manager supports Shift range select and Ctrl/Cmd toggle for multi-selection.
 - Logcat advanced panel is compact and scrollable to preserve log viewport height.
@@ -61,6 +62,7 @@ cargo test --all --all-features
 - Logcat filter rows use ultra-compact inline controls to reduce vertical height.
 - Active Filters collapse to a count with an expand toggle; presets are a single-line row.
 - Logcat panel uses tightened spacing and inline labels for a compact control block.
+- Settings page groups configuration into a two-column grid with a fixed label column, ADB spanning full width, compact small-width spacing, and right-aligned actions.
 - Theme follows system light/dark via CSS variables in `src/App.css`.
 
 ## UI/UX Planning
