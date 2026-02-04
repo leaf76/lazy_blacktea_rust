@@ -1374,7 +1374,40 @@ textarea {
   position: absolute;
   left: 0;
   top: 0;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.ui-node-meta {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: var(--color-bg-subtle);
+  font-size: 12px;
+  color: var(--color-text);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ui-node-meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ui-node-meta-label {
+  font-weight: 600;
+  color: var(--color-text);
+  flex: 0 0 auto;
+}
+
+.ui-node-meta-value {
+  color: var(--color-text-muted);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inspector-xml {

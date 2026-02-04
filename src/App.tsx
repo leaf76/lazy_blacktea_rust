@@ -84,7 +84,7 @@ import {
   tasksReducer,
   type TaskKind,
 } from "./tasks";
-import { parseUiBoundsRects } from "./ui_bounds";
+import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
@@ -427,7 +427,7 @@ function App() {
   }, [logcatPresets, logcatPresetSelected]);
 
   const uiScreenshotSrc = uiScreenshotDataUrl;
-  const uiBoundsParse = useMemo(() => parseUiBoundsRects(uiXml), [uiXml]);
+  const uiNodesParse = useMemo(() => parseUiNodes(uiXml), [uiXml]);
 
   const filteredUiXml = useMemo(() => {
     const query = uiInspectorSearch.trim().toLowerCase();
@@ -445,6 +445,19 @@ function App() {
       setUiScreenshotSize({ width: 0, height: 0 });
     }
   }, [uiScreenshotSrc]);
+
+  const [uiHoveredNodeIndex, setUiHoveredNodeIndex] = useState<number>(-1);
+  const [uiSelectedNodeIndex, setUiSelectedNodeIndex] = useState<number>(-1);
+  const uiHoverRafRef = useRef<number | null>(null);
+  const uiLastPointerRef = useRef<{ x: number; y: number } | null>(null);
+
+  const uiHoveredNode = uiHoveredNodeIndex >= 0 ? uiNodesParse.nodes[uiHoveredNodeIndex] : null;
+  const uiSelectedNode = uiSelectedNodeIndex >= 0 ? uiNodesParse.nodes[uiSelectedNodeIndex] : null;
+
+  useEffect(() => {
+    setUiHoveredNodeIndex(-1);
+    setUiSelectedNodeIndex(-1);
+  }, [uiXml]);
 
   useEffect(() => {
     const canvas = uiBoundsCanvasRef.current;
@@ -465,15 +478,16 @@ function App() {
     if (!uiBoundsEnabled) {
       return;
     }
-    if (!uiBoundsParse.rects.length) {
+    if (!uiNodesParse.nodes.length) {
       return;
     }
 
     ctx.lineWidth = 2;
     ctx.strokeStyle = "rgba(59, 130, 246, 0.9)";
-    ctx.fillStyle = "rgba(59, 130, 246, 0.08)";
+    ctx.fillStyle = "rgba(59, 130, 246, 0.06)";
 
-    for (const rect of uiBoundsParse.rects) {
+    for (const node of uiNodesParse.nodes) {
+      const rect = node.rect;
       const x1 = Math.max(0, Math.min(width, rect.x));
       const y1 = Math.max(0, Math.min(height, rect.y));
       const x2 = Math.max(0, Math.min(width, rect.x + rect.w));
@@ -486,7 +500,47 @@ function App() {
       ctx.fillRect(x1, y1, w, h);
       ctx.strokeRect(x1 + 0.5, y1 + 0.5, w, h);
     }
-  }, [uiBoundsEnabled, uiBoundsParse, uiScreenshotSize]);
+
+    if (uiHoveredNode) {
+      const rect = uiHoveredNode.rect;
+      const x1 = Math.max(0, Math.min(width, rect.x));
+      const y1 = Math.max(0, Math.min(height, rect.y));
+      const x2 = Math.max(0, Math.min(width, rect.x + rect.w));
+      const y2 = Math.max(0, Math.min(height, rect.y + rect.h));
+      const w = x2 - x1;
+      const h = y2 - y1;
+      if (w > 0 && h > 0) {
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(245, 158, 11, 0.95)";
+        ctx.fillStyle = "rgba(245, 158, 11, 0.08)";
+        ctx.fillRect(x1, y1, w, h);
+        ctx.strokeRect(x1 + 0.5, y1 + 0.5, w, h);
+      }
+    }
+
+    if (uiSelectedNode) {
+      const rect = uiSelectedNode.rect;
+      const x1 = Math.max(0, Math.min(width, rect.x));
+      const y1 = Math.max(0, Math.min(height, rect.y));
+      const x2 = Math.max(0, Math.min(width, rect.x + rect.w));
+      const y2 = Math.max(0, Math.min(height, rect.y + rect.h));
+      const w = x2 - x1;
+      const h = y2 - y1;
+      if (w > 0 && h > 0) {
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(239, 68, 68, 0.95)";
+        ctx.fillStyle = "rgba(239, 68, 68, 0.06)";
+        ctx.fillRect(x1, y1, w, h);
+        ctx.strokeRect(x1 + 0.5, y1 + 0.5, w, h);
+      }
+    }
+  }, [
+    uiBoundsEnabled,
+    uiHoveredNode,
+    uiNodesParse,
+    uiScreenshotSize,
+    uiSelectedNode,
+  ]);
 
   const handleSelectActiveSerial = (serial: string) => {
     if (!serial) {
@@ -4010,7 +4064,57 @@ function App() {
                                   });
                                 }}
                               />
-                              <canvas ref={uiBoundsCanvasRef} aria-hidden="true" />
+                              <canvas
+                                ref={uiBoundsCanvasRef}
+                                aria-label="UI hierarchy bounds overlay"
+                                onMouseMove={(event) => {
+                                  if (!uiBoundsEnabled) {
+                                    setUiHoveredNodeIndex(-1);
+                                    return;
+                                  }
+                                  const canvas = uiBoundsCanvasRef.current;
+                                  if (!canvas) {
+                                    return;
+                                  }
+                                  uiLastPointerRef.current = { x: event.clientX, y: event.clientY };
+                                  if (uiHoverRafRef.current !== null) {
+                                    return;
+                                  }
+                                  uiHoverRafRef.current = window.requestAnimationFrame(() => {
+                                    uiHoverRafRef.current = null;
+                                    const latest = uiLastPointerRef.current;
+                                    const activeCanvas = uiBoundsCanvasRef.current;
+                                    if (!latest || !activeCanvas) {
+                                      return;
+                                    }
+                                    const rect = activeCanvas.getBoundingClientRect();
+                                    if (rect.width <= 0 || rect.height <= 0) {
+                                      return;
+                                    }
+                                    const x =
+                                      (latest.x - rect.left) * (activeCanvas.width / rect.width);
+                                    const y =
+                                      (latest.y - rect.top) * (activeCanvas.height / rect.height);
+                                    const idx = pickUiNodeAtPoint(uiNodesParse.nodes, x, y);
+                                    setUiHoveredNodeIndex(idx);
+                                  });
+                                }}
+                                onMouseLeave={() => {
+                                  uiLastPointerRef.current = null;
+                                  if (uiHoverRafRef.current !== null) {
+                                    window.cancelAnimationFrame(uiHoverRafRef.current);
+                                    uiHoverRafRef.current = null;
+                                  }
+                                  setUiHoveredNodeIndex(-1);
+                                }}
+                                onClick={() => {
+                                  if (uiHoveredNodeIndex >= 0) {
+                                    setUiSelectedNodeIndex(uiHoveredNodeIndex);
+                                  } else {
+                                    setUiSelectedNodeIndex(-1);
+                                  }
+                                }}
+                              />
                             </div>
                           ) : (
                             <p className="muted">
@@ -4033,10 +4137,54 @@ function App() {
                           </label>
                           <span className="muted">
                             {uiScreenshotSrc
-                              ? `${uiBoundsParse.rects.length}${uiBoundsParse.truncated ? "+" : ""} nodes`
+                              ? `${uiNodesParse.nodes.length}${uiNodesParse.truncated ? "+" : ""} nodes`
                               : "--"}
                           </span>
                         </div>
+                        {(uiSelectedNode || uiHoveredNode) && (
+                          <div className="ui-node-meta">
+                            {uiSelectedNode && (
+                              <>
+                                <div className="ui-node-meta-row">
+                                  <span className="ui-node-meta-label">Selected</span>
+                                  <span className="ui-node-meta-value">
+                                    {[
+                                      uiSelectedNode.resourceId,
+                                      uiSelectedNode.text ? `"${uiSelectedNode.text}"` : null,
+                                      uiSelectedNode.className,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ") || "Node"}
+                                  </span>
+                                </div>
+                                <div className="ui-node-meta-row">
+                                  <span className="ui-node-meta-label">Bounds</span>
+                                  <span className="ui-node-meta-value">{uiSelectedNode.bounds}</span>
+                                </div>
+                              </>
+                            )}
+                            {uiHoveredNode && (
+                              <>
+                                <div className="ui-node-meta-row">
+                                  <span className="ui-node-meta-label">Hover</span>
+                                  <span className="ui-node-meta-value">
+                                    {[
+                                      uiHoveredNode.resourceId,
+                                      uiHoveredNode.text ? `"${uiHoveredNode.text}"` : null,
+                                      uiHoveredNode.className,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ") || "Node"}
+                                  </span>
+                                </div>
+                                <div className="ui-node-meta-row">
+                                  <span className="ui-node-meta-label">Bounds</span>
+                                  <span className="ui-node-meta-value">{uiHoveredNode.bounds}</span>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
                       <div className="panel-sub">
                         <div className="panel-header">
