@@ -84,6 +84,7 @@ import {
   tasksReducer,
   type TaskKind,
 } from "./tasks";
+import { parseUiBoundsRects } from "./ui_bounds";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
@@ -96,7 +97,6 @@ type FileTransferProgress = {
   trace_id: string;
 };
 type LogcatLineEntry = { id: number; text: string };
-type UiBoundsRect = { x: number; y: number; w: number; h: number };
 type QuickActionId =
   | "screenshot"
   | "reboot"
@@ -121,31 +121,6 @@ const truncateText = (value: string, maxLen: number) => {
   }
   const limit = Math.max(0, maxLen - 1);
   return `${value.slice(0, limit)}…`;
-};
-
-const parseUiBoundsRects = (xml: string, limit = 2500) => {
-  const boundsRegex = /bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"/g;
-  const rects: UiBoundsRect[] = [];
-  let truncated = false;
-  let match: RegExpExecArray | null;
-  while ((match = boundsRegex.exec(xml)) !== null) {
-    const x1 = Number(match[1]);
-    const y1 = Number(match[2]);
-    const x2 = Number(match[3]);
-    const y2 = Number(match[4]);
-    if (!Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) {
-      continue;
-    }
-    if (x2 <= x1 || y2 <= y1) {
-      continue;
-    }
-    rects.push({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
-    if (rects.length >= limit) {
-      truncated = true;
-      break;
-    }
-  }
-  return { rects, truncated };
 };
 
 function renderHighlightedLogcatLine(line: string, searchPattern: RegExp | null) {
