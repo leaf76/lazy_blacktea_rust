@@ -25,20 +25,25 @@ use crate::app::adb::parse::{
     parse_bluetooth_manager_state, parse_dumpsys_version_name as parse_gms_version_name,
     parse_getprop_map, parse_ls_la, parse_settings_bool,
 };
-use crate::app::adb::paths::{device_parent_dir, validate_device_path};
+use crate::app::adb::paths::{device_parent_dir, sanitize_filename_component, validate_device_path};
 use crate::app::adb::runner::{run_adb, run_command_with_timeout};
 use crate::app::adb::scrcpy::{build_scrcpy_command, check_scrcpy_availability};
 use crate::app::adb::transfer::parse_progress_percent;
 use crate::app::bluetooth::service::start_bluetooth_monitor as start_bluetooth_monitor_service;
-use crate::app::config::{load_config, save_config, AppConfig};
+use crate::app::bugreport_logcat;
+use crate::app::config::{
+    clamp_terminal_buffer_lines, load_config, save_config, AppConfig,
+};
 use crate::app::error::AppError;
 use crate::app::models::{
     AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppInfo,
-    BugreportResult, CommandResponse, CommandResult, DeviceFileEntry, DeviceInfo, FilePreview,
-    HostCommandResult, LogcatExportResult, ScrcpyInfo, UiHierarchyCaptureResult,
-    UiHierarchyExportResult,
+    BugreportLogFilters, BugreportLogPage, BugreportLogSummary, BugreportResult, CommandResponse,
+    CommandResult, DeviceFileEntry,
+    DeviceInfo, FilePreview, HostCommandResult, LogcatExportResult, ScrcpyInfo,
+    TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
 use crate::app::state::{AppState, BugreportHandle, LogcatHandle, RecordingHandle};
+use crate::app::terminal::{TerminalSession, TERMINAL_EVENT_NAME};
 use crate::app::ui_capture::png_bytes_to_data_url;
 use crate::app::ui_xml::render_device_ui_html;
 
@@ -702,6 +707,165 @@ pub fn run_shell(
 }
 
 #[tauri::command(async)]
+pub fn persist_terminal_state(
+    restore_sessions: Vec<String>,
+    buffers: HashMap<String, Vec<String>>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+
+    let mut config = load_config().unwrap_or_default();
+
+    let mut unique_restore_sessions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for serial in restore_sessions {
+        let trimmed = serial.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            unique_restore_sessions.push(trimmed.to_string());
+        }
+    }
+
+    let mut next_buffers: HashMap<String, Vec<String>> = HashMap::new();
+    for serial in unique_restore_sessions.iter() {
+        if let Some(lines) = buffers.get(serial) {
+            let mut lines = lines.clone();
+            clamp_terminal_buffer_lines(&mut lines);
+            next_buffers.insert(serial.clone(), lines);
+        } else if let Some(existing) = config.terminal.buffers.get(serial) {
+            next_buffers.insert(serial.clone(), existing.clone());
+        }
+    }
+
+    config.terminal.restore_sessions = unique_restore_sessions;
+    config.terminal.buffers = next_buffers;
+
+    save_config(&config)
+        .map_err(|err| AppError::system(format!("Failed to persist terminal state: {err}"), &trace_id))?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub fn start_terminal_session(
+    serial: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<TerminalSessionInfo>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let mut guard = state
+        .terminal_sessions
+        .lock()
+        .map_err(|_| AppError::system("Terminal registry locked", &trace_id))?;
+    if let Some(existing) = guard.get(&serial) {
+        if existing.is_running() {
+            return Err(AppError::validation(
+                "Terminal session already running",
+                &trace_id,
+            ));
+        }
+        guard.remove(&serial);
+    }
+
+    let session_id = Uuid::new_v4().to_string();
+    let args = vec!["-s".to_string(), serial.clone(), "shell".to_string()];
+
+    let app_emit = app.clone();
+    let trace_emit = trace_id.clone();
+    let emitter: Arc<dyn Fn(TerminalEvent) + Send + Sync> = Arc::new(move |event| {
+        if let Err(err) = app_emit.emit(TERMINAL_EVENT_NAME, event) {
+            warn!(trace_id = %trace_emit, error = %err, "failed to emit terminal event");
+        }
+    });
+
+    let session = TerminalSession::spawn(
+        &adb_program,
+        &args,
+        serial.clone(),
+        session_id.clone(),
+        trace_id.clone(),
+        emitter,
+    )
+    .map_err(|err| AppError::dependency(format!("Failed to start terminal session: {err}"), &trace_id))?;
+
+    guard.insert(serial.clone(), session);
+
+    Ok(CommandResponse {
+        trace_id,
+        data: TerminalSessionInfo { serial, session_id },
+    })
+}
+
+#[tauri::command(async)]
+pub fn write_terminal_session(
+    serial: String,
+    data: String,
+    newline: bool,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let mut guard = state
+        .terminal_sessions
+        .lock()
+        .map_err(|_| AppError::system("Terminal registry locked", &trace_id))?;
+    let not_running = match guard.get(&serial) {
+        Some(session) => !session.is_running(),
+        None => true,
+    };
+    if not_running {
+        guard.remove(&serial);
+        return Err(AppError::validation("Terminal session not running", &trace_id));
+    }
+    let session = guard
+        .get(&serial)
+        .ok_or_else(|| AppError::validation("Terminal session not running", &trace_id))?;
+    session
+        .write(&data, newline)
+        .map_err(|err| AppError::dependency(format!("Terminal write failed: {err}"), &trace_id))?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub fn stop_terminal_session(
+    serial: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let mut guard = state
+        .terminal_sessions
+        .lock()
+        .map_err(|_| AppError::system("Terminal registry locked", &trace_id))?;
+    let session = guard
+        .remove(&serial)
+        .ok_or_else(|| AppError::validation("Terminal session not running", &trace_id))?;
+    session.stop();
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
 pub fn reboot_devices(
     serials: Vec<String>,
     mode: Option<String>,
@@ -1046,12 +1210,14 @@ pub fn capture_screenshot(
     let adb_program = get_adb_program(&trace_id)?;
     let config = load_config().unwrap_or_default();
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("screenshot_{}_{}.png", serial, timestamp);
+    let safe_serial = sanitize_filename_component(&serial);
+    let filename = format!("screenshot_{}_{}.png", safe_serial, timestamp);
     let mut output_path = PathBuf::from(output_dir);
     fs::create_dir_all(&output_path).map_err(|err| {
         AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
     })?;
-    output_path.push(filename);
+    output_path.push(&filename);
+    let output_path_string = output_path.to_string_lossy().to_string();
 
     let mut args = vec![
         "-s".to_string(),
@@ -1079,23 +1245,103 @@ pub fn capture_screenshot(
         .output()
         .map_err(|err| AppError::dependency(format!("Failed to run adb: {err}"), &trace_id))?;
 
-    if !output.status.success() {
-        return Err(AppError::dependency(
-            format!(
-                "Screenshot failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            &trace_id,
-        ));
+    if output.status.success() {
+        fs::write(&output_path, &output.stdout).map_err(|err| {
+            AppError::system(format!("Failed to write screenshot: {err}"), &trace_id)
+        })?;
+        return Ok(CommandResponse {
+            trace_id,
+            data: output_path_string,
+        });
     }
 
-    fs::write(&output_path, &output.stdout)
-        .map_err(|err| AppError::system(format!("Failed to write screenshot: {err}"), &trace_id))?;
+    let exec_error_raw = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let exec_error = if exec_error_raw.is_empty() {
+        "unknown error".to_string()
+    } else {
+        exec_error_raw
+    };
+    warn!(
+        trace_id = %trace_id,
+        error = %exec_error,
+        "exec-out screencap failed; falling back to pull"
+    );
 
-    Ok(CommandResponse {
-        trace_id,
-        data: output_path.to_string_lossy().to_string(),
-    })
+    let fallback_result = (|| -> Result<(), AppError> {
+        let remote_path = format!("/sdcard/{filename}");
+        let capture_args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "shell".to_string(),
+            "screencap".to_string(),
+            "-p".to_string(),
+            remote_path.clone(),
+        ];
+        let capture_output = run_command_with_timeout(
+            &adb_program,
+            &capture_args,
+            Duration::from_secs(10),
+            &trace_id,
+        )?;
+        if capture_output.exit_code.unwrap_or(1) != 0 {
+            return Err(AppError::dependency(
+                format!("Fallback screencap failed: {}", capture_output.stderr.trim()),
+                &trace_id,
+            ));
+        }
+        let pull_args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "pull".to_string(),
+            remote_path.clone(),
+            output_path_string.clone(),
+        ];
+        let pull_output = run_command_with_timeout(
+            &adb_program,
+            &pull_args,
+            Duration::from_secs(20),
+            &trace_id,
+        )?;
+        if pull_output.exit_code.unwrap_or(1) != 0 {
+            return Err(AppError::dependency(
+                format!("Fallback pull failed: {}", pull_output.stderr.trim()),
+                &trace_id,
+            ));
+        }
+        let cleanup_args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "shell".to_string(),
+            "rm".to_string(),
+            "-f".to_string(),
+            remote_path,
+        ];
+        if let Err(err) =
+            run_command_with_timeout(&adb_program, &cleanup_args, Duration::from_secs(10), &trace_id)
+        {
+            warn!(
+                trace_id = %trace_id,
+                error = %err.error,
+                "failed to remove fallback screenshot"
+            );
+        }
+        Ok(())
+    })();
+
+    match fallback_result {
+        Ok(()) => Ok(CommandResponse {
+            trace_id,
+            data: output_path_string,
+        }),
+        Err(err) => Err(AppError::dependency(
+            format!(
+                "Screenshot failed (exec-out): {}. Fallback failed: {}",
+                exec_error,
+                err.error
+            ),
+            &trace_id,
+        )),
+    }
 }
 
 #[tauri::command(async)]
@@ -2029,15 +2275,64 @@ pub fn launch_scrcpy(
         let mut iter = args.into_iter();
         let command_path = iter.next().unwrap_or_else(|| "scrcpy".to_string());
         let mut command = Command::new(command_path);
-        command.args(iter);
+        command.args(iter).stdout(Stdio::piped()).stderr(Stdio::piped());
         let spawn_result = command.spawn();
         match spawn_result {
-            Ok(_) => results.push(CommandResult {
-                serial,
-                stdout: "scrcpy launched".to_string(),
-                stderr: String::new(),
-                exit_code: Some(0),
-            }),
+            Ok(mut child) => {
+                std::thread::sleep(Duration::from_millis(150));
+                match child.try_wait() {
+                    Ok(Some(_)) => match child.wait_with_output() {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                            let exit_code = output.status.code().unwrap_or(1);
+                            let (final_exit, final_stderr) = if output.status.success() {
+                                let detail = if !stderr.is_empty() { stderr } else { stdout.clone() };
+                                let message = if detail.is_empty() {
+                                    "scrcpy exited immediately".to_string()
+                                } else {
+                                    format!("scrcpy exited immediately: {detail}")
+                                };
+                                (1, message)
+                            } else {
+                                (exit_code, stderr)
+                            };
+                            if final_exit != 0 {
+                                warn!(
+                                    trace_id = %trace_id,
+                                    serial = %serial,
+                                    error = %final_stderr,
+                                    "scrcpy exited immediately"
+                                );
+                            }
+                            results.push(CommandResult {
+                                serial,
+                                stdout,
+                                stderr: final_stderr,
+                                exit_code: Some(final_exit),
+                            });
+                        }
+                        Err(err) => results.push(CommandResult {
+                            serial,
+                            stdout: String::new(),
+                            stderr: format!("Failed to capture scrcpy output: {err}"),
+                            exit_code: Some(1),
+                        }),
+                    },
+                    Ok(None) => results.push(CommandResult {
+                        serial,
+                        stdout: "scrcpy launched".to_string(),
+                        stderr: String::new(),
+                        exit_code: Some(0),
+                    }),
+                    Err(err) => results.push(CommandResult {
+                        serial,
+                        stdout: String::new(),
+                        stderr: format!("Failed to check scrcpy status: {err}"),
+                        exit_code: Some(1),
+                    }),
+                }
+            }
             Err(err) => results.push(CommandResult {
                 serial,
                 stdout: String::new(),
@@ -2688,6 +2983,53 @@ pub fn cancel_bugreport(
     Ok(CommandResponse {
         trace_id,
         data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub async fn prepare_bugreport_logcat(
+    source_path: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<BugreportLogSummary>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&source_path, "source_path", &trace_id)?;
+    let path = PathBuf::from(&source_path);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bugreport_logcat::prepare_bugreport_logcat(&path)
+    })
+    .await
+    .map_err(|_| AppError::system("Bugreport log index thread failed", &trace_id))?
+    .map_err(|err| AppError::system(err, &trace_id))?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: result,
+    })
+}
+
+#[tauri::command(async)]
+pub async fn query_bugreport_logcat(
+    report_id: String,
+    filters: BugreportLogFilters,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<BugreportLogPage>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&report_id, "report_id", &trace_id)?;
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(0);
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bugreport_logcat::query_bugreport_logcat(&report_id, filters, offset, limit)
+    })
+    .await
+    .map_err(|_| AppError::system("Bugreport log query thread failed", &trace_id))?
+    .map_err(|err| AppError::system(err, &trace_id))?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: result,
     })
 }
 

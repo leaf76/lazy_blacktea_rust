@@ -18,11 +18,15 @@ import type {
   AdbInfo,
   AppConfig,
   AppInfo,
+  BugreportLogFilters,
+  BugreportLogRow,
+  BugreportLogSummary,
   BugreportResult,
   DeviceFileEntry,
   DeviceInfo,
   FilePreview,
   LogcatEvent,
+  TerminalEvent,
   ScrcpyInfo,
 } from "./types";
 import {
@@ -44,6 +48,7 @@ import {
   launchApp,
   launchScrcpy,
   mkdirDeviceDir,
+  prepareBugreportLogcat,
   deleteDevicePath,
   listApps,
   listDeviceFiles,
@@ -56,6 +61,11 @@ import {
   rebootDevices,
   resetConfig,
   runShell,
+  startTerminalSession,
+  stopTerminalSession,
+  writeTerminalSession,
+  persistTerminalState,
+  queryBugreportLogcat,
   saveConfig,
   setAppEnabled,
   setBluetoothState,
@@ -94,6 +104,21 @@ import {
   type TaskKind,
   type TaskStatus,
 } from "./tasks";
+import {
+  applyDeviceDetailPatch,
+  formatDeviceInfoMarkdown,
+  mergeDeviceDetails,
+  resolveSelectedSerials,
+} from "./deviceUtils";
+import { getAutoRefreshIntervalMs } from "./deviceAutoRefresh";
+import {
+  addBugreportLogTextChip,
+  buildBugreportLogTextFilters,
+  removeBugreportLogTextChip,
+  type BugreportLogTextChip,
+  type BugreportLogTextChipKind,
+} from "./bugreportLogTextFilters";
+import { bugreportLogLineMatches, buildBugreportLogFindPattern } from "./bugreportLogFind";
 import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
 import "./App.css";
 
@@ -107,6 +132,12 @@ type FileTransferProgress = {
   trace_id: string;
 };
 type LogcatLineEntry = { id: number; text: string };
+type TerminalDeviceState = {
+  connected: boolean;
+  sessionId: string | null;
+  buffer: string;
+  autoScroll: boolean;
+};
 type QuickActionId =
   | "screenshot"
   | "reboot"
@@ -125,12 +156,62 @@ const initialActionFormState: ActionFormState = {
   errors: [],
 };
 
-const truncateText = (value: string, maxLen: number) => {
-  if (value.length <= maxLen) {
-    return value;
+const appendLimited = (value: string, chunk: string, maxLen: number) => {
+  const next = `${value}${chunk}`;
+  if (next.length <= maxLen) {
+    return next;
   }
-  const limit = Math.max(0, maxLen - 1);
-  return `${value.slice(0, limit)}…`;
+  return next.slice(Math.max(0, next.length - maxLen));
+};
+
+const extractLastLines = (value: string, maxLines: number) => {
+  const linesReversed: string[] = [];
+  let end = value.length;
+  if (!end || maxLines <= 0) {
+    return [];
+  }
+
+  const pushLine = (start: number, stop: number) => {
+    if (stop <= start) {
+      linesReversed.push("");
+      return;
+    }
+    let slice = value.slice(start, stop);
+    if (slice.endsWith("\r")) {
+      slice = slice.slice(0, -1);
+    }
+    linesReversed.push(slice);
+  };
+
+  for (let cursor = value.length - 1; cursor >= 0; cursor -= 1) {
+    const ch = value[cursor];
+    if (ch !== "\n") {
+      continue;
+    }
+    pushLine(cursor + 1, end);
+    end = cursor;
+    if (linesReversed.length >= maxLines) {
+      break;
+    }
+  }
+
+  if (linesReversed.length < maxLines) {
+    pushLine(0, end);
+  }
+
+  const lines = linesReversed.reverse();
+  if (value.endsWith("\n") && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.slice(-maxLines);
+};
+
+const normalizeBugreportTimestamp = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}$/.test(trimmed) ? trimmed : null;
 };
 
 function renderHighlightedLogcatLine(line: string, searchPattern: RegExp | null) {
@@ -182,11 +263,427 @@ const MemoLogcatLineRow = memo(LogcatLineRow, (prev, next) => {
   return prev.entry === next.entry && prev.searchPattern === next.searchPattern;
 });
 
+type BugreportLogOutputProps = {
+  rows: BugreportLogRow[];
+  highlightPattern: RegExp | null;
+  onNearBottom: () => void;
+  canLoadMore: boolean;
+  busy: boolean;
+};
+
+const BUGREPORT_LOG_LINE_HEIGHT_PX = 16;
+
+const BugreportLogOutput = memo(function BugreportLogOutput({
+  rows,
+  highlightPattern,
+  onNearBottom,
+  canLoadMore,
+  busy,
+}: BugreportLogOutputProps) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findTerm, setFindTerm] = useState("");
+  const [findRegex, setFindRegex] = useState(false);
+  const [findCaseSensitive, setFindCaseSensitive] = useState(false);
+  const [findMatchRowIndices, setFindMatchRowIndices] = useState<number[]>([]);
+  const [findActiveIndex, setFindActiveIndex] = useState(-1);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findComputeTokenRef = useRef(0);
+  const findStateRef = useRef<{ key: string; rowsLen: number }>({ key: "", rowsLen: 0 });
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current != null) {
+        window.cancelAnimationFrame(rafRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setFindOpen(true);
+        window.setTimeout(() => findInputRef.current?.focus(), 0);
+        return;
+      }
+      if (event.key === "Escape" && findOpen) {
+        if (findTerm.trim()) {
+          setFindTerm("");
+        } else {
+          setFindOpen(false);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [findOpen, findTerm]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) {
+      return;
+    }
+    const update = () => {
+      setViewportHeight(el.clientHeight);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleScroll = () => {
+    if (rafRef.current != null) {
+      return;
+    }
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null;
+      const el = scrollRef.current;
+      if (!el) {
+        return;
+      }
+      setScrollTop(el.scrollTop);
+      if (canLoadMore && !busy && el.scrollTop + el.clientHeight >= el.scrollHeight - 240) {
+        onNearBottom();
+      }
+    });
+  };
+
+  const findPattern = useMemo(
+    () => buildBugreportLogFindPattern(findTerm, { caseSensitive: findCaseSensitive, regex: findRegex }),
+    [findCaseSensitive, findRegex, findTerm],
+  );
+
+  useEffect(() => {
+    const key = `${findTerm}|${findRegex ? "1" : "0"}|${findCaseSensitive ? "1" : "0"}`;
+    const token = findComputeTokenRef.current + 1;
+    findComputeTokenRef.current = token;
+
+    const handle = window.setTimeout(() => {
+      if (findComputeTokenRef.current !== token) {
+        return;
+      }
+      const prev = findStateRef.current;
+      const nextLen = rows.length;
+      const patternChanged = prev.key !== key;
+
+      if (!findTerm.trim() || !findPattern || findPattern.error) {
+        findStateRef.current = { key, rowsLen: nextLen };
+        setFindMatchRowIndices([]);
+        setFindActiveIndex(-1);
+        return;
+      }
+
+      if (patternChanged || nextLen < prev.rowsLen) {
+        const matches: number[] = [];
+        for (let i = 0; i < rows.length; i += 1) {
+          if (bugreportLogLineMatches(findPattern, rows[i].raw_line)) {
+            matches.push(i);
+          }
+        }
+        findStateRef.current = { key, rowsLen: nextLen };
+        setFindMatchRowIndices(matches);
+        setFindActiveIndex(-1);
+        return;
+      }
+
+      if (nextLen === prev.rowsLen) {
+        return;
+      }
+
+      const newMatches: number[] = [];
+      for (let i = prev.rowsLen; i < rows.length; i += 1) {
+        if (bugreportLogLineMatches(findPattern, rows[i].raw_line)) {
+          newMatches.push(i);
+        }
+      }
+      findStateRef.current = { key, rowsLen: nextLen };
+      setFindMatchRowIndices((prevMatches) => [...prevMatches, ...newMatches]);
+    }, 180);
+    return () => window.clearTimeout(handle);
+  }, [findCaseSensitive, findPattern, findRegex, findTerm, rows]);
+
+  const findMatchIndexSet = useMemo(() => new Set(findMatchRowIndices), [findMatchRowIndices]);
+  const activeMatchRowIndex =
+    findMatchRowIndices.length > 0 && findActiveIndex >= 0
+      ? findMatchRowIndices[Math.min(findActiveIndex, findMatchRowIndices.length - 1)]
+      : null;
+
+  const scrollToRowIndex = (rowIndex: number) => {
+    const el = scrollRef.current;
+    if (!el) {
+      return;
+    }
+    const target = rowIndex * BUGREPORT_LOG_LINE_HEIGHT_PX;
+    el.scrollTop = target;
+    setScrollTop(target);
+  };
+
+  const goToMatch = (nextIndex: number) => {
+    if (findMatchRowIndices.length === 0) {
+      return;
+    }
+    const normalized = ((nextIndex % findMatchRowIndices.length) + findMatchRowIndices.length) % findMatchRowIndices.length;
+    setFindActiveIndex(normalized);
+    const rowIndex = findMatchRowIndices[normalized];
+    scrollToRowIndex(rowIndex);
+  };
+
+  const moveMatch = (delta: number) => {
+    if (findMatchRowIndices.length === 0) {
+      return;
+    }
+    if (findActiveIndex < 0) {
+      goToMatch(delta < 0 ? findMatchRowIndices.length - 1 : 0);
+      return;
+    }
+    goToMatch(findActiveIndex + delta);
+  };
+
+  const overscan = 40;
+  const total = rows.length;
+  const start = Math.max(0, Math.floor(scrollTop / BUGREPORT_LOG_LINE_HEIGHT_PX) - overscan);
+  const end = Math.min(
+    total,
+    Math.ceil((scrollTop + viewportHeight) / BUGREPORT_LOG_LINE_HEIGHT_PX) + overscan,
+  );
+  const topPad = start * BUGREPORT_LOG_LINE_HEIGHT_PX;
+  const bottomPad = Math.max(0, (total - end) * BUGREPORT_LOG_LINE_HEIGHT_PX);
+  const slice = rows.slice(start, end);
+
+  return (
+    <div className="logcat-output bugreport-log-output bugreport-log-output-shell">
+      <div className="bugreport-log-findbar">
+        {findOpen ? (
+          <div className="bugreport-log-findbar-right">
+            <input
+              ref={findInputRef}
+              aria-label="Find"
+              value={findTerm}
+              onChange={(event) => setFindTerm(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  moveMatch(event.shiftKey ? -1 : 1);
+                } else if (event.key === "Escape") {
+                  if (findTerm.trim()) {
+                    setFindTerm("");
+                  } else {
+                    setFindOpen(false);
+                  }
+                }
+              }}
+              placeholder="Find"
+            />
+            <label className="toggle bugreport-log-findbar-toggle">
+              <input
+                type="checkbox"
+                checked={findRegex}
+                onChange={(event) => setFindRegex(event.target.checked)}
+              />
+              Regex
+            </label>
+            <label className="toggle bugreport-log-findbar-toggle">
+              <input
+                type="checkbox"
+                checked={findCaseSensitive}
+                onChange={(event) => setFindCaseSensitive(event.target.checked)}
+              />
+              Aa
+            </label>
+            <span className="bugreport-log-findbar-count">
+              {findPattern?.error
+                ? "Invalid regex"
+                : findMatchRowIndices.length > 0
+                  ? `${Math.max(0, Math.min(findActiveIndex + 1, findMatchRowIndices.length))}/${findMatchRowIndices.length}`
+                  : "0/0"}
+            </span>
+            <button
+              className="ghost"
+              onClick={() => moveMatch(-1)}
+              disabled={findMatchRowIndices.length === 0}
+            >
+              Prev
+            </button>
+            <button
+              className="ghost"
+              onClick={() => moveMatch(1)}
+              disabled={findMatchRowIndices.length === 0}
+            >
+              Next
+            </button>
+            <button className="ghost" onClick={() => setFindOpen(false)} aria-label="Close find">
+              Close
+            </button>
+          </div>
+        ) : (
+          <button
+            className="ghost bugreport-log-find-toggle"
+            onClick={() => {
+              setFindOpen(true);
+              window.setTimeout(() => findInputRef.current?.focus(), 0);
+            }}
+            aria-label="Open find"
+          >
+            Find
+          </button>
+        )}
+      </div>
+
+      <div ref={scrollRef} className="bugreport-log-scroll" onScroll={handleScroll}>
+        <div className="bugreport-log-viewport">
+          <div style={{ height: topPad }} />
+          {slice.map((row, index) => {
+            const rowIndex = start + index;
+            const isMatch = findMatchIndexSet.has(rowIndex);
+            const isActive = activeMatchRowIndex === rowIndex;
+            return (
+              <div
+                key={row.id}
+                className={`bugreport-log-line${isMatch ? " match" : ""}${isActive ? " active" : ""}`}
+              >
+                {renderHighlightedLogcatLine(row.raw_line, highlightPattern)}
+              </div>
+            );
+          })}
+          <div style={{ height: bottomPad }} />
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const DeviceTerminalPanel = memo(function DeviceTerminalPanel({
+  serial,
+  state,
+  disabled,
+  onConnect,
+  onDisconnect,
+  onSend,
+  onInterrupt,
+  onClear,
+  onToggleAutoScroll,
+}: {
+  serial: string;
+  state: TerminalDeviceState;
+  disabled: boolean;
+  onConnect: (serial: string) => void;
+  onDisconnect: (serial: string) => void;
+  onSend: (serial: string, command: string) => void;
+  onInterrupt: (serial: string) => void;
+  onClear: (serial: string) => void;
+  onToggleAutoScroll: (serial: string, enabled: boolean) => void;
+}) {
+  const [input, setInput] = useState("");
+  const outputRef = useRef<HTMLPreElement | null>(null);
+
+  useEffect(() => {
+    if (!state.autoScroll) {
+      return;
+    }
+    const el = outputRef.current;
+    if (!el) {
+      return;
+    }
+    el.scrollTop = el.scrollHeight;
+  }, [state.autoScroll, state.buffer]);
+
+  const runInput = () => {
+    const command = input.trimEnd();
+    if (!command.trim()) {
+      return;
+    }
+    onSend(serial, command);
+    setInput("");
+  };
+
+  return (
+    <section className="panel terminal-panel">
+      <div className="panel-header">
+        <h3>{serial}</h3>
+        <div className="terminal-panel-meta">
+          <span className={`status-pill ${state.connected ? "ok" : "warn"}`}>
+            {state.connected ? "Connected" : "Disconnected"}
+          </span>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => (state.connected ? onDisconnect(serial) : onConnect(serial))}
+            disabled={disabled}
+          >
+            {state.connected ? "Disconnect" : "Connect"}
+          </button>
+        </div>
+      </div>
+
+      <div className="terminal-panel-controls">
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => onInterrupt(serial)}
+          disabled={disabled || !state.connected}
+        >
+          Ctrl+C
+        </button>
+        <button type="button" className="ghost" onClick={() => onClear(serial)} disabled={disabled}>
+          Clear
+        </button>
+        <label className="terminal-autoscroll">
+          <input
+            type="checkbox"
+            checked={state.autoScroll}
+            onChange={(event) => onToggleAutoScroll(serial, event.target.checked)}
+            disabled={disabled}
+          />
+          Auto-scroll
+        </label>
+      </div>
+
+      <pre ref={outputRef} className="terminal-screen">
+        {state.buffer || "No output yet."}
+      </pre>
+
+      <div className="terminal-input-row">
+        <input
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          placeholder="Type a command and press Enter"
+          disabled={disabled || !state.connected}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              runInput();
+            }
+          }}
+        />
+        <button type="button" onClick={runInput} disabled={disabled || !state.connected}>
+          Send
+        </button>
+      </div>
+    </section>
+  );
+});
+
 function App() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
-  const [shellCommand, setShellCommand] = useState("");
-  const [shellOutput, setShellOutput] = useState<string[]>([]);
+  const [terminalBySerial, setTerminalBySerial] = useState<Record<string, TerminalDeviceState>>({});
+  const [terminalBroadcast, setTerminalBroadcast] = useState("");
+  const [terminalActiveSerials, setTerminalActiveSerials] = useState<string[]>([]);
+  const terminalSessionIdBySerialRef = useRef<Record<string, string | null>>({});
+  const terminalActiveSerialsRef = useRef<string[]>([]);
+  const terminalBySerialRef = useRef<Record<string, TerminalDeviceState>>({});
+  const terminalPendingRef = useRef<Record<string, string>>({});
+  const terminalFlushTimerRef = useRef<number | null>(null);
+  const terminalPersistTimerRef = useRef<number | null>(null);
+  const terminalPersistInFlightRef = useRef(false);
+  const terminalLoadedRef = useRef(false);
+  const didRestoreTerminalRef = useRef(false);
+  const didInitialDeviceRefreshRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
@@ -256,6 +753,22 @@ function App() {
   const [bugreportProgress, setBugreportProgress] = useState<number | null>(null);
   const [bugreportResult, setBugreportResult] = useState<BugreportResult | null>(null);
   const [latestBugreportTaskId, setLatestBugreportTaskId] = useState<string | null>(null);
+  const [bugreportLogSourcePath, setBugreportLogSourcePath] = useState("");
+  const [bugreportLogSummary, setBugreportLogSummary] = useState<BugreportLogSummary | null>(null);
+  const [bugreportLogRows, setBugreportLogRows] = useState<BugreportLogRow[]>([]);
+  const [bugreportLogHasMore, setBugreportLogHasMore] = useState(false);
+  const [bugreportLogOffset, setBugreportLogOffset] = useState(0);
+  const [bugreportLogBusy, setBugreportLogBusy] = useState(false);
+  const [bugreportLogError, setBugreportLogError] = useState<string | null>(null);
+  const [bugreportLogLoadAllRunning, setBugreportLogLoadAllRunning] = useState(false);
+  const [bugreportLogLevels, setBugreportLogLevels] = useState<string[]>(["V", "D", "I", "W", "E", "F"]);
+  const [bugreportLogTag, setBugreportLogTag] = useState("");
+  const [bugreportLogPid, setBugreportLogPid] = useState("");
+  const [bugreportLogTextDraft, setBugreportLogTextDraft] = useState("");
+  const [bugreportLogTextKind, setBugreportLogTextKind] = useState<BugreportLogTextChipKind>("include");
+  const [bugreportLogTextChips, setBugreportLogTextChips] = useState<BugreportLogTextChip[]>([]);
+  const [bugreportLogStart, setBugreportLogStart] = useState("");
+  const [bugreportLogEnd, setBugreportLogEnd] = useState("");
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
   const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
   const [bluetoothEvents, setBluetoothEvents] = useState<string[]>([]);
@@ -278,6 +791,17 @@ function App() {
   const devicePopoverTriggerRef = useRef<HTMLButtonElement | null>(null);
   const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
+  const refreshSeqRef = useRef(0);
+  const detailRefreshSeqRef = useRef(0);
+  const detailRefreshTimerRef = useRef<number | null>(null);
+  const deviceAutoRefreshTimerRef = useRef<number | null>(null);
+  const deviceAutoRefreshInFlightRef = useRef(false);
+  const deviceAutoRefreshLastWarnAtRef = useRef(0);
+  const busyRef = useRef(false);
+  const adbInfoRef = useRef<AdbInfo | null>(null);
+  const devicesRef = useRef<DeviceInfo[]>([]);
+  const configRef = useRef<AppConfig | null>(null);
+  const bugreportLogRequestRef = useRef(0);
   const logcatPendingRef = useRef<Record<string, string[]>>({});
   const logcatNextIdRef = useRef<Record<string, number>>({});
   const logcatFlushTimerRef = useRef<number | null>(null);
@@ -292,9 +816,13 @@ function App() {
   const bugreportBatchRef = useRef<
     Record<string, { total: number; done: number; hasError: boolean; hasCancelled: boolean }>
   >({});
+  const bugreportLogLastReportIdRef = useRef<string | null>(null);
+  const bugreportLogLoadAllTokenRef = useRef(0);
+  const bugreportLogLoadAllRunningRef = useRef(false);
 
   const location = useLocation();
   const navigate = useNavigate();
+  const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
   const activeSerial = selectedSerials[0];
   const activeDevice = useMemo(
     () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
@@ -302,6 +830,10 @@ function App() {
   );
   const hasDevices = devices.length > 0;
   const selectedCount = selectedSerials.length;
+  const selectedConnectedCount = selectedSerials.reduce(
+    (total, serial) => total + (terminalBySerial[serial]?.connected ? 1 : 0),
+    0,
+  );
   const deviceStatus = activeDevice?.summary.state ?? "offline";
   const selectedSummaryLabel =
     selectedCount === 0
@@ -431,6 +963,61 @@ function App() {
     }
     return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
   }, [latestBugreportEntries]);
+  const bugreportAnalysisTargets = useMemo(() => {
+    const entries = latestBugreportEntries.filter((entry) => entry.output_path);
+    if (entries.length > 0) {
+      return entries.map((entry) => ({
+        serial: entry.serial,
+        output_path: entry.output_path!,
+      }));
+    }
+    if (bugreportResult?.output_path && activeSerial) {
+      return [{ serial: activeSerial, output_path: bugreportResult.output_path }];
+    }
+    return [];
+  }, [latestBugreportEntries, bugreportResult, activeSerial]);
+  const bugreportLogFilters = useMemo<BugreportLogFilters>(() => {
+    const pidValue = Number.parseInt(bugreportLogPid.trim(), 10);
+    const textFilters = buildBugreportLogTextFilters(bugreportLogTextChips);
+    return {
+      levels: bugreportLogLevels,
+      tag: bugreportLogTag.trim() || null,
+      pid: Number.isNaN(pidValue) ? null : pidValue,
+      text_terms: textFilters.text_terms,
+      text_excludes: textFilters.text_excludes,
+      text: null,
+      start_ts: normalizeBugreportTimestamp(bugreportLogStart),
+      end_ts: normalizeBugreportTimestamp(bugreportLogEnd),
+    };
+  }, [bugreportLogLevels, bugreportLogPid, bugreportLogTag, bugreportLogTextChips, bugreportLogStart, bugreportLogEnd]);
+  const bugreportLogSearchPattern = useMemo(
+    () => {
+      const terms = bugreportLogTextChips
+        .filter((chip) => chip.kind === "include")
+        .map((chip) => chip.value.trim())
+        .filter(Boolean);
+      if (terms.length === 0) {
+        return null;
+      }
+      const escaped = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+      return buildSearchRegex(escaped, { caseSensitive: false, regex: true });
+    },
+    [bugreportLogTextChips],
+  );
+  const bugreportLogOutputPaths = useMemo(
+    () => new Set(bugreportAnalysisTargets.map((item) => item.output_path)),
+    [bugreportAnalysisTargets],
+  );
+
+  useEffect(() => {
+    bugreportLogLoadAllRunningRef.current = bugreportLogLoadAllRunning;
+  }, [bugreportLogLoadAllRunning]);
+
+  useEffect(() => {
+    if (!bugreportLogSourcePath && bugreportAnalysisTargets.length > 0) {
+      setBugreportLogSourcePath(bugreportAnalysisTargets[0].output_path);
+    }
+  }, [bugreportAnalysisTargets, bugreportLogSourcePath]);
 
   useEffect(() => {
     filesDragContextRef.current = {
@@ -506,6 +1093,14 @@ function App() {
   useEffect(() => {
     setDevicePopoverOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    return () => {
+      if (detailRefreshTimerRef.current != null) {
+        window.clearTimeout(detailRefreshTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const key = "lazy_blacktea_tasks_v1";
@@ -824,35 +1419,59 @@ function App() {
     return id;
   };
 
+  const refreshDeviceDetails = async (options: { notifyOnError?: boolean } = {}) => {
+    const refreshId = ++detailRefreshSeqRef.current;
+    try {
+      const response = await listDevices(true);
+      if (refreshId !== detailRefreshSeqRef.current) {
+        return;
+      }
+      setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
+    } catch (error) {
+      if (options.notifyOnError) {
+        pushToast(`Detail refresh failed: ${formatError(error)}`, "error");
+      } else {
+        console.warn("Device detail refresh failed.", error);
+      }
+    }
+  };
+
+  const scheduleDeviceDetailRefresh = (delayMs = 600, options: { notifyOnError?: boolean } = {}) => {
+    if (detailRefreshTimerRef.current != null) {
+      window.clearTimeout(detailRefreshTimerRef.current);
+    }
+    detailRefreshTimerRef.current = window.setTimeout(() => {
+      void refreshDeviceDetails(options);
+    }, delayMs);
+  };
+
   const refreshDevices = async () => {
+    const refreshId = ++refreshSeqRef.current;
     setBusy(true);
     try {
       const adbResponse = await checkAdb();
+      if (refreshId !== refreshSeqRef.current) {
+        return;
+      }
       setAdbInfo(adbResponse.data);
       if (!adbResponse.data.available) {
         setDevices([]);
         setSelectedSerials([]);
         return;
       }
-      const response = await listDevices(true);
-      setDevices(response.data);
-      setSelectedSerials((prev) =>
-        {
-          const stillValid = prev.filter((serial) =>
-            response.data.some((device) => device.summary.serial === serial),
-          );
-          if (stillValid.length > 0) {
-            return stillValid;
-          }
-          const preferred =
-            response.data.find((device) => device.summary.state === "device") ?? response.data[0];
-          return preferred ? [preferred.summary.serial] : [];
-        },
-      );
+      const response = await listDevices(false);
+      if (refreshId !== refreshSeqRef.current) {
+        return;
+      }
+      setDevices((prev) => mergeDeviceDetails(prev, response.data));
+      setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
+      void refreshDeviceDetails({ notifyOnError: false });
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
-      setBusy(false);
+      if (refreshId === refreshSeqRef.current) {
+        setBusy(false);
+      }
     }
   };
 
@@ -918,17 +1537,200 @@ function App() {
       setApkGrant(response.data.apk_install.grant_permissions);
       setApkAllowTest(response.data.apk_install.allow_test_packages);
       setGroupMap(flattenGroups(response.data.device_groups));
+
+      const restoreSessions = response.data.terminal?.restore_sessions ?? [];
+      const buffers = response.data.terminal?.buffers ?? {};
+      setTerminalActiveSerials(restoreSessions);
+      setTerminalBySerial((prev) => {
+        const next: Record<string, TerminalDeviceState> = { ...prev };
+        restoreSessions.forEach((serial) => {
+          const existing = next[serial] ?? createDefaultTerminalState();
+          const lines = buffers[serial] ?? [];
+          const restored = lines.length ? `${lines.join("\n")}\n` : existing.buffer;
+          next[serial] = {
+            ...existing,
+            connected: false,
+            sessionId: null,
+            buffer: restored,
+          };
+        });
+        return next;
+      });
+      terminalLoadedRef.current = true;
     } catch (error) {
       pushToast(formatError(error), "error");
     }
   };
 
   useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    adbInfoRef.current = adbInfo;
+  }, [adbInfo]);
+
+  useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
+  useEffect(() => {
+    terminalActiveSerialsRef.current = terminalActiveSerials;
+  }, [terminalActiveSerials]);
+
+  useEffect(() => {
+    terminalBySerialRef.current = terminalBySerial;
+  }, [terminalBySerial]);
+
+  useEffect(() => {
+    const intervalMs = getAutoRefreshIntervalMs(config);
+    if (!intervalMs) {
+      return;
+    }
+
+    const warnThrottled = (error: unknown) => {
+      const now = Date.now();
+      if (now - deviceAutoRefreshLastWarnAtRef.current < 30_000) {
+        return;
+      }
+      deviceAutoRefreshLastWarnAtRef.current = now;
+      console.warn("Device auto-refresh failed.", error);
+    };
+
+    const tick = async () => {
+      if (busyRef.current || deviceAutoRefreshInFlightRef.current) {
+        return;
+      }
+
+      if (!configRef.current?.device.auto_refresh_enabled) {
+        return;
+      }
+
+      deviceAutoRefreshInFlightRef.current = true;
+      try {
+        const currentAdbInfo = adbInfoRef.current;
+        if (currentAdbInfo == null || !currentAdbInfo.available) {
+          const adbResponse = await checkAdb();
+          if (busyRef.current) {
+            return;
+          }
+          setAdbInfo(adbResponse.data);
+          adbInfoRef.current = adbResponse.data;
+          if (!adbResponse.data.available) {
+            setDevices([]);
+            setSelectedSerials([]);
+            return;
+          }
+        }
+
+        const response = await listDevices(false);
+        if (busyRef.current) {
+          return;
+        }
+
+        const prevBySerial = new Map(
+          devicesRef.current.map((device) => [device.summary.serial, device.summary.state] as const),
+        );
+        const nextBySerial = new Map(
+          response.data.map((device) => [device.summary.serial, device.summary.state] as const),
+        );
+        const serialsChanged =
+          prevBySerial.size !== nextBySerial.size ||
+          Array.from(nextBySerial.keys()).some((serial) => !prevBySerial.has(serial));
+        const statesChanged = Array.from(nextBySerial.entries()).some(([serial, state]) => prevBySerial.get(serial) !== state);
+        const shouldRefreshDetail = serialsChanged || statesChanged;
+
+        setDevices((prev) => mergeDeviceDetails(prev, response.data));
+        setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
+
+        if (shouldRefreshDetail) {
+          scheduleDeviceDetailRefresh(800, { notifyOnError: false });
+        }
+      } catch (error) {
+        warnThrottled(error);
+        try {
+          const adbResponse = await checkAdb();
+          if (busyRef.current) {
+            return;
+          }
+          setAdbInfo(adbResponse.data);
+          adbInfoRef.current = adbResponse.data;
+          if (!adbResponse.data.available) {
+            setDevices([]);
+            setSelectedSerials([]);
+          }
+        } catch (innerError) {
+          warnThrottled(innerError);
+        }
+      } finally {
+        deviceAutoRefreshInFlightRef.current = false;
+      }
+    };
+
+    void tick();
+    const handle = window.setInterval(() => {
+      void tick();
+    }, intervalMs);
+    deviceAutoRefreshTimerRef.current = handle;
+    return () => {
+      window.clearInterval(handle);
+      if (deviceAutoRefreshTimerRef.current === handle) {
+        deviceAutoRefreshTimerRef.current = null;
+      }
+    };
+  }, [config?.device.auto_refresh_enabled, config?.device.refresh_interval]);
+
+  useEffect(() => {
     void (async () => {
       await loadConfig();
       await refreshDevices();
+      didInitialDeviceRefreshRef.current = true;
       void checkScrcpy().then((response) => setScrcpyInfo(response.data)).catch(() => null);
     })();
+  }, []);
+
+  useEffect(() => {
+    if (!config || !didInitialDeviceRefreshRef.current || didRestoreTerminalRef.current) {
+      return;
+    }
+    didRestoreTerminalRef.current = true;
+    const restoreSessions = config.terminal?.restore_sessions ?? [];
+    if (!restoreSessions.length) {
+      return;
+    }
+    const deviceStateBySerial = new Map(
+      devices.map((device) => [device.summary.serial, device.summary.state] as const),
+    );
+    restoreSessions.forEach((serial) => {
+      if (deviceStateBySerial.get(serial) !== "device") {
+        return;
+      }
+      void connectTerminalInternal(serial)
+        .then(() => appendTerminal(serial, "\n[restored]\n"))
+        .catch((error) =>
+          appendTerminal(serial, `\n[restore error] ${formatError(error)}\n`),
+        );
+    });
+  }, [config, devices]);
+
+  useEffect(() => {
+    if (!terminalLoadedRef.current) {
+      return;
+    }
+    schedulePersistTerminalState();
+  }, [terminalActiveSerials, terminalBySerial]);
+
+  useEffect(() => {
+    return () => {
+      if (terminalPersistTimerRef.current != null) {
+        window.clearTimeout(terminalPersistTimerRef.current);
+        terminalPersistTimerRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -1024,6 +1826,91 @@ function App() {
       const bucket = (logcatPendingRef.current[payload.serial] ??= []);
       bucket.push(payload.line);
       scheduleLogcatFlush();
+    });
+
+    const flushTerminalPending = () => {
+      terminalFlushTimerRef.current = null;
+      const pending = terminalPendingRef.current;
+      const serials = Object.keys(pending);
+      if (!serials.length) {
+        return;
+      }
+      terminalPendingRef.current = {};
+      setTerminalBySerial((prev) => {
+        const next: Record<string, TerminalDeviceState> = { ...prev };
+        serials.forEach((serial) => {
+          const chunk = pending[serial] ?? "";
+          if (!chunk) {
+            return;
+          }
+          const existing =
+            next[serial] ??
+            ({
+              connected: true,
+              sessionId: terminalSessionIdBySerialRef.current[serial] ?? null,
+              buffer: "",
+              autoScroll: true,
+            } satisfies TerminalDeviceState);
+          next[serial] = {
+            ...existing,
+            buffer: appendLimited(existing.buffer, chunk, 200_000),
+          };
+        });
+        return next;
+      });
+    };
+
+    const scheduleTerminalFlush = () => {
+      if (terminalFlushTimerRef.current != null) {
+        return;
+      }
+      terminalFlushTimerRef.current = window.setTimeout(flushTerminalPending, 120);
+    };
+
+    const unlistenTerminal = listen<TerminalEvent>("terminal-event", (event) => {
+      const payload = event.payload;
+      const currentSession = terminalSessionIdBySerialRef.current[payload.serial];
+      if (!currentSession || currentSession !== payload.session_id) {
+        return;
+      }
+
+      if (payload.event === "output") {
+        const chunk = payload.chunk ?? "";
+        if (!chunk) {
+          return;
+        }
+        terminalPendingRef.current[payload.serial] =
+          (terminalPendingRef.current[payload.serial] ?? "") + chunk;
+        scheduleTerminalFlush();
+        return;
+      }
+
+      if (payload.event === "exit" || payload.event === "stopped") {
+        terminalSessionIdBySerialRef.current[payload.serial] = null;
+        setTerminalBySerial((prev) => {
+          const existing =
+            prev[payload.serial] ??
+            ({
+              connected: false,
+              sessionId: null,
+              buffer: "",
+              autoScroll: true,
+            } satisfies TerminalDeviceState);
+          const suffix =
+            payload.event === "exit"
+              ? `\n[process exited${payload.exit_code != null ? ` ${payload.exit_code}` : ""}]\n`
+              : "\n[session stopped]\n";
+          return {
+            ...prev,
+            [payload.serial]: {
+              ...existing,
+              connected: false,
+              sessionId: null,
+              buffer: appendLimited(existing.buffer, suffix, 200_000),
+            },
+          };
+        });
+      }
     });
     const unlistenBluetoothSnapshot = listen("bluetooth-snapshot", (event) => {
       const payload = event.payload as { snapshot?: { summary?: string } };
@@ -1148,6 +2035,12 @@ function App() {
         logcatFlushTimerRef.current = null;
       }
       logcatPendingRef.current = {};
+      void unlistenTerminal.then((unlisten) => unlisten());
+      if (terminalFlushTimerRef.current != null) {
+        window.clearTimeout(terminalFlushTimerRef.current);
+        terminalFlushTimerRef.current = null;
+      }
+      terminalPendingRef.current = {};
       void unlistenBluetoothSnapshot.then((unlisten) => unlisten());
       void unlistenBluetoothState.then((unlisten) => unlisten());
       void unlistenBluetoothEvent.then((unlisten) => unlisten());
@@ -1156,6 +2049,30 @@ function App() {
       void unlistenBugreportComplete.then((unlisten) => unlisten());
     };
   }, [activeSerial]);
+
+  useEffect(() => {
+    if (!selectedSerials.length) {
+      return;
+    }
+    setTerminalBySerial((prev) => {
+      let next = prev;
+      for (const serial of selectedSerials) {
+        if (next[serial]) {
+          continue;
+        }
+        if (next === prev) {
+          next = { ...prev };
+        }
+        next[serial] = {
+          connected: false,
+          sessionId: null,
+          buffer: "",
+          autoScroll: true,
+        };
+      }
+      return next;
+    });
+  }, [selectedSerials]);
 
   const groupOptions = useMemo(
     () => Array.from(new Set(Object.values(groupMap))).filter(Boolean).sort(),
@@ -1246,63 +2163,259 @@ function App() {
     pushToast(trimmed ? `Assigned ${trimmed}.` : "Cleared group assignment.", "info");
   };
 
-	  const handleRunShell = async () => {
-	    if (!shellCommand.trim()) {
-	      pushToast("Please enter a shell command.", "error");
-	      return;
-	    }
-	    if (!selectedSerials.length) {
-	      pushToast("Select at least one device.", "error");
-	      return;
-	    }
-	    const shortCommand = shellCommand.trim().slice(0, 80);
-	    const taskId = beginTask({
-	      kind: "shell",
-	      title: `Shell: ${shortCommand}${shellCommand.trim().length > 80 ? "…" : ""}`,
-	      serials: selectedSerials,
-	    });
-	    setBusy(true);
-	    try {
-		      const response = await runShell(selectedSerials, shellCommand, config?.command.parallel_execution);
-		      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-		      const output = response.data.map((result) => {
-		        const combined = `${result.serial} (${result.exit_code ?? "?"}):\n${result.stdout || result.stderr || ""}`;
-		        return truncateText(combined, 20_000);
-		      });
-		      setShellOutput(output);
-		      response.data.forEach((result) => {
-		        const combined = (result.stdout || result.stderr || "").trim();
-		        dispatchTasks({
-		          type: "TASK_UPDATE_DEVICE",
-		          id: taskId,
-		          serial: result.serial,
-		          patch: {
-		            status: result.exit_code === 0 ? "success" : "error",
-		            exit_code: result.exit_code ?? null,
-		            stdout: result.stdout ? truncateText(result.stdout, 50_000) : null,
-		            stderr: result.stderr ? truncateText(result.stderr, 50_000) : null,
-		            message: combined ? combined.split("\n")[0].slice(0, 160) : "No output.",
-		          },
-		        });
-		      });
-	      const hasError = response.data.some((item) => item.exit_code !== 0);
-	      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
-	      pushToast("Shell command completed.", "info");
-	    } catch (error) {
-	      selectedSerials.forEach((serial) => {
-	        dispatchTasks({
-	          type: "TASK_UPDATE_DEVICE",
-	          id: taskId,
-	          serial,
-	          patch: { status: "error", message: formatError(error) },
-	        });
-	      });
-	      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-	      pushToast(formatError(error), "error");
-	    } finally {
-	      setBusy(false);
-	    }
-	  };
+  const createDefaultTerminalState = (): TerminalDeviceState => ({
+    connected: false,
+    sessionId: null,
+    buffer: "",
+    autoScroll: true,
+  });
+
+  const flushPersistTerminalState = async () => {
+    if (terminalPersistInFlightRef.current) {
+      terminalPersistTimerRef.current = window.setTimeout(() => {
+        void flushPersistTerminalState();
+      }, 800);
+      return;
+    }
+
+    terminalPersistInFlightRef.current = true;
+    try {
+      const restoreSessions = terminalActiveSerialsRef.current;
+      const bySerial = terminalBySerialRef.current;
+      const buffers: Record<string, string[]> = {};
+      restoreSessions.forEach((serial) => {
+        buffers[serial] = extractLastLines(bySerial[serial]?.buffer ?? "", 500);
+      });
+
+      await persistTerminalState(restoreSessions, buffers);
+      setConfig((prev) =>
+        prev
+          ? { ...prev, terminal: { restore_sessions: restoreSessions, buffers } }
+          : prev,
+      );
+    } catch (error) {
+      console.warn("Failed to persist terminal state.", error);
+    } finally {
+      terminalPersistInFlightRef.current = false;
+    }
+  };
+
+  const schedulePersistTerminalState = () => {
+    if (terminalPersistTimerRef.current != null) {
+      return;
+    }
+    terminalPersistTimerRef.current = window.setTimeout(() => {
+      terminalPersistTimerRef.current = null;
+      void flushPersistTerminalState();
+    }, 1500);
+  };
+
+  const connectTerminalInternal = async (serial: string) => {
+    const response = await startTerminalSession(serial);
+    terminalSessionIdBySerialRef.current[serial] = response.data.session_id;
+    setTerminalActiveSerials((prev) => (prev.includes(serial) ? prev : [...prev, serial]));
+    setTerminalBySerial((prev) => {
+      const existing = prev[serial] ?? createDefaultTerminalState();
+      return {
+        ...prev,
+        [serial]: {
+          ...existing,
+          connected: true,
+          sessionId: response.data.session_id,
+        },
+      };
+    });
+    return response.data.session_id;
+  };
+
+  const disconnectTerminalInternal = async (serial: string) => {
+    await stopTerminalSession(serial);
+    terminalSessionIdBySerialRef.current[serial] = null;
+    setTerminalBySerial((prev) => {
+      const existing = prev[serial] ?? createDefaultTerminalState();
+      return {
+        ...prev,
+        [serial]: {
+          ...existing,
+          connected: false,
+          sessionId: null,
+        },
+      };
+    });
+  };
+
+  const appendTerminal = (serial: string, chunk: string) => {
+    setTerminalBySerial((prev) => {
+      const existing = prev[serial] ?? createDefaultTerminalState();
+      return {
+        ...prev,
+        [serial]: {
+          ...existing,
+          buffer: appendLimited(existing.buffer, chunk, 200_000),
+        },
+      };
+    });
+  };
+
+  const clearTerminal = (serial: string) => {
+    setTerminalBySerial((prev) => {
+      const existing = prev[serial] ?? createDefaultTerminalState();
+      return {
+        ...prev,
+        [serial]: {
+          ...existing,
+          buffer: "",
+        },
+      };
+    });
+  };
+
+  const setTerminalAutoScroll = (serial: string, enabled: boolean) => {
+    setTerminalBySerial((prev) => {
+      const existing = prev[serial] ?? createDefaultTerminalState();
+      return {
+        ...prev,
+        [serial]: {
+          ...existing,
+          autoScroll: enabled,
+        },
+      };
+    });
+  };
+
+  const handleConnectTerminal = async (serial: string) => {
+    setBusy(true);
+    try {
+      await connectTerminalInternal(serial);
+      appendTerminal(serial, "\n[connected]\n");
+    } catch (error) {
+      appendTerminal(serial, `\n[connect error] ${formatError(error)}\n`);
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDisconnectTerminal = async (serial: string) => {
+    setBusy(true);
+    try {
+      await disconnectTerminalInternal(serial);
+      appendTerminal(serial, "\n[disconnected]\n");
+    } catch (error) {
+      appendTerminal(serial, `\n[disconnect error] ${formatError(error)}\n`);
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRemoveTerminalSession = async (serial: string) => {
+    setBusy(true);
+    try {
+      if (terminalBySerial[serial]?.connected) {
+        await disconnectTerminalInternal(serial);
+      }
+      setTerminalActiveSerials((prev) => prev.filter((value) => value !== serial));
+      clearTerminal(serial);
+      pushToast("Terminal session removed.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleWriteTerminal = async (
+    serial: string,
+    data: string,
+    newline: boolean,
+  ) => {
+    const trimmed = data;
+    if (!trimmed && !newline) {
+      return;
+    }
+    if (!(data === "\u0003" && !newline)) {
+      appendTerminal(serial, `${newline ? "$ " : ""}${trimmed}${newline ? "\n" : ""}`);
+    }
+    try {
+      await writeTerminalSession(serial, data, newline);
+    } catch (error) {
+      appendTerminal(serial, `[write error] ${formatError(error)}\n`);
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleInterruptTerminal = async (serial: string) => {
+    appendTerminal(serial, "^C\n");
+    await handleWriteTerminal(serial, "\u0003", false);
+  };
+
+  const handleConnectSelectedTerminals = async () => {
+    if (!selectedSerials.length) {
+      pushToast("Select at least one device.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      for (const serial of selectedSerials) {
+        setTerminalActiveSerials((prev) => (prev.includes(serial) ? prev : [...prev, serial]));
+        const existing = terminalBySerial[serial];
+        if (existing?.connected) {
+          continue;
+        }
+        await connectTerminalInternal(serial);
+        appendTerminal(serial, "\n[connected]\n");
+      }
+      pushToast("Terminal sessions connected.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDisconnectSelectedTerminals = async () => {
+    if (!selectedSerials.length) {
+      pushToast("Select at least one device.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      for (const serial of selectedSerials) {
+        const existing = terminalBySerial[serial];
+        if (!existing?.connected) {
+          continue;
+        }
+        await disconnectTerminalInternal(serial);
+        appendTerminal(serial, "\n[disconnected]\n");
+      }
+      pushToast("Terminal sessions disconnected.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBroadcastSend = async () => {
+    const command = terminalBroadcast.trimEnd();
+    if (!command.trim()) {
+      pushToast("Please enter a command to broadcast.", "error");
+      return;
+    }
+    const targets = terminalActiveSerials.filter((serial) => terminalBySerial[serial]?.connected);
+    if (!targets.length) {
+      pushToast("No connected terminal sessions.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      await Promise.all(targets.map((serial) => handleWriteTerminal(serial, command, true)));
+      setTerminalBroadcast("");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleReboot = async (mode?: string) => {
     if (!selectedSerials.length) {
@@ -1327,8 +2440,18 @@ function App() {
     }
     setBusy(true);
     try {
-      await setWifiState(selectedSerials, enable);
-      pushToast(enable ? "WiFi enabled." : "WiFi disabled.", "info");
+      const response = await setWifiState(selectedSerials, enable);
+      const successes = response.data.filter((item) => item.exit_code === 0).map((item) => item.serial);
+      const failures = response.data.filter((item) => item.exit_code !== 0);
+      if (successes.length) {
+        setDevices((prev) => applyDeviceDetailPatch(prev, successes, { wifi_is_on: enable }));
+        scheduleDeviceDetailRefresh(800, { notifyOnError: false });
+      }
+      if (failures.length) {
+        pushToast(`WiFi ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).`, "error");
+      } else {
+        pushToast(enable ? "WiFi enabled." : "WiFi disabled.", "info");
+      }
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -1343,8 +2466,21 @@ function App() {
     }
     setBusy(true);
     try {
-      await setBluetoothState(selectedSerials, enable);
-      pushToast(enable ? "Bluetooth enabled." : "Bluetooth disabled.", "info");
+      const response = await setBluetoothState(selectedSerials, enable);
+      const successes = response.data.filter((item) => item.exit_code === 0).map((item) => item.serial);
+      const failures = response.data.filter((item) => item.exit_code !== 0);
+      if (successes.length) {
+        setDevices((prev) => applyDeviceDetailPatch(prev, successes, { bt_is_on: enable }));
+        scheduleDeviceDetailRefresh(800, { notifyOnError: false });
+      }
+      if (failures.length) {
+        pushToast(
+          `Bluetooth ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).`,
+          "error",
+        );
+      } else {
+        pushToast(enable ? "Bluetooth enabled." : "Bluetooth disabled.", "info");
+      }
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -1565,11 +2701,11 @@ function App() {
 	    }
 	  };
 
-	  const handleCancelBugreport = async () => {
-	    if (!selectedSerials.length) {
-	      pushToast("Select at least one device to cancel bugreport.", "error");
-	      return;
-	    }
+  const handleCancelBugreport = async () => {
+    if (!selectedSerials.length) {
+      pushToast("Select at least one device to cancel bugreport.", "error");
+      return;
+    }
 	    const serials = [...selectedSerials];
 	    try {
 	      await Promise.all(
@@ -2513,8 +3649,29 @@ function App() {
     }
     setBusy(true);
     try {
-      await launchScrcpy(selectedSerials);
-      pushToast("scrcpy launched.", "info");
+      let availability = scrcpyInfo;
+      if (!availability?.available) {
+        const response = await checkScrcpy();
+        availability = response.data;
+        setScrcpyInfo(response.data);
+      }
+      if (!availability?.available) {
+        pushToast("scrcpy is not available.", "error");
+        return;
+      }
+      const response = await launchScrcpy(selectedSerials);
+      const failures = response.data.filter((item) => item.exit_code !== 0);
+      if (failures.length) {
+        const firstFailure = failures[0];
+        const detail = (firstFailure.stderr || firstFailure.stdout || "Unknown error").trim();
+        const summary =
+          failures.length === response.data.length
+            ? `scrcpy failed: ${detail}`
+            : `scrcpy launched with ${failures.length} error(s): ${detail}`;
+        pushToast(summary, "error");
+      } else {
+        pushToast("scrcpy launched.", "info");
+      }
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -2577,7 +3734,17 @@ function App() {
     if (actionForm.actionId === "record" && screenRecordRemote && !actionOutputDir.trim() && !config?.output_path) {
       errors.push("Select an output folder for recordings.");
     }
-    if (actionForm.actionId === "mirror" && !scrcpyInfo?.available) {
+    let scrcpyAvailability = scrcpyInfo;
+    if (actionForm.actionId === "mirror" && !scrcpyAvailability?.available) {
+      try {
+        const response = await checkScrcpy();
+        scrcpyAvailability = response.data;
+        setScrcpyInfo(response.data);
+      } catch (error) {
+        console.warn("Failed to refresh scrcpy availability.", error);
+      }
+    }
+    if (actionForm.actionId === "mirror" && !scrcpyAvailability?.available) {
       errors.push("scrcpy is not available. Install it to enable live mirror.");
     }
     if (
@@ -2822,6 +3989,159 @@ function App() {
     }
   };
 
+  const handleBugreportLogAddTextChip = (rawValue: string) => {
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      return;
+    }
+    let kind: BugreportLogTextChipKind = bugreportLogTextKind;
+    let value = trimmed;
+    if (trimmed.startsWith("-") || trimmed.startsWith("!")) {
+      kind = "exclude";
+      value = trimmed.slice(1).trim();
+    } else if (trimmed.startsWith("+")) {
+      kind = "include";
+      value = trimmed.slice(1).trim();
+    }
+    setBugreportLogTextChips((prev) => addBugreportLogTextChip(prev, kind, value));
+    setBugreportLogTextDraft("");
+  };
+
+  const runBugreportLogQuery = async (reportId: string, offset: number, append: boolean) => {
+    const requestId = bugreportLogRequestRef.current + 1;
+    bugreportLogRequestRef.current = requestId;
+    setBugreportLogBusy(true);
+    setBugreportLogError(null);
+    try {
+      const response = await queryBugreportLogcat(reportId, bugreportLogFilters, offset, 200);
+      if (bugreportLogRequestRef.current !== requestId) {
+        return;
+      }
+      setBugreportLogRows((prev) => (append ? [...prev, ...response.data.rows] : response.data.rows));
+      setBugreportLogHasMore(response.data.has_more);
+      setBugreportLogOffset(response.data.next_offset);
+    } catch (error) {
+      if (bugreportLogRequestRef.current !== requestId) {
+        return;
+      }
+      const message = formatError(error);
+      setBugreportLogError(message);
+      pushToast(message, "error");
+    } finally {
+      if (bugreportLogRequestRef.current === requestId) {
+        setBugreportLogBusy(false);
+      }
+    }
+  };
+
+  const loadBugreportLogFromPath = async (path: string) => {
+    const sourcePath = path.trim();
+    if (!sourcePath) {
+      pushToast("Select a bugreport file first.", "error");
+      return;
+    }
+
+    bugreportLogLoadAllTokenRef.current += 1;
+    setBugreportLogLoadAllRunning(false);
+
+    setBugreportLogSourcePath(sourcePath);
+    setBugreportLogSummary(null);
+    setBugreportLogRows([]);
+    setBugreportLogHasMore(false);
+    setBugreportLogOffset(0);
+
+    setBugreportLogBusy(true);
+    setBugreportLogError(null);
+    try {
+      const response = await prepareBugreportLogcat(sourcePath);
+      setBugreportLogSummary(response.data);
+    } catch (error) {
+      const message = formatError(error);
+      setBugreportLogError(message);
+      pushToast(message, "error");
+    } finally {
+      setBugreportLogBusy(false);
+    }
+  };
+
+  const handlePickBugreportLogFile = async () => {
+    const selected = await openDialog({
+      title: "Select bugreport file",
+      filters: [{ name: "Bugreport", extensions: ["zip", "txt"] }],
+      multiple: false,
+    });
+    if (!selected || Array.isArray(selected)) {
+      return;
+    }
+    void loadBugreportLogFromPath(selected);
+  };
+
+  useEffect(() => {
+    if (!bugreportLogSummary) {
+      return;
+    }
+    if (bugreportLogLoadAllRunningRef.current) {
+      bugreportLogLoadAllTokenRef.current += 1;
+      setBugreportLogLoadAllRunning(false);
+    }
+    const reportId = bugreportLogSummary.report_id;
+    const isNewReport = bugreportLogLastReportIdRef.current !== reportId;
+    const delayMs = isNewReport ? 0 : 350;
+    bugreportLogLastReportIdRef.current = reportId;
+
+    const handle = window.setTimeout(() => {
+      void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
+    }, delayMs);
+    return () => window.clearTimeout(handle);
+  }, [bugreportLogSummary, bugreportLogFilters]);
+
+  const handleBugreportLogLoadAll = async () => {
+    if (!bugreportLogSummary || bugreportLogBusy) {
+      return;
+    }
+
+    const token = bugreportLogLoadAllTokenRef.current + 1;
+    bugreportLogLoadAllTokenRef.current = token;
+    setBugreportLogLoadAllRunning(true);
+
+    const reportId = bugreportLogSummary.report_id;
+    const pageSize = 2000;
+    let offset = 0;
+    let hasMore = true;
+
+    try {
+      while (hasMore && bugreportLogLoadAllTokenRef.current === token) {
+        const response = await queryBugreportLogcat(reportId, bugreportLogFilters, offset, pageSize);
+        if (bugreportLogLoadAllTokenRef.current !== token) {
+          return;
+        }
+        setBugreportLogRows((prev) => (offset === 0 ? response.data.rows : [...prev, ...response.data.rows]));
+        setBugreportLogHasMore(response.data.has_more);
+        setBugreportLogOffset(response.data.next_offset);
+        hasMore = response.data.has_more;
+        offset = response.data.next_offset;
+
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
+    } catch (error) {
+      if (bugreportLogLoadAllTokenRef.current !== token) {
+        return;
+      }
+      const message = formatError(error);
+      setBugreportLogError(message);
+      pushToast(message, "error");
+    } finally {
+      if (bugreportLogLoadAllTokenRef.current === token) {
+        setBugreportLogLoadAllRunning(false);
+      }
+    }
+  };
+
+  const handleBugreportLogStopLoadAll = () => {
+    bugreportLogLoadAllTokenRef.current += 1;
+    setBugreportLogLoadAllRunning(false);
+  };
+
   const handleCheckAdb = async () => {
     if (!config) {
       return;
@@ -2847,20 +4167,8 @@ function App() {
     if (!device) {
       return;
     }
-    const detail = device.detail;
-    const lines = [
-      `Serial: ${device.summary.serial}`,
-      `State: ${device.summary.state}`,
-      `Model: ${detail?.model ?? device.summary.model ?? ""}`,
-      `Android: ${detail?.android_version ?? ""}`,
-      `API: ${detail?.api_level ?? ""}`,
-      `WiFi: ${detail?.wifi_is_on != null ? (detail.wifi_is_on ? "On" : "Off") : "Unknown"}`,
-      `Bluetooth: ${detail?.bt_is_on != null ? (detail.bt_is_on ? "On" : "Off") : "Unknown"}`,
-      `GMS: ${detail?.gms_version ?? ""}`,
-      `Fingerprint: ${detail?.build_fingerprint ?? ""}`,
-    ];
     try {
-      await writeText(lines.join("\n"));
+      await writeText(formatDeviceInfoMarkdown(device));
       pushToast("Device info copied.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -3311,13 +4619,14 @@ function App() {
             <NavLink to="/logcat">Logcat</NavLink>
             <NavLink to="/ui-inspector">UI Inspector</NavLink>
             <NavLink to="/bugreport">Bugreport</NavLink>
+            <NavLink to="/bugreport-logviewer">Bugreport Logs</NavLink>
           </div>
           <div className="nav-group">
             <span className="nav-title">Manage</span>
             <NavLink to="/apps">App Manager</NavLink>
             <NavLink to="/files">File Explorer</NavLink>
             <NavLink to="/apk-installer">APK Installer</NavLink>
-            <NavLink to="/actions">Custom Actions</NavLink>
+            <NavLink to="/actions">Shell Commands</NavLink>
           </div>
           <div className="nav-group">
             <span className="nav-title">System</span>
@@ -3494,7 +4803,7 @@ function App() {
           </div>
         </header>
 
-        <main className="page">
+        <main className={isBugreportLogViewer ? "page page-fixed" : "page"}>
           <Routes>
             <Route path="/" element={<DashboardView />} />
             <Route
@@ -3791,39 +5100,174 @@ function App() {
                 <div className="page-section">
                   <div className="page-header">
                     <div>
-                      <h1>Custom Actions</h1>
-                      <p className="muted">Run batch shell commands across devices.</p>
+                      <h1>Shell Commands</h1>
+                      <p className="muted">Interactive terminal sessions across devices.</p>
                     </div>
                   </div>
                   <div className="stack">
-                    <section className="panel settings-panel">
+                    <section className="panel settings-panel shell-terminal-header">
                       <div className="panel-header">
-                        <h2>Shell Commands</h2>
+                        <h2>Terminal Sessions</h2>
                         <span>{selectedSummaryLabel}</span>
                       </div>
                       {screenRecordRemote && (
                         <p className="muted">Recording in progress: {screenRecordRemote}</p>
                       )}
-                      <div className="form-row">
-                        <label>Shell Command</label>
-                        <input
-                          value={shellCommand}
-                          onChange={(event) => setShellCommand(event.target.value)}
-                          placeholder="e.g. pm list packages"
-                        />
-                        <button onClick={handleRunShell} disabled={busy || selectedSerials.length === 0}>
-                          Run
-                        </button>
-                      </div>
-                      <div className="output-block">
-                        <h3>Latest Output</h3>
-                        {shellOutput.length === 0 ? (
-                          <p className="muted">No output yet.</p>
-                        ) : (
-                          <pre>{shellOutput.join("\n\n")}</pre>
-                        )}
+                      <div className="shell-terminal-toolbar">
+                        <div className="shell-terminal-toolbar-left">
+                          <button
+                            type="button"
+                            onClick={handleConnectSelectedTerminals}
+                            disabled={busy || selectedSerials.length === 0}
+                          >
+                            Connect Selected
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={handleDisconnectSelectedTerminals}
+                            disabled={busy || selectedSerials.length === 0}
+                          >
+                            Disconnect Selected
+                          </button>
+                          <span className="muted shell-terminal-toolbar-meta">
+                            {selectedCount ? `${selectedConnectedCount}/${selectedCount} connected` : "No selection"}
+                          </span>
+                        </div>
+                        <div className="shell-terminal-toolbar-right">
+                          <input
+                            value={terminalBroadcast}
+                            onChange={(event) => setTerminalBroadcast(event.target.value)}
+                            placeholder="Broadcast to connected terminals…"
+                            aria-label="Broadcast command"
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void handleBroadcastSend();
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={handleBroadcastSend}
+                            disabled={busy || selectedSerials.length === 0}
+                          >
+                            Broadcast
+                          </button>
+                        </div>
                       </div>
                     </section>
+
+                    <div className="shell-terminal-layout">
+                      <aside className="panel shell-terminal-sessions">
+                        <div className="panel-header">
+                          <h3>Active Sessions</h3>
+                          <span className="muted">{terminalActiveSerials.length}</span>
+                        </div>
+                        {terminalActiveSerials.length === 0 ? (
+                          <p className="muted">
+                            No active sessions yet. Select devices and click Connect Selected.
+                          </p>
+                        ) : (
+                          <div className="shell-terminal-sessions-list">
+                            {terminalActiveSerials.map((serial) => {
+                              const device = devices.find((item) => item.summary.serial === serial) ?? null;
+                              const adbState = device?.summary.state ?? "unknown";
+                              const terminalState = terminalBySerial[serial] ?? createDefaultTerminalState();
+                              const tone =
+                                adbState === "device"
+                                  ? terminalState.connected
+                                    ? "ok"
+                                    : "warn"
+                                  : "error";
+                              const label =
+                                adbState === "device"
+                                  ? terminalState.connected
+                                    ? "Connected"
+                                    : "Disconnected"
+                                  : adbState === "unauthorized"
+                                    ? "Unauthorized"
+                                    : adbState === "offline"
+                                      ? "Offline"
+                                      : "Missing";
+                              return (
+                                <div key={serial} className="shell-terminal-session-row">
+                                  <button
+                                    type="button"
+                                    className="shell-terminal-session-main"
+                                    onClick={() => setSelectedSerials([serial])}
+                                  >
+                                    <div className="shell-terminal-session-title">
+                                      <span className="shell-terminal-session-serial">{serial}</span>
+                                      <span className="muted shell-terminal-session-model">
+                                        {device?.detail?.model ?? device?.summary.model ?? ""}
+                                      </span>
+                                    </div>
+                                    <span className={`status-pill ${tone}`}>{label}</span>
+                                  </button>
+                                  <div className="shell-terminal-session-actions">
+                                    <button
+                                      type="button"
+                                      className="ghost"
+                                      onClick={() =>
+                                        terminalState.connected
+                                          ? void handleDisconnectTerminal(serial)
+                                          : void handleConnectTerminal(serial)
+                                      }
+                                      disabled={busy}
+                                    >
+                                      {terminalState.connected ? "Disconnect" : "Connect"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="ghost"
+                                      onClick={() => void handleRemoveTerminalSession(serial)}
+                                      disabled={busy}
+                                    >
+                                      Remove
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </aside>
+
+                      <div className="shell-terminal-content">
+                        {terminalActiveSerials.length === 0 ? (
+                          <section className="panel terminal-empty">
+                            <h3>Start a session</h3>
+                            <p className="muted">
+                              Use the Device Context selector to choose devices, then Connect Selected to pin and restore
+                              sessions across restarts.
+                            </p>
+                          </section>
+                        ) : (
+                          <div className="terminal-grid">
+                            {terminalActiveSerials.map((serial) => {
+                              const state = terminalBySerial[serial] ?? createDefaultTerminalState();
+                              return (
+                                <DeviceTerminalPanel
+                                  key={serial}
+                                  serial={serial}
+                                  state={state}
+                                  disabled={busy}
+                                  onConnect={handleConnectTerminal}
+                                  onDisconnect={handleDisconnectTerminal}
+                                  onSend={(targetSerial, command) =>
+                                    void handleWriteTerminal(targetSerial, command, true)
+                                  }
+                                  onInterrupt={(targetSerial) => void handleInterruptTerminal(targetSerial)}
+                                  onClear={clearTerminal}
+                                  onToggleAutoScroll={setTerminalAutoScroll}
+                                />
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
               }
@@ -3839,7 +5283,7 @@ function App() {
                     </div>
                   </div>
                   <div className="stack">
-                    <section className="panel">
+                    <section className="panel bugreport-log-source">
                       <div className="panel-header">
                         <h2>Install Setup</h2>
                         <span>
@@ -4894,81 +6338,364 @@ function App() {
                       <p className="muted">Generate bugreports with progress tracking.</p>
                     </div>
                   </div>
-                  <section className="panel">
-                    <div className="panel-header">
-                      <h2>Bugreport</h2>
-                      <span>{selectedSummaryLabel}</span>
-                    </div>
-                    <div className="button-row">
-                      <button onClick={handleBugreport} disabled={busy || selectedSerials.length === 0}>
-                        Generate Bugreport
-                      </button>
-                      <button onClick={handleCancelBugreport} disabled={busy || selectedSerials.length === 0}>
-                        Cancel
-                      </button>
-                    </div>
-                    {latestBugreportTask ? (
-                      <div className="stack">
-                        <div className="progress">
-                          <div className="progress-bar">
-                            <div
-                              className="progress-fill"
-                              style={{ width: `${latestBugreportProgress ?? 0}%` }}
-                            />
+                  <div className="stack">
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h2>Bugreport</h2>
+                        <span>{selectedSummaryLabel}</span>
+                      </div>
+                      <div className="button-row">
+                        <button onClick={handleBugreport} disabled={busy || selectedSerials.length === 0}>
+                          Generate Bugreport
+                        </button>
+                        <button onClick={handleCancelBugreport} disabled={busy || selectedSerials.length === 0}>
+                          Cancel
+                        </button>
+                      </div>
+                      {latestBugreportTask ? (
+                        <div className="stack">
+                          <div className="progress">
+                            <div className="progress-bar">
+                              <div
+                                className="progress-fill"
+                                style={{ width: `${latestBugreportProgress ?? 0}%` }}
+                              />
+                            </div>
+                            <span>
+                              {latestBugreportProgress != null ? `${latestBugreportProgress}%` : "Idle"}
+                            </span>
                           </div>
-                          <span>
-                            {latestBugreportProgress != null ? `${latestBugreportProgress}%` : "Idle"}
-                          </span>
+                          <div className="task-devices">
+                            {latestBugreportEntries.map((entry) => {
+                              const entryTone =
+                                entry.status === "running"
+                                  ? "busy"
+                                  : entry.status === "success"
+                                    ? "ok"
+                                    : entry.status === "cancelled"
+                                      ? "warn"
+                                      : "error";
+                              return (
+                                <div key={entry.serial} className="task-device-row">
+                                  <div className="task-device-main">
+                                    <strong>{entry.serial}</strong>
+                                    <span className={`status-pill ${entryTone}`}>{entry.status}</span>
+                                    {entry.progress != null && (
+                                      <span className="muted">{Math.round(entry.progress)}%</span>
+                                    )}
+                                    {entry.message && <span className="muted">{entry.message}</span>}
+                                  </div>
+                                  <div className="task-device-meta">
+                                    {entry.output_path && (
+                                      <button className="ghost" onClick={() => openPath(entry.output_path!)}>
+                                        Open output
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
-                        <div className="task-devices">
-                          {latestBugreportEntries.map((entry) => {
-                            const entryTone =
-                              entry.status === "running"
-                                ? "busy"
-                                : entry.status === "success"
-                                  ? "ok"
-                                  : entry.status === "cancelled"
-                                    ? "warn"
-                                    : "error";
-                            return (
-                              <div key={entry.serial} className="task-device-row">
-                                <div className="task-device-main">
-                                  <strong>{entry.serial}</strong>
-                                  <span className={`status-pill ${entryTone}`}>{entry.status}</span>
-                                  {entry.progress != null && (
-                                    <span className="muted">{Math.round(entry.progress)}%</span>
-                                  )}
-                                  {entry.message && <span className="muted">{entry.message}</span>}
-                                </div>
-                                <div className="task-device-meta">
-                                  {entry.output_path && (
-                                    <button className="ghost" onClick={() => openPath(entry.output_path!)}>
-                                      Open output
-                                    </button>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
+                      ) : (
+                        <>
+                          <div className="progress">
+                            <div className="progress-bar">
+                              <div className="progress-fill" style={{ width: `${bugreportProgress ?? 0}%` }} />
+                            </div>
+                            <span>{bugreportProgress != null ? `${bugreportProgress}%` : "Idle"}</span>
+                          </div>
+                          {bugreportResult && (
+                            <div className="output-block">
+                              <h3>Last Result</h3>
+                              <p>Status: {bugreportResult.success ? "Success" : "Failed"}</p>
+                              <p>Output: {bugreportResult.output_path ?? "--"}</p>
+                              <p>Error: {bugreportResult.error ?? "--"}</p>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </section>
+                  </div>
+                </div>
+              }
+            />
+            <Route
+              path="/bugreport-logviewer"
+              element={
+                <div className="page-section bugreport-logviewer-page">
+                  <div className="page-header">
+                    <div>
+                      <h1>Bugreport Log Viewer</h1>
+                      <p className="muted">Load bugreport logs and filter with search.</p>
+                    </div>
+                    <div className="page-actions">
+                      <button onClick={handlePickBugreportLogFile} disabled={bugreportLogBusy}>
+                        Browse
+                      </button>
+                    </div>
+                  </div>
+                  <section className="panel bugreport-log-panel bugreport-log-panel-full">
+                    <div className="panel-header">
+                      <div>
+                        <h2>Log Output</h2>
+                        <span>
+                          {bugreportLogSummary
+                            ? `${bugreportLogRows.length.toLocaleString()} / ${bugreportLogSummary.total_rows.toLocaleString()} rows loaded`
+                            : bugreportLogRows.length
+                              ? `${bugreportLogRows.length.toLocaleString()} rows loaded`
+                              : "No rows yet"}
+                        </span>
+                      </div>
+                      <div className="button-row compact">
+                        <button
+                          className="ghost"
+                          onClick={() => {
+                            if (bugreportLogSummary) {
+                              void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
+                            }
+                          }}
+                          disabled={!bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning}
+                        >
+                          Refresh
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (bugreportLogSummary) {
+                              void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+                            }
+                          }}
+                          disabled={
+                            !bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning || !bugreportLogHasMore
+                          }
+                        >
+                          Load more
+                        </button>
+                        {bugreportLogLoadAllRunning ? (
+                          <button className="ghost" onClick={handleBugreportLogStopLoadAll}>
+                            Stop
+                          </button>
+                        ) : (
+                          <button
+                            className="ghost"
+                            onClick={() => void handleBugreportLogLoadAll()}
+                            disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
+                          >
+                            Load all
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="bugreport-log-source-inline">
+                      <div className="bugreport-log-source-inline-row">
+                        <span className="badge">Source</span>
+                        <span className="bugreport-log-source-path">
+                          {bugreportLogSourcePath ? bugreportLogSourcePath : "No file selected. Click Browse to load."}
+                        </span>
+                      </div>
+                      {bugreportLogSummary && (
+                        <div className="bugreport-log-source-inline-meta muted">
+                          Rows: {bugreportLogSummary.total_rows.toLocaleString()} · Range: {bugreportLogSummary.min_ts ?? "--"}{" "}
+                          {"->"} {bugreportLogSummary.max_ts ?? "--"}
+                        </div>
+                      )}
+                      {bugreportAnalysisTargets.length > 0 && (
+                        <details className="output-block bugreport-log-recent">
+                          <summary>Recent outputs</summary>
+                          <div className="form-row">
+                            <label>Output</label>
+                            <select
+                              value={bugreportLogSourcePath}
+                              onChange={(event) => {
+                                void loadBugreportLogFromPath(event.target.value);
+                              }}
+                            >
+                              <option value="">Select output</option>
+                              {bugreportAnalysisTargets.map((item) => (
+                                <option key={item.output_path} value={item.output_path}>
+                                  {item.serial} - {item.output_path}
+                                </option>
+                              ))}
+                              {bugreportLogSourcePath && !bugreportLogOutputPaths.has(bugreportLogSourcePath) && (
+                                <option value={bugreportLogSourcePath}>
+                                  Custom - {bugreportLogSourcePath}
+                                </option>
+                              )}
+                            </select>
+                          </div>
+                        </details>
+                      )}
+                    </div>
+
+                    {bugreportLogError && (
+                      <div className="inline-alert error">
+                        <strong>Log viewer error</strong>
+                        <span>{bugreportLogError}</span>
+                      </div>
+                    )}
+                    {bugreportLogBusy && (
+                      <div className="inline-alert info">
+                        <strong>Working</strong>
+                        <span>Preparing or querying logcat...</span>
+                      </div>
+                    )}
+                    {bugreportLogLoadAllRunning && (
+                      <div className="inline-alert info">
+                        <strong>Loading all rows</strong>
+                        <span>Fetching logcat pages in the background...</span>
+                      </div>
+                    )}
+
+                    <div className="bugreport-log-toolbar">
+                      <div className="bugreport-log-toolbar-row">
+                        <div className="bugreport-log-filter-field bugreport-log-text-filter">
+                          <label htmlFor="bugreport-log-text-draft">Text filters</label>
+                          {bugreportLogTextChips.length > 0 && (
+                            <div className="bugreport-log-chip-list" role="list">
+                              {bugreportLogTextChips.map((chip) => (
+                                <span
+                                  key={chip.id}
+                                  className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
+                                  role="listitem"
+                                >
+                                  <span className="bugreport-log-chip-label">
+                                    {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
+                                  </span>
+                                  <button
+                                    className="bugreport-log-chip-remove"
+                                    aria-label={`Remove ${chip.value}`}
+                                    onClick={() => setBugreportLogTextChips((prev) => removeBugreportLogTextChip(prev, chip.id))}
+                                    disabled={bugreportLogBusy}
+                                  >
+                                    ×
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <div className="bugreport-log-chip-entry">
+                            <select
+                              aria-label="Text filter mode"
+                              value={bugreportLogTextKind}
+                              onChange={(event) => setBugreportLogTextKind(event.target.value as BugreportLogTextChipKind)}
+                              disabled={bugreportLogBusy}
+                            >
+                              <option value="include">Include</option>
+                              <option value="exclude">Exclude</option>
+                            </select>
+                            <input
+                              id="bugreport-log-text-draft"
+                              value={bugreportLogTextDraft}
+                              onChange={(event) => setBugreportLogTextDraft(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  handleBugreportLogAddTextChip(bugreportLogTextDraft);
+                                }
+                              }}
+                              placeholder="Type text and press Enter"
+                            />
+                            <button
+                              className="ghost"
+                              onClick={() => handleBugreportLogAddTextChip(bugreportLogTextDraft)}
+                              disabled={bugreportLogBusy || !bugreportLogTextDraft.trim()}
+                            >
+                              Add
+                            </button>
+                          </div>
+                        </div>
+                        <div className="bugreport-log-filter-field">
+                          <label htmlFor="bugreport-log-tag">Tag</label>
+                          <input
+                            id="bugreport-log-tag"
+                            value={bugreportLogTag}
+                            onChange={(event) => setBugreportLogTag(event.target.value)}
+                            placeholder="Tag"
+                          />
+                        </div>
+                        <div className="bugreport-log-filter-field">
+                          <label htmlFor="bugreport-log-pid">PID</label>
+                          <input
+                            id="bugreport-log-pid"
+                            value={bugreportLogPid}
+                            onChange={(event) => setBugreportLogPid(event.target.value)}
+                            placeholder="PID"
+                          />
+                        </div>
+                        <div className="bugreport-log-filter-field">
+                          <label htmlFor="bugreport-log-start">Start</label>
+                          <input
+                            id="bugreport-log-start"
+                            value={bugreportLogStart}
+                            onChange={(event) => setBugreportLogStart(event.target.value)}
+                            placeholder="MM-DD HH:MM:SS.mmm"
+                          />
+                        </div>
+                        <div className="bugreport-log-filter-field">
+                          <label htmlFor="bugreport-log-end">End</label>
+                          <input
+                            id="bugreport-log-end"
+                            value={bugreportLogEnd}
+                            onChange={(event) => setBugreportLogEnd(event.target.value)}
+                            placeholder="MM-DD HH:MM:SS.mmm"
+                          />
                         </div>
                       </div>
-                    ) : (
-                      <>
-                        <div className="progress">
-                          <div className="progress-bar">
-                            <div className="progress-fill" style={{ width: `${bugreportProgress ?? 0}%` }} />
-                          </div>
-                          <span>{bugreportProgress != null ? `${bugreportProgress}%` : "Idle"}</span>
+                      <div className="bugreport-log-toolbar-actions">
+                        <div className="toggle-group">
+                          {["V", "D", "I", "W", "E", "F"].map((level) => (
+                            <label key={level} className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={bugreportLogLevels.includes(level)}
+                                onChange={(event) => {
+                                  setBugreportLogLevels((prev) =>
+                                    event.target.checked
+                                      ? Array.from(new Set([...prev, level]))
+                                      : prev.filter((item) => item !== level),
+                                  );
+                                }}
+                              />
+                              {level}
+                            </label>
+                          ))}
                         </div>
-                        {bugreportResult && (
-                          <div className="output-block">
-                            <h3>Last Result</h3>
-                            <p>Status: {bugreportResult.success ? "Success" : "Failed"}</p>
-                            <p>Output: {bugreportResult.output_path ?? "--"}</p>
-                            <p>Error: {bugreportResult.error ?? "--"}</p>
-                          </div>
-                        )}
-                      </>
+                        <button
+                          className="ghost"
+                          onClick={() => {
+                            setBugreportLogTextDraft("");
+                            setBugreportLogTextKind("include");
+                            setBugreportLogTextChips([]);
+                            setBugreportLogTag("");
+                            setBugreportLogPid("");
+                            setBugreportLogStart("");
+                            setBugreportLogEnd("");
+                            setBugreportLogLevels(["V", "D", "I", "W", "E", "F"]);
+                          }}
+                          disabled={bugreportLogBusy}
+                        >
+                          Reset Filters
+                        </button>
+                      </div>
+                    </div>
+                    {bugreportLogRows.length ? (
+                      <BugreportLogOutput
+                        rows={bugreportLogRows}
+                        highlightPattern={bugreportLogSearchPattern}
+                        canLoadMore={Boolean(bugreportLogSummary) && bugreportLogHasMore && !bugreportLogLoadAllRunning}
+                        busy={bugreportLogBusy || bugreportLogLoadAllRunning}
+                        onNearBottom={() => {
+                          if (!bugreportLogSummary) {
+                            return;
+                          }
+                          void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+                        }}
+                      />
+                    ) : (
+                      <div className="logcat-output bugreport-log-output bugreport-log-output-empty">
+                        <p className="muted">Load a bugreport to view logcat output.</p>
+                      </div>
                     )}
                   </section>
                 </div>
@@ -5065,11 +6792,11 @@ function App() {
                             </div>
                           )}
                         </div>
-                        <div className="settings-group">
-                          <h3>Output Paths</h3>
-                          <label>
-                            Default Output
-                            <input
+	                        <div className="settings-group">
+	                          <h3>Output Paths</h3>
+	                          <label>
+	                            Default Output
+	                            <input
                               value={config.output_path}
                               onChange={(event) =>
                                 setConfig((prev) => (prev ? { ...prev, output_path: event.target.value } : prev))
@@ -5086,12 +6813,54 @@ function App() {
                                 )
                               }
                             />
-                          </label>
-                        </div>
-                        <div className="settings-group">
-                          <h3>Commands</h3>
-                          <label>
-                            Timeout (sec)
+	                          </label>
+	                        </div>
+	                        <div className="settings-group">
+	                          <h3>Devices</h3>
+	                          <label className="toggle">
+	                            <input
+	                              type="checkbox"
+	                              checked={config.device.auto_refresh_enabled}
+	                              onChange={(event) =>
+	                                setConfig((prev) =>
+	                                  prev
+	                                    ? {
+	                                        ...prev,
+	                                        device: { ...prev.device, auto_refresh_enabled: event.target.checked },
+	                                      }
+	                                    : prev,
+	                                )
+	                              }
+	                            />
+	                            Auto-refresh device list
+	                          </label>
+	                          <label>
+	                            Refresh interval (sec)
+	                            <input
+	                              type="number"
+	                              min={1}
+	                              value={config.device.refresh_interval}
+	                              onChange={(event) =>
+	                                setConfig((prev) =>
+	                                  prev
+	                                    ? {
+	                                        ...prev,
+	                                        device: {
+	                                          ...prev.device,
+	                                          refresh_interval: Math.max(1, Number(event.target.value)),
+	                                        },
+	                                      }
+	                                    : prev,
+	                                )
+	                              }
+	                            />
+	                          </label>
+	                          <p className="muted">Runs in the background and won't show toast errors.</p>
+	                        </div>
+	                        <div className="settings-group">
+	                          <h3>Commands</h3>
+	                          <label>
+	                            Timeout (sec)
                             <input
                               type="number"
                               value={config.command.command_timeout}

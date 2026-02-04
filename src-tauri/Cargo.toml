@@ -34,3 +34,4 @@ zip = "2"
 mime_guess = "2"
 base64 = "0.22"
 dirs = "5"
+rusqlite = { version = "0.31", features = ["bundled"] }

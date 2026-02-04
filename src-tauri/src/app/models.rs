@@ -96,6 +96,23 @@ pub struct CommandResponse<T> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalSessionInfo {
+    pub serial: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalEvent {
+    pub serial: String,
+    pub session_id: String,
+    pub event: String,
+    pub stream: Option<String>,
+    pub chunk: Option<String>,
+    pub exit_code: Option<i32>,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppInfo {
     pub package_name: String,
     pub version_name: Option<String>,
@@ -112,6 +129,51 @@ pub struct BugreportResult {
     pub error: Option<String>,
     pub stream_supported: bool,
     pub progress: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportLogSummary {
+    pub report_id: String,
+    pub source_path: String,
+    pub db_path: String,
+    pub total_rows: usize,
+    pub min_ts: Option<String>,
+    pub max_ts: Option<String>,
+    pub levels: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BugreportLogFilters {
+    pub levels: Vec<String>,
+    pub tag: Option<String>,
+    pub pid: Option<i64>,
+    /// Deprecated: legacy single text filter.
+    pub text: Option<String>,
+    #[serde(default)]
+    pub text_terms: Vec<String>,
+    #[serde(default)]
+    pub text_excludes: Vec<String>,
+    pub start_ts: Option<String>,
+    pub end_ts: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportLogRow {
+    pub id: i64,
+    pub ts: String,
+    pub level: String,
+    pub tag: String,
+    pub pid: i64,
+    pub tid: i64,
+    pub msg: String,
+    pub raw_line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportLogPage {
+    pub rows: Vec<BugreportLogRow>,
+    pub has_more: bool,
+    pub next_offset: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

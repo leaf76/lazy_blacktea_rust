@@ -1,10 +1,12 @@
 pub mod adb;
 pub mod bluetooth;
+pub mod bugreport_logcat;
 pub mod commands;
 pub mod config;
 pub mod error;
 pub mod logging;
 pub mod models;
 pub mod state;
+pub mod terminal;
 pub mod ui_capture;
 pub mod ui_xml;

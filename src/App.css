@@ -125,10 +125,11 @@ textarea {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: 220px 1fr;
   background: var(--color-bg-app);
+  overflow: hidden;
 }
 
 .sidebar {
@@ -138,6 +139,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  overflow: auto;
 }
 
 .brand {
@@ -233,6 +235,8 @@ textarea {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .top-bar {
@@ -439,12 +443,24 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.page.page-fixed {
+  overflow: hidden;
 }
 
 .page-section {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.bugreport-logviewer-page {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .page-header {
@@ -881,6 +897,177 @@ textarea {
   gap: 12px;
 }
 
+.bugreport-log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.bugreport-log-panel-full {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.bugreport-log-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bugreport-log-toolbar-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.bugreport-log-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bugreport-log-filter-field label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.bugreport-log-filter-field input {
+  min-width: 0;
+}
+
+.bugreport-log-text-filter {
+  min-width: 0;
+}
+
+.bugreport-log-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bugreport-log-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-panel);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--color-text);
+}
+
+.bugreport-log-chip.exclude {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.bugreport-log-chip-label {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bugreport-log-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  font-size: 14px;
+}
+
+.bugreport-log-chip-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.bugreport-log-chip-entry {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.bugreport-log-chip-entry input {
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+
+.bugreport-log-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.bugreport-log-source-inline {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: var(--color-bg-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bugreport-log-source-inline-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.bugreport-log-source-path {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  font-family: var(--font-code);
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.bugreport-log-source-inline-meta {
+  font-size: 12px;
+}
+
+.bugreport-log-recent {
+  margin: 0;
+}
+
+.bugreport-log-viewport {
+  padding: 8px;
+}
+
+.bugreport-log-line {
+  height: 16px;
+  line-height: 16px;
+  white-space: pre;
+}
+
+.bugreport-log-line.match {
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.bugreport-log-line.active {
+  background: rgba(59, 130, 246, 0.22);
+  outline: 1px solid rgba(59, 130, 246, 0.35);
+  outline-offset: -1px;
+  border-radius: 6px;
+}
+
+@media (max-width: 1200px) {
+  .bugreport-log-panel {
+    height: auto;
+  }
+}
+
 .preview-panel {
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -1241,6 +1428,222 @@ textarea {
   border-radius: 12px;
   padding: 10px;
   background: var(--color-bg-subtle);
+}
+
+.output-block summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 6px;
+  list-style: none;
+}
+
+.output-block summary::-webkit-details-marker {
+  display: none;
+}
+
+.output-block summary::before {
+  content: "+";
+  display: inline-block;
+  margin-right: 8px;
+  font-weight: 700;
+}
+
+.output-block[open] summary::before {
+  content: "-";
+}
+
+.shell-terminal-header.panel {
+  min-height: unset;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+.shell-terminal-header.settings-panel {
+  max-width: 1400px;
+  --form-label-width: 96px;
+}
+
+.shell-terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.shell-terminal-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.shell-terminal-toolbar-meta {
+  white-space: nowrap;
+}
+
+.shell-terminal-toolbar-right {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  max-width: 720px;
+}
+
+.shell-terminal-toolbar-right input {
+  width: 100%;
+}
+
+.shell-terminal-layout {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.shell-terminal-sessions {
+  min-height: unset;
+}
+
+.shell-terminal-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.shell-terminal-session-row {
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shell-terminal-session-main {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.shell-terminal-session-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.shell-terminal-session-serial {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.1;
+}
+
+.shell-terminal-session-model {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-terminal-session-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.shell-terminal-session-actions button {
+  padding: 6px 10px;
+}
+
+.shell-terminal-content .terminal-grid {
+  max-width: none;
+  margin: 0;
+}
+
+.terminal-empty {
+  min-height: unset;
+}
+
+.terminal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+  gap: 12px;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.terminal-panel {
+  min-height: unset;
+}
+
+.terminal-panel .panel-header {
+  align-items: flex-start;
+}
+
+.terminal-panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-panel-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.terminal-autoscroll {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.terminal-screen {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px;
+  background: #07101f;
+  color: #d6e0f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.terminal-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.terminal-input-row input {
+  flex: 1;
+}
+
+@media (max-width: 1100px) {
+  .shell-terminal-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .logcat-toolbar {
@@ -1655,6 +2058,91 @@ textarea {
   font-size: 11px;
   line-height: 1.4;
   height: 420px;
+  overflow: auto;
+}
+
+.logcat-output.bugreport-log-output {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+}
+
+.logcat-output.bugreport-log-output.bugreport-log-output-empty {
+  padding: 8px;
+}
+
+.bugreport-log-output-shell {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.bugreport-log-findbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 8px 0;
+}
+
+.bugreport-log-find-toggle {
+  border: 1px solid var(--color-border);
+  background: rgba(15, 23, 42, 0.7);
+  border-radius: 999px;
+  padding: 6px 10px;
+  backdrop-filter: blur(10px);
+}
+
+.bugreport-log-findbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  background: rgba(15, 23, 42, 0.7);
+  border-radius: 999px;
+  backdrop-filter: blur(10px);
+  width: fit-content;
+  max-width: 100%;
+}
+
+.bugreport-log-findbar-right input {
+  width: 220px;
+}
+
+.bugreport-log-findbar-right .toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.bugreport-log-findbar-right input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.bugreport-log-findbar-toggle {
+  gap: 6px;
+}
+
+.bugreport-log-findbar-count {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  min-width: 56px;
+  text-align: right;
+}
+
+.bugreport-log-findbar-right button.ghost {
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.bugreport-log-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
 }
 

@@ -19,6 +19,14 @@ fn default_output_dir() -> String {
     resolve_default_output_dir(dirs::download_dir(), dirs::home_dir())
 }
 
+fn default_device_refresh_interval() -> i32 {
+    5
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiSettings {
     pub window_width: i32,
@@ -52,16 +60,23 @@ impl Default for UiSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeviceSettings {
+    #[serde(default = "default_device_refresh_interval")]
     pub refresh_interval: i32,
+    #[serde(default = "default_true")]
+    pub auto_refresh_enabled: bool,
+    #[serde(default = "default_true")]
     pub auto_connect: bool,
+    #[serde(default)]
     pub show_offline_devices: bool,
+    #[serde(default)]
     pub preferred_devices: Vec<String>,
 }
 
 impl Default for DeviceSettings {
     fn default() -> Self {
         Self {
-            refresh_interval: 30,
+            refresh_interval: default_device_refresh_interval(),
+            auto_refresh_enabled: true,
             auto_connect: true,
             show_offline_devices: false,
             preferred_devices: Vec::new(),
@@ -255,6 +270,38 @@ impl Default for LogcatViewerSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalSettings {
+    #[serde(default)]
+    pub restore_sessions: Vec<String>,
+    #[serde(default)]
+    pub buffers: HashMap<String, Vec<String>>,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            restore_sessions: Vec::new(),
+            buffers: HashMap::new(),
+        }
+    }
+}
+
+pub const TERMINAL_PERSIST_MAX_LINES: usize = 500;
+pub const TERMINAL_PERSIST_MAX_LINE_CHARS: usize = 8_000;
+
+pub fn clamp_terminal_buffer_lines(lines: &mut Vec<String>) {
+    for line in lines.iter_mut() {
+        if line.len() > TERMINAL_PERSIST_MAX_LINE_CHARS {
+            line.truncate(TERMINAL_PERSIST_MAX_LINE_CHARS);
+        }
+    }
+    if lines.len() > TERMINAL_PERSIST_MAX_LINES {
+        let start = lines.len().saturating_sub(TERMINAL_PERSIST_MAX_LINES);
+        lines.drain(0..start);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     #[serde(default)]
     pub ui: UiSettings,
@@ -278,6 +325,8 @@ pub struct AppConfig {
     pub screen_record: ScreenRecordSettings,
     #[serde(default)]
     pub logcat_viewer: LogcatViewerSettings,
+    #[serde(default)]
+    pub terminal: TerminalSettings,
     #[serde(default)]
     pub command_history: Vec<String>,
     #[serde(default)]
@@ -305,6 +354,7 @@ impl Default for AppConfig {
             screenshot: ScreenshotSettings::default(),
             screen_record: ScreenRecordSettings::default(),
             logcat_viewer: LogcatViewerSettings::default(),
+            terminal: TerminalSettings::default(),
             command_history: Vec::new(),
             device_groups: HashMap::new(),
             output_path: output_dir.clone(),
@@ -425,7 +475,7 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
         config.ui.default_output_path = default_output_dir();
     }
     if config.device.refresh_interval < 1 {
-        config.device.refresh_interval = 30;
+        config.device.refresh_interval = default_device_refresh_interval();
     }
     if config.logcat.max_lines < 100 {
         config.logcat.max_lines = 1000;
@@ -474,6 +524,7 @@ mod tests {
         config = apply_legacy_overrides(config, &value);
         assert_eq!(config.ui.ui_scale, 2.5);
         assert_eq!(config.device.refresh_interval, 10);
+        assert!(config.device.auto_refresh_enabled);
         assert_eq!(config.output_path, "/tmp/out");
         assert_eq!(config.device_groups.get("team").unwrap().len(), 2);
         assert_eq!(config.command_history.len(), 2);
@@ -488,9 +539,24 @@ mod tests {
         config.command.max_history_size = 0;
         let validated = validate_config(config);
         assert_eq!(validated.ui.ui_scale, 1.0);
-        assert_eq!(validated.device.refresh_interval, 30);
+        assert_eq!(validated.device.refresh_interval, 5);
         assert_eq!(validated.logcat.max_lines, 1000);
         assert_eq!(validated.command.max_history_size, 50);
+    }
+
+    #[test]
+    fn loads_device_settings_without_new_fields() {
+        let value = serde_json::json!({
+            "device": {
+                "refresh_interval": 15,
+                "auto_connect": true,
+                "show_offline_devices": false,
+                "preferred_devices": []
+            }
+        });
+        let parsed: AppConfig = serde_json::from_value(value).expect("config should deserialize");
+        assert_eq!(parsed.device.refresh_interval, 15);
+        assert!(parsed.device.auto_refresh_enabled);
     }
 
     #[test]
@@ -506,5 +572,26 @@ mod tests {
     fn default_output_dir_falls_back_to_home_downloads() {
         let resolved = resolve_default_output_dir(None, Some(PathBuf::from("/tmp/home")));
         assert_eq!(resolved, "/tmp/home/Downloads");
+    }
+
+    #[test]
+    fn terminal_settings_defaults_are_empty() {
+        let config = AppConfig::default();
+        assert!(config.terminal.restore_sessions.is_empty());
+        assert!(config.terminal.buffers.is_empty());
+    }
+
+    #[test]
+    fn clamp_terminal_buffer_lines_trims_length_and_count() {
+        let mut lines = vec![
+            "short".to_string(),
+            "x".repeat(TERMINAL_PERSIST_MAX_LINE_CHARS + 10),
+        ];
+        for _ in 0..(TERMINAL_PERSIST_MAX_LINES + 20) {
+            lines.push("keep".to_string());
+        }
+        clamp_terminal_buffer_lines(&mut lines);
+        assert!(lines.len() <= TERMINAL_PERSIST_MAX_LINES);
+        assert!(lines.iter().all(|line| line.len() <= TERMINAL_PERSIST_MAX_LINE_CHARS));
     }
 }

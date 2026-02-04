@@ -2,13 +2,15 @@ mod app;
 
 use app::commands::{
     adb_connect, adb_pair, cancel_bugreport, capture_screenshot, capture_ui_hierarchy, check_scrcpy,
-    check_adb, clear_app_data, clear_logcat, export_logcat, export_ui_hierarchy, force_stop_app,
-    generate_bugreport, get_config, install_apk_batch, launch_app, launch_scrcpy, list_apps,
-    list_device_files, list_devices, open_app_info, preview_local_file, pull_device_file,
-    push_device_file, mkdir_device_dir, rename_device_path, delete_device_path,
-    reboot_devices, reset_config, run_shell, save_app_config, set_app_enabled, set_bluetooth_state,
-    set_wifi_state, start_bluetooth_monitor, start_logcat, start_screen_record,
-    stop_bluetooth_monitor, stop_logcat, stop_screen_record, uninstall_app,
+    check_adb, clear_app_data, clear_logcat, delete_device_path, export_logcat,
+    export_ui_hierarchy, force_stop_app, generate_bugreport, get_config, install_apk_batch,
+    launch_app, launch_scrcpy, list_apps, list_device_files, list_devices, mkdir_device_dir,
+    open_app_info, prepare_bugreport_logcat, preview_local_file, pull_device_file, push_device_file,
+    query_bugreport_logcat, reboot_devices, rename_device_path, reset_config, run_shell,
+    save_app_config, set_app_enabled, set_bluetooth_state, set_wifi_state, start_bluetooth_monitor,
+    start_logcat, start_screen_record, start_terminal_session, stop_bluetooth_monitor, stop_logcat,
+    stop_screen_record, stop_terminal_session, uninstall_app, write_terminal_session,
+    persist_terminal_state,
 };
 use app::logging::init_logging;
 use app::state::AppState;
@@ -30,6 +32,10 @@ pub fn run() {
             adb_pair,
             adb_connect,
             run_shell,
+            start_terminal_session,
+            write_terminal_session,
+            stop_terminal_session,
+            persist_terminal_state,
             reboot_devices,
             set_wifi_state,
             set_bluetooth_state,
@@ -62,7 +68,9 @@ pub fn run() {
             check_scrcpy,
             launch_scrcpy,
             generate_bugreport,
-            cancel_bugreport
+            cancel_bugreport,
+            prepare_bugreport_logcat,
+            query_bugreport_logcat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

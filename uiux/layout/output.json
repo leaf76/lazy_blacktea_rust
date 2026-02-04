@@ -86,7 +86,7 @@
             },
             {
               "id": "nav_actions",
-              "label": "Custom Actions",
+              "label": "Shell Commands",
               "icon": "terminal"
             }
           ]

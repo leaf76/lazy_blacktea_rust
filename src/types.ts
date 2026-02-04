@@ -87,6 +87,26 @@ export type LogcatEvent = {
   trace_id: string;
 };
 
+export type TerminalSessionInfo = {
+  serial: string;
+  session_id: string;
+};
+
+export type TerminalEvent = {
+  serial: string;
+  session_id: string;
+  event: string;
+  stream?: string | null;
+  chunk?: string | null;
+  exit_code?: number | null;
+  trace_id: string;
+};
+
+export type TerminalSettings = {
+  restore_sessions: string[];
+  buffers: Record<string, string[]>;
+};
+
 export type ApkInfo = {
   path: string;
   package_name?: string | null;
@@ -133,6 +153,77 @@ export type BugreportResult = {
   progress?: number | null;
 };
 
+export type BugreportTaskStatus = "running" | "success" | "error" | "cancelled";
+export type BugreportTaskKind =
+  | "shell"
+  | "apk_install"
+  | "bugreport"
+  | "screenshot"
+  | "screen_record_start"
+  | "screen_record_stop"
+  | "file_pull"
+  | "file_push"
+  | "file_mkdir"
+  | "file_rename"
+  | "file_delete";
+
+export type BugreportTaskDeviceSnapshot = {
+  serial: string;
+  status: BugreportTaskStatus;
+  message?: string | null;
+  output_path?: string | null;
+  exit_code?: number | null;
+};
+
+export type BugreportTaskSnapshot = {
+  id: string;
+  trace_id?: string | null;
+  kind: BugreportTaskKind;
+  title: string;
+  status: BugreportTaskStatus;
+  started_at: number;
+  finished_at?: number | null;
+  devices: Record<string, BugreportTaskDeviceSnapshot>;
+};
+
+export type BugreportLogSummary = {
+  report_id: string;
+  source_path: string;
+  db_path: string;
+  total_rows: number;
+  min_ts?: string | null;
+  max_ts?: string | null;
+  levels: Record<string, number>;
+};
+
+export type BugreportLogFilters = {
+  levels: string[];
+  tag?: string | null;
+  pid?: number | null;
+  text_terms?: string[];
+  text_excludes?: string[];
+  text?: string | null;
+  start_ts?: string | null;
+  end_ts?: string | null;
+};
+
+export type BugreportLogRow = {
+  id: number;
+  ts: string;
+  level: string;
+  tag: string;
+  pid: number;
+  tid: number;
+  msg: string;
+  raw_line: string;
+};
+
+export type BugreportLogPage = {
+  rows: BugreportLogRow[];
+  has_more: boolean;
+  next_offset: number;
+};
+
 export type FilePreview = {
   local_path: string;
   mime_type: string;
@@ -177,6 +268,7 @@ export type UiSettings = {
 
 export type DeviceSettings = {
   refresh_interval: number;
+  auto_refresh_enabled: boolean;
   auto_connect: boolean;
   show_offline_devices: boolean;
   preferred_devices: string[];
@@ -264,6 +356,7 @@ export type AppConfig = {
   screenshot: ScreenshotSettings;
   screen_record: ScreenRecordSettings;
   logcat_viewer: LogcatViewerSettings;
+  terminal: TerminalSettings;
   command_history: string[];
   device_groups: Record<string, string[]>;
   output_path: string;

@@ -4,6 +4,9 @@ import type {
   ApkBatchInstallResult,
   AppConfig,
   AppInfo,
+  BugreportLogFilters,
+  BugreportLogPage,
+  BugreportLogSummary,
   BugreportResult,
   CommandResponse,
   CommandResult,
@@ -13,6 +16,7 @@ import type {
   HostCommandResult,
   LogcatExportResult,
   ScrcpyInfo,
+  TerminalSessionInfo,
   UiHierarchyCaptureResult,
   UiHierarchyExportResult,
 } from "./types";
@@ -79,6 +83,44 @@ export const runShell = async (
     serials,
     command,
     parallel,
+    trace_id: createTraceId(),
+  });
+};
+
+export const startTerminalSession = async (serial: string) => {
+  return invoke<CommandResponse<TerminalSessionInfo>>("start_terminal_session", {
+    serial,
+    trace_id: createTraceId(),
+  });
+};
+
+export const writeTerminalSession = async (
+  serial: string,
+  data: string,
+  newline: boolean,
+) => {
+  return invoke<CommandResponse<boolean>>("write_terminal_session", {
+    serial,
+    data,
+    newline,
+    trace_id: createTraceId(),
+  });
+};
+
+export const stopTerminalSession = async (serial: string) => {
+  return invoke<CommandResponse<boolean>>("stop_terminal_session", {
+    serial,
+    trace_id: createTraceId(),
+  });
+};
+
+export const persistTerminalState = async (
+  restore_sessions: string[],
+  buffers: Record<string, string[]>,
+) => {
+  return invoke<CommandResponse<boolean>>("persist_terminal_state", {
+    restore_sessions,
+    buffers,
     trace_id: createTraceId(),
   });
 };
@@ -384,6 +426,7 @@ export const generateBugreport = async (serial: string, outputDir: string) => {
   return invoke<CommandResponse<BugreportResult>>("generate_bugreport", {
     serial,
     output_dir: outputDir,
+    outputDir,
     trace_id: createTraceId(),
   });
 };
@@ -391,6 +434,30 @@ export const generateBugreport = async (serial: string, outputDir: string) => {
 export const cancelBugreport = async (serial: string) => {
   return invoke<CommandResponse<boolean>>("cancel_bugreport", {
     serial,
+    trace_id: createTraceId(),
+  });
+};
+
+export const prepareBugreportLogcat = async (sourcePath: string) => {
+  return invoke<CommandResponse<BugreportLogSummary>>("prepare_bugreport_logcat", {
+    source_path: sourcePath,
+    sourcePath,
+    trace_id: createTraceId(),
+  });
+};
+
+export const queryBugreportLogcat = async (
+  reportId: string,
+  filters: BugreportLogFilters,
+  offset?: number,
+  limit?: number,
+) => {
+  return invoke<CommandResponse<BugreportLogPage>>("query_bugreport_logcat", {
+    report_id: reportId,
+    reportId,
+    filters,
+    offset,
+    limit,
     trace_id: createTraceId(),
   });
 };
