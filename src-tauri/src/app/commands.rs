@@ -777,7 +777,12 @@ pub fn start_terminal_session(
     }
 
     let session_id = Uuid::new_v4().to_string();
-    let args = vec!["-s".to_string(), serial.clone(), "shell".to_string()];
+    let args = vec![
+        "-s".to_string(),
+        serial.clone(),
+        "shell".to_string(),
+        "-t".to_string(),
+    ];
 
     let app_emit = app.clone();
     let trace_emit = trace_id.clone();
