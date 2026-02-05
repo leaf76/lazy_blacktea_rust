@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
 } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
@@ -135,7 +136,8 @@ type LogcatLineEntry = { id: number; text: string };
 type TerminalDeviceState = {
   connected: boolean;
   sessionId: string | null;
-  buffer: string;
+  lines: string[];
+  tail: string;
   autoScroll: boolean;
 };
 type QuickActionId =
@@ -156,54 +158,38 @@ const initialActionFormState: ActionFormState = {
   errors: [],
 };
 
-const appendLimited = (value: string, chunk: string, maxLen: number) => {
-  const next = `${value}${chunk}`;
-  if (next.length <= maxLen) {
-    return next;
+const TERMINAL_MAX_LINES = 500;
+
+const appendTerminalBuffer = (
+  lines: string[],
+  tail: string,
+  chunk: string,
+  maxLines: number,
+) => {
+  if (!chunk) {
+    return { lines, tail };
   }
-  return next.slice(Math.max(0, next.length - maxLen));
+  const combined = `${tail}${chunk}`;
+  const parts = combined.split("\n");
+  const nextTail = parts.pop() ?? "";
+  let nextLines = lines.concat(parts);
+  if (nextLines.length > maxLines) {
+    nextLines = nextLines.slice(-maxLines);
+  }
+  return { lines: nextLines, tail: nextTail };
 };
 
-const extractLastLines = (value: string, maxLines: number) => {
-  const linesReversed: string[] = [];
-  let end = value.length;
-  if (!end || maxLines <= 0) {
-    return [];
+const renderTerminalBuffer = (lines: string[], tail: string) => {
+  if (!lines.length && !tail) {
+    return "No output yet.";
   }
-
-  const pushLine = (start: number, stop: number) => {
-    if (stop <= start) {
-      linesReversed.push("");
-      return;
-    }
-    let slice = value.slice(start, stop);
-    if (slice.endsWith("\r")) {
-      slice = slice.slice(0, -1);
-    }
-    linesReversed.push(slice);
-  };
-
-  for (let cursor = value.length - 1; cursor >= 0; cursor -= 1) {
-    const ch = value[cursor];
-    if (ch !== "\n") {
-      continue;
-    }
-    pushLine(cursor + 1, end);
-    end = cursor;
-    if (linesReversed.length >= maxLines) {
-      break;
-    }
+  if (!lines.length) {
+    return tail;
   }
-
-  if (linesReversed.length < maxLines) {
-    pushLine(0, end);
+  if (tail) {
+    return `${lines.join("\n")}\n${tail}`;
   }
-
-  const lines = linesReversed.reverse();
-  if (value.endsWith("\n") && lines[lines.length - 1] === "") {
-    lines.pop();
-  }
-  return lines.slice(-maxLines);
+  return lines.join("\n");
 };
 
 const normalizeBugreportTimestamp = (value: string) => {
@@ -253,7 +239,7 @@ const LogcatLineRow = ({
   searchPattern: RegExp | null;
 }) => {
   return (
-    <div data-log-id={entry.id}>
+    <div data-log-id={entry.id} className="logcat-line">
       {renderHighlightedLogcatLine(entry.text, searchPattern)}
     </div>
   );
@@ -261,6 +247,88 @@ const LogcatLineRow = ({
 
 const MemoLogcatLineRow = memo(LogcatLineRow, (prev, next) => {
   return prev.entry === next.entry && prev.searchPattern === next.searchPattern;
+});
+
+const LOGCAT_LINE_HEIGHT_PX = 16;
+const LOGCAT_OUTPUT_PADDING_PX = 8;
+const LOGCAT_OVERSCAN = 80;
+
+const LogcatOutput = memo(function LogcatOutput({
+  entries,
+  searchPattern,
+  autoScroll,
+  outputRef,
+}: {
+  entries: LogcatLineEntry[];
+  searchPattern: RegExp | null;
+  autoScroll: boolean;
+  outputRef: RefObject<HTMLDivElement>;
+}) {
+  const rafRef = useRef<number | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = outputRef.current;
+    if (!el) {
+      return;
+    }
+    const update = () => {
+      setViewportHeight(el.clientHeight);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [outputRef]);
+
+  useEffect(() => {
+    if (!autoScroll) {
+      return;
+    }
+    const el = outputRef.current;
+    if (!el) {
+      return;
+    }
+    el.scrollTop = el.scrollHeight;
+    setScrollTop(el.scrollTop);
+  }, [autoScroll, entries.length, outputRef]);
+
+  const handleScroll = () => {
+    if (rafRef.current != null) {
+      return;
+    }
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null;
+      const el = outputRef.current;
+      if (!el) {
+        return;
+      }
+      setScrollTop(el.scrollTop);
+    });
+  };
+
+  const total = entries.length;
+  const start = Math.max(0, Math.floor(scrollTop / LOGCAT_LINE_HEIGHT_PX) - LOGCAT_OVERSCAN);
+  const end = Math.min(
+    total,
+    Math.ceil((scrollTop + viewportHeight) / LOGCAT_LINE_HEIGHT_PX) + LOGCAT_OVERSCAN,
+  );
+  const topPad = start * LOGCAT_LINE_HEIGHT_PX;
+  const bottomPad = Math.max(0, (total - end) * LOGCAT_LINE_HEIGHT_PX);
+  const slice = entries.slice(start, end);
+
+  return (
+    <div ref={outputRef} className="logcat-output logcat-live" onScroll={handleScroll}>
+      <div className="logcat-viewport">
+        <div style={{ height: topPad }} />
+        {slice.map((entry) => (
+          <MemoLogcatLineRow key={entry.id} entry={entry} searchPattern={searchPattern} />
+        ))}
+        <div style={{ height: bottomPad }} />
+      </div>
+    </div>
+  );
 });
 
 type BugreportLogOutputProps = {
@@ -370,6 +438,36 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
       const prev = findStateRef.current;
       const nextLen = rows.length;
       const patternChanged = prev.key !== key;
+      const chunkSize = 1000;
+
+      const scanRange = (
+        startIndex: number,
+        endIndex: number,
+        onDone: (matches: number[]) => void,
+      ) => {
+        const matches: number[] = [];
+        let cursor = startIndex;
+
+        const step = () => {
+          if (findComputeTokenRef.current !== token) {
+            return;
+          }
+          const limit = Math.min(cursor + chunkSize, endIndex);
+          for (let i = cursor; i < limit; i += 1) {
+            if (bugreportLogLineMatches(findPattern, rows[i].raw_line)) {
+              matches.push(i);
+            }
+          }
+          cursor = limit;
+          if (cursor < endIndex) {
+            window.setTimeout(step, 0);
+            return;
+          }
+          onDone(matches);
+        };
+
+        step();
+      };
 
       if (!findTerm.trim() || !findPattern || findPattern.error) {
         findStateRef.current = { key, rowsLen: nextLen };
@@ -379,15 +477,14 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
       }
 
       if (patternChanged || nextLen < prev.rowsLen) {
-        const matches: number[] = [];
-        for (let i = 0; i < rows.length; i += 1) {
-          if (bugreportLogLineMatches(findPattern, rows[i].raw_line)) {
-            matches.push(i);
-          }
-        }
         findStateRef.current = { key, rowsLen: nextLen };
-        setFindMatchRowIndices(matches);
-        setFindActiveIndex(-1);
+        scanRange(0, rows.length, (matches) => {
+          if (findComputeTokenRef.current !== token) {
+            return;
+          }
+          setFindMatchRowIndices(matches);
+          setFindActiveIndex(-1);
+        });
         return;
       }
 
@@ -395,14 +492,15 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
         return;
       }
 
-      const newMatches: number[] = [];
-      for (let i = prev.rowsLen; i < rows.length; i += 1) {
-        if (bugreportLogLineMatches(findPattern, rows[i].raw_line)) {
-          newMatches.push(i);
-        }
-      }
       findStateRef.current = { key, rowsLen: nextLen };
-      setFindMatchRowIndices((prevMatches) => [...prevMatches, ...newMatches]);
+      scanRange(prev.rowsLen, rows.length, (newMatches) => {
+        if (findComputeTokenRef.current !== token) {
+          return;
+        }
+        if (newMatches.length) {
+          setFindMatchRowIndices((prevMatches) => [...prevMatches, ...newMatches]);
+        }
+      });
     }, 180);
     return () => window.clearTimeout(handle);
   }, [findCaseSensitive, findPattern, findRegex, findTerm, rows]);
@@ -580,6 +678,10 @@ const DeviceTerminalPanel = memo(function DeviceTerminalPanel({
 }) {
   const [input, setInput] = useState("");
   const outputRef = useRef<HTMLPreElement | null>(null);
+  const display = useMemo(
+    () => renderTerminalBuffer(state.lines, state.tail),
+    [state.lines, state.tail],
+  );
 
   useEffect(() => {
     if (!state.autoScroll) {
@@ -590,7 +692,7 @@ const DeviceTerminalPanel = memo(function DeviceTerminalPanel({
       return;
     }
     el.scrollTop = el.scrollHeight;
-  }, [state.autoScroll, state.buffer]);
+  }, [state.autoScroll, state.lines, state.tail]);
 
   const runInput = () => {
     const command = input.trimEnd();
@@ -644,7 +746,7 @@ const DeviceTerminalPanel = memo(function DeviceTerminalPanel({
       </div>
 
       <pre ref={outputRef} className="terminal-screen">
-        {state.buffer || "No output yet."}
+        {display}
       </pre>
 
       <div className="terminal-input-row">
@@ -723,6 +825,7 @@ function App() {
   const [uiScreenshotError, setUiScreenshotError] = useState("");
   const [uiInspectorTab, setUiInspectorTab] = useState<"hierarchy" | "xml">("hierarchy");
   const [uiInspectorSearch, setUiInspectorSearch] = useState("");
+  const [filteredUiXml, setFilteredUiXml] = useState("");
   const [uiExportResult, setUiExportResult] = useState("");
   const [uiZoom, setUiZoom] = useState(1);
   const [uiBoundsEnabled, setUiBoundsEnabled] = useState(true);
@@ -1187,6 +1290,14 @@ function App() {
     ],
   );
 
+  const logcatLineIndexById = useMemo(() => {
+    const map = new Map<number, number>();
+    logcatFiltered.lines.forEach((entry, index) => {
+      map.set(entry.id, index);
+    });
+    return map;
+  }, [logcatFiltered.lines]);
+
   const selectedLogcatPreset = useMemo(
     () => logcatPresets.find((preset) => preset.name === logcatPresetSelected) ?? null,
     [logcatPresets, logcatPresetSelected],
@@ -1208,16 +1319,28 @@ function App() {
 
   const uiScreenshotSrc = uiScreenshotDataUrl;
   const uiNodesParse = useMemo(() => parseUiNodes(uiXml), [uiXml]);
+  const uiFilterTokenRef = useRef(0);
 
-  const filteredUiXml = useMemo(() => {
+  useEffect(() => {
+    const token = uiFilterTokenRef.current + 1;
+    uiFilterTokenRef.current = token;
     const query = uiInspectorSearch.trim().toLowerCase();
-    if (!query) {
-      return uiXml;
-    }
-    return uiXml
-      .split("\n")
-      .filter((line) => line.toLowerCase().includes(query))
-      .join("\n");
+    const delay = query ? 200 : 0;
+    const handle = window.setTimeout(() => {
+      if (uiFilterTokenRef.current !== token) {
+        return;
+      }
+      if (!query) {
+        setFilteredUiXml(uiXml);
+        return;
+      }
+      const next = uiXml
+        .split("\n")
+        .filter((line) => line.toLowerCase().includes(query))
+        .join("\n");
+      setFilteredUiXml(next);
+    }, delay);
+    return () => window.clearTimeout(handle);
   }, [uiXml, uiInspectorSearch]);
 
   useEffect(() => {
@@ -1546,12 +1669,12 @@ function App() {
         restoreSessions.forEach((serial) => {
           const existing = next[serial] ?? createDefaultTerminalState();
           const lines = buffers[serial] ?? [];
-          const restored = lines.length ? `${lines.join("\n")}\n` : existing.buffer;
           next[serial] = {
             ...existing,
             connected: false,
             sessionId: null,
-            buffer: restored,
+            lines,
+            tail: "",
           };
         });
         return next;
@@ -1762,15 +1885,6 @@ function App() {
   }, [groupMap]);
 
   useEffect(() => {
-    if (!logcatAutoScroll) {
-      return;
-    }
-    if (logcatOutputRef.current) {
-      logcatOutputRef.current.scrollTop = logcatOutputRef.current.scrollHeight;
-    }
-  }, [logcatFiltered.lines.length, logcatAutoScroll]);
-
-  useEffect(() => {
     setLogcatMatchIndex(0);
   }, [logcatSearchTerm, logcatSearchRegex, logcatSearchCaseSensitive, logcatSearchOnly]);
 
@@ -1823,8 +1937,16 @@ function App() {
 
     const unlistenLogcat = listen<LogcatEvent>("logcat-line", (event) => {
       const payload = event.payload;
+      const lines = payload.lines?.length
+        ? payload.lines
+        : payload.line
+          ? [payload.line]
+          : [];
+      if (!lines.length) {
+        return;
+      }
       const bucket = (logcatPendingRef.current[payload.serial] ??= []);
-      bucket.push(payload.line);
+      bucket.push(...lines);
       scheduleLogcatFlush();
     });
 
@@ -1848,12 +1970,20 @@ function App() {
             ({
               connected: true,
               sessionId: terminalSessionIdBySerialRef.current[serial] ?? null,
-              buffer: "",
+              lines: [],
+              tail: "",
               autoScroll: true,
             } satisfies TerminalDeviceState);
+          const updated = appendTerminalBuffer(
+            existing.lines,
+            existing.tail,
+            chunk,
+            TERMINAL_MAX_LINES,
+          );
           next[serial] = {
             ...existing,
-            buffer: appendLimited(existing.buffer, chunk, 200_000),
+            lines: updated.lines,
+            tail: updated.tail,
           };
         });
         return next;
@@ -1893,20 +2023,28 @@ function App() {
             ({
               connected: false,
               sessionId: null,
-              buffer: "",
+              lines: [],
+              tail: "",
               autoScroll: true,
             } satisfies TerminalDeviceState);
           const suffix =
             payload.event === "exit"
               ? `\n[process exited${payload.exit_code != null ? ` ${payload.exit_code}` : ""}]\n`
               : "\n[session stopped]\n";
+          const updated = appendTerminalBuffer(
+            existing.lines,
+            existing.tail,
+            suffix,
+            TERMINAL_MAX_LINES,
+          );
           return {
             ...prev,
             [payload.serial]: {
               ...existing,
               connected: false,
               sessionId: null,
-              buffer: appendLimited(existing.buffer, suffix, 200_000),
+              lines: updated.lines,
+              tail: updated.tail,
             },
           };
         });
@@ -2066,7 +2204,8 @@ function App() {
         next[serial] = {
           connected: false,
           sessionId: null,
-          buffer: "",
+          lines: [],
+          tail: "",
           autoScroll: true,
         };
       }
@@ -2166,7 +2305,8 @@ function App() {
   const createDefaultTerminalState = (): TerminalDeviceState => ({
     connected: false,
     sessionId: null,
-    buffer: "",
+    lines: [],
+    tail: "",
     autoScroll: true,
   });
 
@@ -2184,7 +2324,9 @@ function App() {
       const bySerial = terminalBySerialRef.current;
       const buffers: Record<string, string[]> = {};
       restoreSessions.forEach((serial) => {
-        buffers[serial] = extractLastLines(bySerial[serial]?.buffer ?? "", 500);
+        const state = bySerial[serial];
+        const lines = state?.lines ?? [];
+        buffers[serial] = state?.tail ? [...lines, state.tail] : [...lines];
       });
 
       await persistTerminalState(restoreSessions, buffers);
@@ -2247,11 +2389,18 @@ function App() {
   const appendTerminal = (serial: string, chunk: string) => {
     setTerminalBySerial((prev) => {
       const existing = prev[serial] ?? createDefaultTerminalState();
+      const updated = appendTerminalBuffer(
+        existing.lines,
+        existing.tail,
+        chunk,
+        TERMINAL_MAX_LINES,
+      );
       return {
         ...prev,
         [serial]: {
           ...existing,
-          buffer: appendLimited(existing.buffer, chunk, 200_000),
+          lines: updated.lines,
+          tail: updated.tail,
         },
       };
     });
@@ -2264,7 +2413,8 @@ function App() {
         ...prev,
         [serial]: {
           ...existing,
-          buffer: "",
+          lines: [],
+          tail: "",
         },
       };
     });
@@ -2910,10 +3060,16 @@ function App() {
     if (matchId == null) {
       return;
     }
-    const target = container.querySelector(`[data-log-id="${matchId}"]`);
-    if (target instanceof HTMLElement) {
-      target.scrollIntoView({ block: "center" });
+    const matchIndex = logcatLineIndexById.get(matchId);
+    if (matchIndex == null) {
+      return;
     }
+    const target = matchIndex * LOGCAT_LINE_HEIGHT_PX;
+    const offset = Math.max(
+      0,
+      target - container.clientHeight / 2 + LOGCAT_OUTPUT_PADDING_PX,
+    );
+    container.scrollTop = offset;
   };
 
   const handleLogcatNextMatch = () => {
@@ -4188,6 +4344,8 @@ function App() {
       id: "screenshot",
       title: "Screenshot",
       description: "Capture screenshots from selected devices.",
+      hint: "Multi-device",
+      tone: "primary",
       onClick: () => openActionForm("screenshot"),
       disabled: busy || selectedSerials.length === 0,
     },
@@ -4195,6 +4353,7 @@ function App() {
       id: "reboot",
       title: "Reboot",
       description: "Restart selected devices.",
+      hint: "Multi-device",
       onClick: () => openActionForm("reboot"),
       disabled: busy || selectedSerials.length === 0,
     },
@@ -4204,6 +4363,8 @@ function App() {
       description: screenRecordRemote
         ? "Finish and save the ongoing screen recording."
         : "Record the device screen for a short clip.",
+      hint: "Single device",
+      tone: "primary",
       onClick: () => openActionForm("record"),
       disabled: busy || selectedSerials.length !== 1,
     },
@@ -4211,6 +4372,7 @@ function App() {
       id: "logcat-clear",
       title: "Clear Logcat",
       description: "Clear the logcat buffer for the primary device.",
+      hint: "Primary device",
       onClick: () => openActionForm("logcat-clear"),
       disabled: busy || selectedSerials.length !== 1,
     },
@@ -4220,6 +4382,8 @@ function App() {
       description: scrcpyInfo?.available
         ? "Launch scrcpy for a live mirror window."
         : "Install scrcpy to enable live mirroring.",
+      hint: "Multi-device",
+      tone: "primary",
       onClick: () => openActionForm("mirror"),
       disabled: busy || selectedSerials.length === 0,
     },
@@ -4227,8 +4391,36 @@ function App() {
       id: "apk-installer",
       title: "APK Installer",
       description: "Install single, multiple, or split APK bundles.",
+      hint: "Installer flow",
       onClick: () => navigate("/apk-installer"),
       disabled: busy,
+    },
+  ];
+
+  const dashboardActionGroups = [
+    {
+      id: "capture",
+      title: "Capture",
+      description: "Screenshots and recordings.",
+      actionIds: ["screenshot", "record"],
+    },
+    {
+      id: "control",
+      title: "Control",
+      description: "Device control and mirroring.",
+      actionIds: ["reboot", "mirror"],
+    },
+    {
+      id: "debug",
+      title: "Debug",
+      description: "Logcat and diagnostics.",
+      actionIds: ["logcat-clear"],
+    },
+    {
+      id: "install",
+      title: "Install",
+      description: "APK bundles and packages.",
+      actionIds: ["apk-installer"],
     },
   ];
 
@@ -4237,14 +4429,30 @@ function App() {
     const deviceName =
       detail?.model ?? activeDevice?.summary.model ?? activeSerial ?? "No device selected";
     const deviceState = activeDevice?.summary.state ?? "No device";
+    const deviceStateTone =
+      deviceState === "device"
+        ? "ok"
+        : deviceState === "unauthorized"
+          ? "error"
+          : deviceState === "offline"
+            ? "warn"
+            : "idle";
     const wifiState =
       detail?.wifi_is_on == null ? "Unknown" : detail.wifi_is_on ? "On" : "Off";
     const btState =
       detail?.bt_is_on == null ? "Unknown" : detail.bt_is_on ? "On" : "Off";
+    const wifiLabel =
+      detail?.wifi_is_on == null ? "WiFi Unknown" : detail.wifi_is_on ? "WiFi On" : "WiFi Off";
+    const btLabel =
+      detail?.bt_is_on == null
+        ? "Bluetooth Unknown"
+        : detail.bt_is_on
+          ? "Bluetooth On"
+          : "Bluetooth Off";
 
     if (adbInfo && !adbInfo.available) {
       return (
-        <div className="page-section">
+        <div className="page-section dashboard-page">
           <div className="page-header">
             <div>
               <h1>Dashboard</h1>
@@ -4278,7 +4486,7 @@ function App() {
 
     if (!hasDevices) {
       return (
-        <div className="page-section">
+        <div className="page-section dashboard-page">
           <div className="page-header">
             <div>
               <h1>Dashboard</h1>
@@ -4312,7 +4520,7 @@ function App() {
     }
 
     return (
-      <div className="page-section">
+      <div className="page-section dashboard-page">
         <div className="page-header">
           <div>
             <h1>Dashboard</h1>
@@ -4325,77 +4533,131 @@ function App() {
           </div>
         </div>
         <div className="dashboard-grid">
-          <section className="panel card">
+          <section className="panel card dashboard-hero">
             <div className="card-header">
-              <h2>Device Overview</h2>
-              <span className="badge">{deviceState}</span>
+              <div>
+                <h2>Primary Device</h2>
+                <p className="muted">Health, context, and selection.</p>
+              </div>
+              <div className="device-hero-status">
+                <span className={`status-pill ${deviceStateTone}`}>{deviceState}</span>
+                <span className="badge">
+                  {selectedSerials.length ? `${selectedSerials.length} selected` : "No selection"}
+                </span>
+              </div>
             </div>
-            <div className="device-summary">
-              <div className="device-primary">
+            <div className="device-hero">
+              <div className="device-hero-main">
                 <p className="eyebrow">Primary Device</p>
                 <strong>{deviceName}</strong>
                 <p className="muted">{activeSerial ?? "Select a device"}</p>
+                <div className="device-hero-tags">
+                  <span className="badge">{wifiLabel}</span>
+                  <span className="badge">{btLabel}</span>
+                  <span className="badge">
+                    {scrcpyInfo?.available ? "scrcpy Ready" : "scrcpy Missing"}
+                  </span>
+                </div>
               </div>
-              <div className="summary-grid">
-                <div>
-                  <span className="muted">Android</span>
-                  <strong>{detail?.android_version ?? "--"}</strong>
-                </div>
-                <div>
-                  <span className="muted">API</span>
-                  <strong>{detail?.api_level ?? "--"}</strong>
-                </div>
-                <div>
-                  <span className="muted">Battery</span>
-                  <strong>{detail?.battery_level != null ? `${detail.battery_level}%` : "--"}</strong>
-                </div>
-                <div>
-                  <span className="muted">WiFi</span>
-                  <strong>{wifiState}</strong>
-                </div>
-                <div>
-                  <span className="muted">Bluetooth</span>
-                  <strong>{btState}</strong>
-                </div>
-                <div>
-                  <span className="muted">GMS</span>
-                  <strong>{detail?.gms_version ?? "--"}</strong>
-                </div>
+              <div className="device-hero-actions">
+                <button
+                  className="ghost"
+                  onClick={handleCopyDeviceInfo}
+                  disabled={busy || selectedSerials.length !== 1}
+                >
+                  Copy Device Info
+                </button>
+                <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+                  Open Device Manager
+                </button>
               </div>
             </div>
-            <div className="button-row">
-              <button className="ghost" onClick={handleCopyDeviceInfo} disabled={busy || selectedSerials.length !== 1}>
-                Copy Device Info
-              </button>
+            <div className="summary-grid summary-grid-hero">
+              <div>
+                <span className="muted">Android</span>
+                <strong>{detail?.android_version ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">API</span>
+                <strong>{detail?.api_level ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Battery</span>
+                <strong>{detail?.battery_level != null ? `${detail.battery_level}%` : "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">WiFi</span>
+                <strong>{wifiState}</strong>
+              </div>
+              <div>
+                <span className="muted">Bluetooth</span>
+                <strong>{btState}</strong>
+              </div>
+              <div>
+                <span className="muted">GMS</span>
+                <strong>{detail?.gms_version ?? "--"}</strong>
+              </div>
             </div>
           </section>
 
-          <section className="panel card">
+          <section className="panel card dashboard-actions">
             <div className="card-header">
-              <h2>Quick Actions</h2>
-              <span className="muted">Most used</span>
+              <div>
+                <h2>Quick Actions</h2>
+                <p className="muted">Grouped by intent for faster access.</p>
+              </div>
+              <span className="badge">
+                {selectedSerials.length ? `${selectedSerials.length} devices` : "Select device"}
+              </span>
             </div>
             <div className="quick-actions">
-              {dashboardActions.map((action) => (
-                <button
-                  key={action.id}
-                  className="quick-action"
-                  onClick={action.onClick}
-                  disabled={action.disabled}
-                >
-                  <span>{action.title}</span>
-                  <span className="muted">{action.description}</span>
-                </button>
+              {dashboardActionGroups.map((group) => (
+                <div key={group.id} className="quick-action-group">
+                  <div className="quick-action-group-header">
+                    <div>
+                      <h3>{group.title}</h3>
+                      <p className="muted">{group.description}</p>
+                    </div>
+                    <span className="badge">{group.actionIds.length} actions</span>
+                  </div>
+                  <div className="quick-action-grid">
+                    {group.actionIds.map((actionId) => {
+                      const action = dashboardActions.find((item) => item.id === actionId);
+                      if (!action) {
+                        return null;
+                      }
+                      return (
+                        <button
+                          key={action.id}
+                          className={`quick-action${action.tone === "primary" ? " is-primary" : ""}`}
+                          onClick={action.onClick}
+                          disabled={action.disabled}
+                        >
+                          <span className="quick-action-title">
+                            <span>{action.title}</span>
+                            {action.hint && <span className="quick-action-hint">{action.hint}</span>}
+                          </span>
+                          <span className="muted">{action.description}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               ))}
             </div>
           </section>
 
-          <section className="panel card">
+          <section className="panel card dashboard-connection">
             <div className="card-header">
-              <h2>Connection</h2>
-              <span className="muted">{hasDevices ? "Online" : "Offline"}</span>
+              <div>
+                <h2>Connection Health</h2>
+                <p className="muted">ADB, tasks, and scrcpy readiness.</p>
+              </div>
+              <span className={`status-pill ${adbInfo?.available ? "ok" : "warn"}`}>
+                {adbInfo == null ? "Checking..." : adbInfo.available ? "Online" : "Offline"}
+              </span>
             </div>
-            <div className="status-list">
+            <div className="status-list status-list-hero">
               <div>
                 <span className="muted">ADB Status</span>
                 <strong>
@@ -4422,15 +4684,22 @@ function App() {
             )}
           </section>
 
-          <section className="panel card">
+          <section className="panel card dashboard-recents">
             <div className="card-header">
-              <h2>Recent Apps</h2>
-              <span className="muted">Quick access</span>
+              <div>
+                <h2>Recent Apps</h2>
+                <p className="muted">Quick access to recently loaded packages.</p>
+              </div>
+              <span className="badge">Quick access</span>
             </div>
             {apps.length === 0 ? (
               <div className="empty-inline">
                 <p className="muted">No app list loaded yet.</p>
-                <button className="ghost" onClick={handleLoadApps} disabled={busy || selectedSerials.length !== 1}>
+                <button
+                  className="ghost"
+                  onClick={handleLoadApps}
+                  disabled={busy || selectedSerials.length !== 1}
+                >
                   Load Apps
                 </button>
               </div>
@@ -4468,6 +4737,15 @@ function App() {
     "logcat-clear": "Clear Logcat",
     mirror: "Live Mirror",
   };
+  const scrcpyVersionLabel = scrcpyInfo?.version_output?.split("\n")[0] ?? "";
+  const scrcpyAudioHint =
+    scrcpyInfo?.major_version == null
+      ? ""
+      : scrcpyInfo.major_version >= 3
+        ? "Audio is enabled by default in scrcpy v3+. Disable it to mute."
+        : scrcpyInfo.major_version >= 2
+          ? "Audio toggle uses scrcpy v2 flags."
+          : "Audio capture is not supported in this scrcpy version.";
 
   const actionNeedsConfig =
     actionForm.actionId === "screenshot" ||
@@ -5970,16 +6248,13 @@ function App() {
                           </svg>
                         </button>
 	                      )}
-	                      <div className="logcat-output" ref={logcatOutputRef}>
-	                        {logcatFiltered.lines.map((entry) => (
-	                          <MemoLogcatLineRow
-	                            key={entry.id}
-	                            entry={entry}
-	                            searchPattern={logcatSearchPattern}
-	                          />
-	                        ))}
-	                      </div>
-	                    </div>
+                      <LogcatOutput
+                        entries={logcatFiltered.lines}
+                        searchPattern={logcatSearchPattern}
+                        autoScroll={logcatAutoScroll}
+                        outputRef={logcatOutputRef}
+                      />
+                    </div>
 	                  </section>
 	                </div>
               }
@@ -7018,7 +7293,7 @@ function App() {
 
       {actionForm.isOpen && actionForm.actionId && (
         <div className="modal-backdrop" onClick={closeActionForm}>
-          <div className="modal modal-wide" onClick={(event) => event.stopPropagation()}>
+          <div className="modal modal-wide action-modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <div>
                 <h3>{actionTitleMap[actionForm.actionId]}</h3>
@@ -7028,7 +7303,7 @@ function App() {
                 Close
               </button>
             </div>
-            <p className="muted">Targets: {selectedSummaryLabel}</p>
+            <p className="muted action-targets">Targets: {selectedSummaryLabel}</p>
             {actionForm.errors.length > 0 && (
               <div className="inline-alert error">
                 {actionForm.errors.map((error) => (
@@ -7280,124 +7555,146 @@ function App() {
             )}
 
             {actionForm.actionId === "mirror" && (
-              <div className="stack">
+              <div className="stack mirror-stack">
                 {!scrcpyInfo?.available && (
                   <div className="inline-alert error">
                     scrcpy is not available. Install it to enable live mirror.
                   </div>
                 )}
+                {(scrcpyVersionLabel || scrcpyAudioHint) && (
+                  <div className="mirror-meta">
+                    {scrcpyVersionLabel && <span className="badge badge-accent">{scrcpyVersionLabel}</span>}
+                    {scrcpyAudioHint && <span className="muted">{scrcpyAudioHint}</span>}
+                  </div>
+                )}
                 {actionDraftConfig ? (
-                  <div className="grid-two">
-                    <label>
-                      Bit rate
-                      <input
-                        value={actionDraftConfig.scrcpy.bitrate}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            scrcpy: {
-                              ...current.scrcpy,
-                              bitrate: event.target.value,
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      Max size
-                      <input
-                        type="number"
-                        value={actionDraftConfig.scrcpy.max_size}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            scrcpy: {
-                              ...current.scrcpy,
-                              max_size: Number(event.target.value),
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={actionDraftConfig.scrcpy.stay_awake}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            scrcpy: {
-                              ...current.scrcpy,
-                              stay_awake: event.target.checked,
-                            },
-                          }))
-                        }
-                      />
-                      Stay awake
-                    </label>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={actionDraftConfig.scrcpy.turn_screen_off}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            scrcpy: {
-                              ...current.scrcpy,
-                              turn_screen_off: event.target.checked,
-                            },
-                          }))
-                        }
-                      />
-                      Turn screen off
-                    </label>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={actionDraftConfig.scrcpy.disable_screensaver}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            scrcpy: {
-                              ...current.scrcpy,
-                              disable_screensaver: event.target.checked,
-                            },
-                          }))
-                        }
-                      />
-                      Disable screensaver
-                    </label>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={actionDraftConfig.scrcpy.enable_audio_playback}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            scrcpy: {
-                              ...current.scrcpy,
-                              enable_audio_playback: event.target.checked,
-                            },
-                          }))
-                        }
-                      />
-                      Enable audio
-                    </label>
-                    <label>
-                      Extra args
-                      <input
-                        value={actionDraftConfig.scrcpy.extra_args}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            scrcpy: {
-                              ...current.scrcpy,
-                              extra_args: event.target.value,
-                            },
-                          }))
-                        }
-                      />
-                    </label>
+                  <div className="mirror-grid">
+                    <section className="mirror-section">
+                      <div className="mirror-section-header">
+                        <h4>Quality & Limits</h4>
+                        <p className="muted">Tune resolution and bitrate for stability.</p>
+                      </div>
+                      <div className="grid-two">
+                        <label>
+                          Bit rate
+                          <input
+                            value={actionDraftConfig.scrcpy.bitrate}
+                            onChange={(event) =>
+                              updateDraftConfig((current) => ({
+                                ...current,
+                                scrcpy: {
+                                  ...current.scrcpy,
+                                  bitrate: event.target.value,
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          Max size
+                          <input
+                            type="number"
+                            value={actionDraftConfig.scrcpy.max_size}
+                            onChange={(event) =>
+                              updateDraftConfig((current) => ({
+                                ...current,
+                                scrcpy: {
+                                  ...current.scrcpy,
+                                  max_size: Number(event.target.value),
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="full-span">
+                          Extra args
+                          <input
+                            value={actionDraftConfig.scrcpy.extra_args}
+                            onChange={(event) =>
+                              updateDraftConfig((current) => ({
+                                ...current,
+                                scrcpy: {
+                                  ...current.scrcpy,
+                                  extra_args: event.target.value,
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                      </div>
+                    </section>
+                    <section className="mirror-section">
+                      <div className="mirror-section-header">
+                        <h4>Behavior</h4>
+                        <p className="muted">Device power and display controls.</p>
+                      </div>
+                      <div className="toggle-grid">
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={actionDraftConfig.scrcpy.stay_awake}
+                            onChange={(event) =>
+                              updateDraftConfig((current) => ({
+                                ...current,
+                                scrcpy: {
+                                  ...current.scrcpy,
+                                  stay_awake: event.target.checked,
+                                },
+                              }))
+                            }
+                          />
+                          Stay awake
+                        </label>
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={actionDraftConfig.scrcpy.turn_screen_off}
+                            onChange={(event) =>
+                              updateDraftConfig((current) => ({
+                                ...current,
+                                scrcpy: {
+                                  ...current.scrcpy,
+                                  turn_screen_off: event.target.checked,
+                                },
+                              }))
+                            }
+                          />
+                          Turn screen off
+                        </label>
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={actionDraftConfig.scrcpy.disable_screensaver}
+                            onChange={(event) =>
+                              updateDraftConfig((current) => ({
+                                ...current,
+                                scrcpy: {
+                                  ...current.scrcpy,
+                                  disable_screensaver: event.target.checked,
+                                },
+                              }))
+                            }
+                          />
+                          Disable screensaver
+                        </label>
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={actionDraftConfig.scrcpy.enable_audio_playback}
+                            onChange={(event) =>
+                              updateDraftConfig((current) => ({
+                                ...current,
+                                scrcpy: {
+                                  ...current.scrcpy,
+                                  enable_audio_playback: event.target.checked,
+                                },
+                              }))
+                            }
+                          />
+                          Enable audio
+                        </label>
+                      </div>
+                    </section>
                   </div>
                 ) : (
                   <p className="muted">Loading scrcpy settings...</p>

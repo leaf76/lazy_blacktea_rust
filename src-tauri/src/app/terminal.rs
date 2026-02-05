@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 pub const TERMINAL_EVENT_NAME: &str = "terminal-event";
@@ -63,9 +63,14 @@ impl TerminalSession {
         let trace_stderr = trace_id.clone();
         let trace_watch = trace_id.clone();
 
+        let batch_delay = Duration::from_millis(50);
+        let batch_max_len = 16_384usize;
+
         let emitter_stdout = Arc::clone(&emitter);
         std::thread::spawn(move || {
             let mut temp = [0u8; 4096];
+            let mut pending = String::new();
+            let mut last_emit = Instant::now();
             loop {
                 if stop_stdout.load(Ordering::Relaxed) {
                     break;
@@ -78,13 +83,29 @@ impl TerminalSession {
                         break;
                     }
                 };
-                let chunk = String::from_utf8_lossy(&temp[..read_count]).to_string();
+                let chunk = String::from_utf8_lossy(&temp[..read_count]);
+                pending.push_str(&chunk);
+                if pending.len() >= batch_max_len || last_emit.elapsed() >= batch_delay {
+                    let flush = std::mem::take(&mut pending);
+                    (emitter_stdout)(TerminalEvent {
+                        serial: serial_stdout.clone(),
+                        session_id: session_stdout.clone(),
+                        event: "output".to_string(),
+                        stream: Some("stdout".to_string()),
+                        chunk: Some(flush),
+                        exit_code: None,
+                        trace_id: trace_stdout.clone(),
+                    });
+                    last_emit = Instant::now();
+                }
+            }
+            if !pending.is_empty() {
                 (emitter_stdout)(TerminalEvent {
                     serial: serial_stdout.clone(),
                     session_id: session_stdout.clone(),
                     event: "output".to_string(),
                     stream: Some("stdout".to_string()),
-                    chunk: Some(chunk),
+                    chunk: Some(pending),
                     exit_code: None,
                     trace_id: trace_stdout.clone(),
                 });
@@ -94,6 +115,8 @@ impl TerminalSession {
         let emitter_stderr = Arc::clone(&emitter);
         std::thread::spawn(move || {
             let mut temp = [0u8; 4096];
+            let mut pending = String::new();
+            let mut last_emit = Instant::now();
             loop {
                 if stop_stderr.load(Ordering::Relaxed) {
                     break;
@@ -106,13 +129,29 @@ impl TerminalSession {
                         break;
                     }
                 };
-                let chunk = String::from_utf8_lossy(&temp[..read_count]).to_string();
+                let chunk = String::from_utf8_lossy(&temp[..read_count]);
+                pending.push_str(&chunk);
+                if pending.len() >= batch_max_len || last_emit.elapsed() >= batch_delay {
+                    let flush = std::mem::take(&mut pending);
+                    (emitter_stderr)(TerminalEvent {
+                        serial: serial_stderr.clone(),
+                        session_id: session_stderr.clone(),
+                        event: "output".to_string(),
+                        stream: Some("stderr".to_string()),
+                        chunk: Some(flush),
+                        exit_code: None,
+                        trace_id: trace_stderr.clone(),
+                    });
+                    last_emit = Instant::now();
+                }
+            }
+            if !pending.is_empty() {
                 (emitter_stderr)(TerminalEvent {
                     serial: serial_stderr.clone(),
                     session_id: session_stderr.clone(),
                     event: "output".to_string(),
                     stream: Some("stderr".to_string()),
-                    chunk: Some(chunk),
+                    chunk: Some(pending),
                     exit_code: None,
                     trace_id: trace_stderr.clone(),
                 });

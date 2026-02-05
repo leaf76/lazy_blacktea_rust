@@ -1,5 +1,3 @@
-use regex::Regex;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BugreportzPayload {
     Progress { percent: i32 },
@@ -23,17 +21,17 @@ pub fn parse_bugreportz_line(line: &str) -> BugreportzPayload {
                 raw: line.to_string(),
             };
         }
-        let fraction_re = Regex::new(r"^(\d+)\s*/\s*(\d+)$").unwrap();
-        if let Some(caps) = fraction_re.captures(payload) {
-            let num = caps[1].parse::<i32>().unwrap_or(0);
-            let den = caps[2].parse::<i32>().unwrap_or(1).max(1);
+        if let Some((num_raw, den_raw)) = payload.split_once('/') {
+            let num = num_raw.trim().parse::<i32>().unwrap_or(0);
+            let den = den_raw.trim().parse::<i32>().unwrap_or(1).max(1);
             let percent = ((100.0 * num as f32 / den as f32).round() as i32).clamp(0, 100);
             return BugreportzPayload::Progress { percent };
         }
-        let pct_re = Regex::new(r"^(\d+)\s*%?$").unwrap();
-        if let Some(caps) = pct_re.captures(payload) {
-            let percent = caps[1].parse::<i32>().unwrap_or(0).clamp(0, 100);
-            return BugreportzPayload::Progress { percent };
+        let trimmed = payload.trim_end_matches('%').trim();
+        if let Ok(percent) = trimmed.parse::<i32>() {
+            return BugreportzPayload::Progress {
+                percent: percent.clamp(0, 100),
+            };
         }
         return BugreportzPayload::Unknown {
             raw: line.to_string(),

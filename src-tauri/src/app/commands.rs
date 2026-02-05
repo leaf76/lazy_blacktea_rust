@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use mime_guess::MimeGuess;
@@ -50,7 +50,10 @@ use crate::app::ui_xml::render_device_ui_html;
 #[derive(Clone, serde::Serialize)]
 pub struct LogcatEvent {
     pub serial: String,
-    pub line: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
     pub trace_id: String,
 }
 
@@ -2602,12 +2605,16 @@ pub fn start_logcat(
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_stdout = Arc::clone(&stop_flag);
     let stop_flag_stderr = Arc::clone(&stop_flag);
+    let batch_limit = 50usize;
+    let batch_delay = Duration::from_millis(60);
     let app_stdout = app.clone();
     let serial_stdout = serial.clone();
     let trace_stdout = trace_id.clone();
 
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let mut pending: Vec<String> = Vec::new();
+        let mut last_emit = Instant::now();
         for line_result in reader.lines() {
             if stop_flag_stdout.load(Ordering::Relaxed) {
                 break;
@@ -2619,11 +2626,30 @@ pub fn start_logcat(
                     break;
                 }
             };
+            pending.push(line);
+            if pending.len() >= batch_limit || last_emit.elapsed() >= batch_delay {
+                let batch = std::mem::take(&mut pending);
+                if let Err(err) = app_stdout.emit(
+                    "logcat-line",
+                    LogcatEvent {
+                        serial: serial_stdout.clone(),
+                        line: None,
+                        lines: batch,
+                        trace_id: trace_stdout.clone(),
+                    },
+                ) {
+                    warn!(trace_id = %trace_stdout, error = %err, "failed to emit logcat line");
+                }
+                last_emit = Instant::now();
+            }
+        }
+        if !pending.is_empty() {
             if let Err(err) = app_stdout.emit(
                 "logcat-line",
                 LogcatEvent {
                     serial: serial_stdout.clone(),
-                    line,
+                    line: None,
+                    lines: pending,
                     trace_id: trace_stdout.clone(),
                 },
             ) {
@@ -2637,6 +2663,8 @@ pub fn start_logcat(
     let trace_stderr = trace_id.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
+        let mut pending: Vec<String> = Vec::new();
+        let mut last_emit = Instant::now();
         for line_result in reader.lines() {
             if stop_flag_stderr.load(Ordering::Relaxed) {
                 break;
@@ -2648,11 +2676,30 @@ pub fn start_logcat(
                     break;
                 }
             };
+            pending.push(format!("STDERR: {line}"));
+            if pending.len() >= batch_limit || last_emit.elapsed() >= batch_delay {
+                let batch = std::mem::take(&mut pending);
+                if let Err(err) = app_stderr.emit(
+                    "logcat-line",
+                    LogcatEvent {
+                        serial: serial_stderr.clone(),
+                        line: None,
+                        lines: batch,
+                        trace_id: trace_stderr.clone(),
+                    },
+                ) {
+                    warn!(trace_id = %trace_stderr, error = %err, "failed to emit logcat stderr");
+                }
+                last_emit = Instant::now();
+            }
+        }
+        if !pending.is_empty() {
             if let Err(err) = app_stderr.emit(
                 "logcat-line",
                 LogcatEvent {
                     serial: serial_stderr.clone(),
-                    line: format!("STDERR: {line}"),
+                    line: None,
+                    lines: pending,
                     trace_id: trace_stderr.clone(),
                 },
             ) {

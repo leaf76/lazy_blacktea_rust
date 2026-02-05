@@ -83,7 +83,8 @@ export type CommandResponse<T> = {
 
 export type LogcatEvent = {
   serial: string;
-  line: string;
+  line?: string;
+  lines?: string[];
   trace_id: string;
 };
 
