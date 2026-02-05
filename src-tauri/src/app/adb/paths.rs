@@ -42,6 +42,23 @@ pub fn device_parent_dir(device_path: &str) -> String {
     }
 }
 
+pub fn sanitize_filename_component(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "device".to_string();
+    }
+    trimmed
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +86,17 @@ mod tests {
         assert_eq!(device_parent_dir("/"), "/");
         assert_eq!(device_parent_dir(""), "/");
     }
-}
 
+    #[test]
+    fn sanitize_filename_component_replaces_invalid_chars() {
+        assert_eq!(sanitize_filename_component("emulator-5554"), "emulator-5554");
+        assert_eq!(sanitize_filename_component("192.168.0.1:5555"), "192.168.0.1_5555");
+        assert_eq!(sanitize_filename_component("pixel 7 pro"), "pixel_7_pro");
+    }
+
+    #[test]
+    fn sanitize_filename_component_handles_empty() {
+        assert_eq!(sanitize_filename_component(""), "device");
+        assert_eq!(sanitize_filename_component("   "), "device");
+    }
+}

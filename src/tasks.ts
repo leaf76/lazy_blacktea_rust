@@ -2,6 +2,7 @@ export type TaskKind =
   | "shell"
   | "apk_install"
   | "bugreport"
+  | "screenshot"
   | "screen_record_start"
   | "screen_record_stop"
   | "file_pull"
