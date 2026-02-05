@@ -1,0 +1,246 @@
+{
+  "version": "1.0",
+  "mode": "hybrid",
+  "assumptions": [
+    "Users frequently switch between single-device focus and multi-device operations.",
+    "The 'Primary Device' is the default target for all operations unless specific multi-device actions are triggered.",
+    "Screen real estate in the sidebar is valuable and better reserved for navigation depth.",
+    "Top bar has available horizontal space to accommodate a wider device context indicator."
+  ],
+  "open_questions": [
+    "Do users need to see the live status (e.g., 'offline', 'booting') of *all* selected devices simultaneously without interaction?",
+    "What is the maximum number of devices a typical user connects at once? (affects list virtualization)",
+    "Should single-device pages (e.g., Logcat) forcibly disable the multi-select UI or just visually indicate they are using the Primary device only?"
+  ],
+  "ux_goals": {
+    "primary_goals": [
+      "Elevate Device Selection from a secondary sidebar widget to a primary global context.",
+      "Decouple Navigation (Sidebar) from Context (Top Bar) to reduce visual clutter.",
+      "Make the distinction between 'Primary Device' and 'Selected Group' intuitive."
+    ],
+    "success_metrics": [
+      "Reduced time-to-action for multi-device reboots.",
+      "Zero user errors attempting multi-device actions on single-device pages.",
+      "Increased click-through rate on the Device Context indicator compared to the old bottom-panel."
+    ]
+  },
+  "information_architecture": {
+    "sitemap": [
+      "Global Context (Top Bar)",
+      "Sidebar Navigation",
+      "Main Content Area"
+    ],
+    "navigation_rules": [
+      "Sidebar contains only application routes (Dashboard, File Explorer, etc.).",
+      "Top Bar contains global filters (Device Selection) and global actions (Settings, Theme).",
+      "When on a Single-Device Page, the Multi-Select UI is visually dampened or shows a tooltip explaining the restriction."
+    ]
+  },
+  "user_flows": [
+    {
+      "name": "Select Multiple Devices for Reboot",
+      "steps": [
+        "User clicks 'Device Context' pill in Top Bar.",
+        "Large Popover opens showing all connected devices.",
+        "User toggles checkboxes for target devices.",
+        "Popover summary updates to '3 Devices Selected'.",
+        "User clicks 'Reboot' global action.",
+        "System confirms reboot for 3 devices."
+      ]
+    },
+    {
+      "name": "Switch Primary Device",
+      "steps": [
+        "User opens Device Context Popover.",
+        "User clicks the star icon or row body of a non-primary device.",
+        "System updates Primary Device.",
+        "UI refreshes data for the new Primary Device."
+      ]
+    }
+  ],
+  "screens": [
+    {
+      "id": "global_layout",
+      "name": "App Shell",
+      "layout_notes": [
+        "Remove 'Devices' panel from Sidebar Footer.",
+        "Insert 'Device Context Selector' into Top Bar (Left aligned, next to brand or replacing brand context).",
+        "Ensure Sidebar Footer only contains 'Settings' or 'About'."
+      ],
+      "states": {
+        "empty": [
+          "Top Bar shows 'No Devices Detected'",
+          "Sidebar disable specific nav items"
+        ],
+        "loading": [
+          "Device Context shows spinner"
+        ],
+        "error": [
+          "Device Context shows warning icon (ADB disconnected)"
+        ],
+        "success": [
+          "Device Context shows 'Pixel 7 + 2 others'"
+        ]
+      }
+    }
+  ],
+  "issues": [
+    {
+      "id": "ISS-001",
+      "title": "Device Panel Low Discovery",
+      "severity": "high",
+      "evidence": "Current panel is squeezed in the bottom-left corner, visually competing with footer actions and falling below the 'fold' of attention.",
+      "recommendation": "Relocate device selection to the Top Bar as a 'Global Context' component.",
+      "acceptance_criteria": [
+        "Device selection is removed from sidebar.",
+        "Top bar contains a prominent interactive area for devices."
+      ]
+    },
+    {
+      "id": "ISS-002",
+      "title": "Cramped Multi-Select List",
+      "severity": "medium",
+      "evidence": "Sidebar width restricts the display of long device names or status details, leading to truncation or horizontal scrolling.",
+      "recommendation": "Use a Popover or Modal for selection which allows wider rows and more metadata (battery, status).",
+      "acceptance_criteria": [
+        "Selection interface accommodates device names up to 30 chars without truncation.",
+        "Status icons are clearly visible."
+      ]
+    }
+  ],
+  "backlog": [
+    {
+      "id": "TASK-101",
+      "title": "Refactor TopBar Layout",
+      "type": "ui",
+      "impact": 5,
+      "effort": 3,
+      "risk": 2,
+      "dependencies": [],
+      "acceptance_criteria": [
+        "Create placeholder for DeviceContextButton.",
+        "Ensure responsive layout works with window resizing."
+      ]
+    },
+    {
+      "id": "TASK-102",
+      "title": "Create DeviceSelectorPopover Component",
+      "type": "ui",
+      "impact": 4,
+      "effort": 4,
+      "risk": 1,
+      "dependencies": [
+        "TASK-101"
+      ],
+      "acceptance_criteria": [
+        "Component renders a list of connected devices.",
+        "Supports 'Primary' radio selection.",
+        "Supports 'Include' checkbox selection.",
+        "Updates Global State on change."
+      ]
+    },
+    {
+      "id": "TASK-103",
+      "title": "Implement Single-Device Page Logic",
+      "type": "ux",
+      "impact": 3,
+      "effort": 2,
+      "risk": 1,
+      "dependencies": [
+        "TASK-102"
+      ],
+      "acceptance_criteria": [
+        "Define list of single-device routes.",
+        "Visual indicator in Top Bar when on these pages (e.g., 'Viewing Primary Device Only')."
+      ]
+    }
+  ],
+  "components": [
+    {
+      "name": "DeviceContextButton",
+      "purpose": "Trigger for opening the device manager; displays current summary state.",
+      "variants": [
+        "default",
+        "warning (no devices)",
+        "multi-active (primary + others)"
+      ],
+      "states": [
+        "idle",
+        "hover",
+        "active",
+        "disabled"
+      ],
+      "a11y_notes": [
+        "Aria-label must announce 'Device Manager, Pixel 7 and 2 others selected'."
+      ]
+    },
+    {
+      "name": "DeviceListRow",
+      "purpose": "Individual item in the selection popover.",
+      "variants": [
+        "compact",
+        "detailed"
+      ],
+      "states": [
+        "selected",
+        "primary",
+        "offline"
+      ],
+      "a11y_notes": [
+        "Keyboard navigable via Arrow keys."
+      ]
+    }
+  ],
+  "design_tokens": {
+    "css_variables": ":root {\n  --dt-popover-bg: #1e1e1e;\n  --dt-popover-border: #333333;\n  --dt-device-row-hover: rgba(255, 255, 255, 0.05);\n  --dt-status-online: #4caf50;\n  --dt-status-offline: #9e9e9e;\n  --dt-status-unauthorized: #ff9800;\n}",
+    "notes": [
+      "Use existing dark mode palette.",
+      "Ensure popover z-index is higher than main content but lower than global toasts."
+    ]
+  },
+  "microcopy": {
+    "tone": "Efficient, technical, precise.",
+    "messages": [
+      {
+        "key": "device_summary_single",
+        "text": "{deviceName}"
+      },
+      {
+        "key": "device_summary_multi",
+        "text": "{deviceName} + {count} others"
+      },
+      {
+        "key": "device_selector_empty",
+        "text": "No devices connected"
+      },
+      {
+        "key": "single_page_warning",
+        "text": "This tool only works on the primary device."
+      }
+    ]
+  },
+  "rollout": {
+    "phases": [
+      "Phase 1: Move UI to Top Bar (Feature Parity).",
+      "Phase 2: Enhanced Popover with Battery/Status details.",
+      "Phase 3: Drag-and-drop to reorder favorites (optional)."
+    ],
+    "feature_flags": [
+      "enable_new_device_selector"
+    ],
+    "monitoring": [
+      "Track usage of multi-device actions."
+    ]
+  },
+  "experiments": [
+    {
+      "hypothesis": "Moving the selector to the top bar will increase the discovery of multi-device features.",
+      "metric": "clicks_on_device_selector",
+      "success_criteria": "20% increase in multi-device interactions.",
+      "variants": [
+        "Control: Sidebar Bottom",
+        "Variant A: Top Bar Pill"
+      ]
+    }
+  ]
+}

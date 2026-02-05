@@ -1,0 +1,27 @@
+[
+  {
+    "priority": "P0",
+    "task": "Implement Popover positioning logic (Center align + Viewport collision detection)",
+    "effort": "Medium"
+  },
+  {
+    "priority": "P0",
+    "task": "Refactor Device List to support Sections (Recent, Groups, Ungrouped)",
+    "effort": "High"
+  },
+  {
+    "priority": "P1",
+    "task": "Implement 'Recent' logic based on task history",
+    "effort": "Medium"
+  },
+  {
+    "priority": "P1",
+    "task": "Update DeviceRow component for clear Primary/Selected/Focus states",
+    "effort": "Medium"
+  },
+  {
+    "priority": "P2",
+    "task": "Add specific keyboard event handlers (Arrow navigation, Esc to close)",
+    "effort": "Medium"
+  }
+]

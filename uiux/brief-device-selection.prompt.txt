@@ -1,0 +1,97 @@
+You are a senior UI/UX designer and a frontend "visual engineer".
+Audit and optimize an existing UI based on the input below.
+
+Output MUST be a single JSON object (no Markdown, no code fences). Use double quotes for all JSON strings.
+Follow the output contract exactly (field names, casing, and required keys). For severities, use only: low, medium, high.
+Do not include extra top-level keys not defined in the contract. Include assumptions and open_questions arrays even if empty.
+Include issues + backlog + components + design_tokens + microcopy + rollout + experiments.
+
+Output contract:
+# Output Contract (v1)
+
+Gemini must return **one JSON object** that follows this contract (no Markdown code fences).
+
+## Top-level keys
+
+- `version` (string) - e.g. `"1.0"`
+- `mode` (string) - `"plan" | "optimize" | "hybrid"`
+- `assumptions` (string[]) - explicit assumptions
+- `open_questions` (string[]) - what is missing to be confident
+
+## Planning keys (for `plan` / `hybrid`)
+
+- `ux_goals` (object)
+  - `primary_goals` (string[])
+  - `success_metrics` (string[])
+- `information_architecture` (object)
+  - `sitemap` (string[]) - ordered pages/screens
+  - `navigation_rules` (string[])
+- `user_flows` (array)
+  - item: `{ "name": string, "steps": string[] }`
+- `screens` (array)
+  - item: `{ "id": string, "name": string, "layout_notes": string[], "states": { "empty": string[], "loading": string[], "error": string[], "success": string[] } }`
+
+## Optimization keys (for `optimize` / `hybrid`)
+
+- `issues` (array)
+  - item: `{ "id": string, "title": string, "severity": "low"|"medium"|"high", "evidence": string, "recommendation": string, "acceptance_criteria": string[] }`
+- `backlog` (array)
+  - item: `{ "id": string, "title": string, "type": "ux"|"ui"|"a11y"|"bug"|"perf", "impact": 1|2|3|4|5, "effort": 1|2|3|4|5, "risk": 1|2|3|4|5, "dependencies": string[], "acceptance_criteria": string[] }`
+
+## Engineering-ready output
+
+- `components` (array)
+  - item: `{ "name": string, "purpose": string, "variants": string[], "states": string[], "a11y_notes": string[] }`
+- `design_tokens` (object)
+  - `css_variables` (string) - CSS variables grouped by category (colors/typography/spacing/radius/shadow)
+  - `notes` (string[])
+- `microcopy` (object)
+  - `tone` (string)
+  - `messages` (array) - `{ "key": string, "text": string }`
+
+## Rollout / experiments (optional but recommended)
+
+- `rollout` (object)
+  - `phases` (string[])
+  - `feature_flags` (string[])
+  - `monitoring` (string[])
+- `experiments` (array)
+  - item: `{ "hypothesis": string, "metric": string, "success_criteria": string, "variants": string[] }`
+
+
+
+Input:
+Project: Lazy Blacktea (Tauri v2 + React desktop app for Android device automation via ADB).
+
+Objective:
+Improve the global device selection UX. The current multi-select panel (checkbox list) is squeezed at the bottom-left sidebar and hard to notice. The user wants a layout where the multi-select affordance is obvious at a glance and feels spacious.
+
+Context & Constraints:
+- Desktop app with a left sidebar (nav links), a top bar (primary device selector + global actions), and main content pages.
+- Multi-device actions should work for Screenshot, Reboot, Bugreport.
+- Some pages must be single-device only (File Explorer, UI Inspector, Logcat, Bluetooth Monitor, App Manager).
+- Primary device concept still required for single-device pages.
+- Keep the overall visual style (dark, compact, card-based).
+- Avoid adding heavy new dependencies or complex IA changes; prefer UI layout shifts and clear hierarchy.
+
+Current Layout Summary (from screenshot):
+- Left sidebar includes nav groups and footer buttons.
+- A small "Devices" panel is pinned at the bottom left with "Select all", "Clear", and a single device row.
+- The panel competes with footer buttons and appears cramped.
+- Top bar shows primary device selector + "Manage".
+- Bugreport page shows actions but doesn't clearly present multi-device selection.
+
+Problems Observed:
+- Multi-select area is visually buried (bottom-left) and easy to miss.
+- Competes with sidebar footer; poor visual priority.
+- No clear separation between navigation and device selection context.
+
+Goals:
+- Make multi-select device control obvious and discoverable.
+- Reduce crowding in the sidebar.
+- Preserve fast access to navigation and global actions.
+- Clearly communicate single-device-only pages.
+
+Deliverable:
+Provide an optimization plan with issues, backlog, component recommendations, and token suggestions focused on device selection placement, hierarchy, and clarity.
+

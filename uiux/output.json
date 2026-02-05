@@ -1,314 +1,482 @@
 {
-  "version": "1.1.0",
-  "mode": "redesign_comprehensive",
+  "version": "1.0.0",
+  "mode": "optimize",
   "assumptions": [
-    "Users are technical (QA/engineers) but prefer clear UI over CLI memorization.",
-    "Multiple devices can be connected; one selected device drives most views.",
-    "Core features remain: device discovery, operations, logcat, file browsing, UI hierarchy."
+    "The \"Device Context\" selector is for discovering available ADB devices, and \"Active Sessions\" are devices the user has explicitly chosen to connect and monitor.",
+    "The primary interaction for sending commands is via the input line at the bottom of each terminal panel, with broadcasting as a secondary, global action.",
+    "The existing visual language is dark, compact, and uses subtle borders.",
+    "The target audience is technically proficient and values efficiency.",
+    "Sessions are 'pinned' by default when a device is connected and actively managed through the 'Active Sessions' list."
   ],
-  "open_questions": [],
-  "decisions": [
-    "Wireless ADB pairing is required (QR or pairing code).",
-    "No mandatory logcat presets or tag conventions.",
-    "UI Inspector includes live mirror mode plus static capture fallback."
+  "open_questions": [
+    "What is the exact relationship between the \"Device Context\" selector and the \"Active Sessions\" list? Are they intended to be different views or complementary?",
+    "How does the user *pin* a session to the \"Active Sessions\" list? Is it automatic upon connection, or a separate action?",
+    "What is the intended workflow for managing a large number of devices (e.g., >20)?",
+    "Are there specific keyboard shortcuts currently implemented or desired for session management and interaction?",
+    "What are the specific WCAG AA success criteria that are most relevant and challenging for this interface?"
   ],
-  "ux_goals": [
-    "Always show a clear next step and current device context.",
-    "Progressive disclosure for advanced commands.",
-    "Keyboard-first flows with visible focus states.",
-    "Reduce visual clutter with consistent grouping and spacing."
-  ],
-  "success_metrics": [
-    "First-time user completes connect + quick action in < 3 minutes.",
-    "Logcat and UI Inspector reachable within 10 seconds from home.",
-    "Actionable recovery guidance visible for common errors."
-  ],
+  "ux_goals": {
+    "primary_goals": [
+      "Streamline multi-device shell session management for technical users.",
+      "Enhance clarity and density in the display of active terminal sessions and their statuses.",
+      "Improve discoverability of session management actions and broadcasting capabilities.",
+      "Ensure robust accessibility for keyboard and screen reader users."
+    ],
+    "success_metrics": [
+      "Reduction in time to connect/disconnect multiple sessions.",
+      "Increased adoption of broadcast feature.",
+      "Positive user feedback on session management clarity and efficiency.",
+      "Passing automated accessibility checks (e.g., AXE-core)."
+    ]
+  },
   "information_architecture": {
-    "structure": "Persistent sidebar + top bar device context",
-    "global_elements": [
-      "Top Bar: Device selector, connection status, command palette",
-      "Sidebar: Dashboard, Actions, Logcat, Files, UI Inspector, Apps, Settings",
-      "Status indicators: ADB status, device authorization"
+    "sitemap": [
+      "Shell Commands"
     ],
     "navigation_rules": [
-      "If no device, show global empty state and disable device-specific modules.",
-      "Device selection is always visible and keyboard accessible.",
-      "Advanced actions live behind an explicit toggle or section."
+      "\"Shell Commands\" is a primary navigation item.",
+      "Within \"Shell Commands\", focus shifts between the session list and individual terminal panels.",
+      "Keyboard navigation should cycle through global toolbar, session list, broadcast input, and then terminal panels in order."
     ]
   },
   "user_flows": [
     {
-      "name": "Onboarding / First Run",
+      "name": "Connect & Broadcast to Multiple Devices",
       "steps": [
-        "App launch -> check ADB status.",
-        "If ADB missing: show install steps.",
-        "If no device: show connect steps (USB + wireless pairing).",
-        "When device connects: auto-select and land on Dashboard."
+        "Navigate to Shell Commands page.",
+        "Select multiple devices from the 'Available Devices' selector.",
+        "Click 'Connect Selected' to establish sessions.",
+        "Enter command in the global broadcast input.",
+        "Click 'Broadcast' to send command to all connected sessions.",
+        "Observe output in all terminal panels."
       ]
     },
     {
-      "name": "Run a Common Action",
+      "name": "Manage Pinned Sessions",
       "steps": [
-        "Select device in top bar.",
-        "Go to Actions.",
-        "Click a Quick Action tile (e.g., Screenshot).",
-        "Show result toast + output location."
+        "Connect to a device.",
+        "Observe session automatically added to 'Active Sessions' list.",
+        "Click 'Remove' action on a session in the list to unpin/disconnect.",
+        "Disconnect a session manually via its terminal panel.",
+        "Observe session remaining in 'Active Sessions' list.",
+        "Restart application.",
+        "Observe previously active sessions attempting to reconnect."
       ]
     },
     {
-      "name": "Stream Logs",
+      "name": "Interact with a Single Terminal Session",
       "steps": [
-        "Go to Logcat.",
-        "Stream auto-starts.",
-        "Filter by level or tag.",
-        "Pause/Resume/Clear via toolbar or shortcuts."
-      ]
-    },
-    {
-      "name": "Inspect UI Hierarchy",
-      "steps": [
-        "Go to UI Inspector.",
-        "Choose Static Capture or Live Mirror.",
-        "Capture screenshot + XML (static) or start mirror stream.",
-        "View screenshot/mirror + node tree + properties.",
-        "Hover/select element to sync between panes."
-      ]
-    },
-    {
-      "name": "Pair Device (Wireless)",
-      "steps": [
-        "Open Connect Device from empty state or top bar.",
-        "Start pairing (QR or pairing code).",
-        "Confirm device appears and is selectable."
+        "Navigate to Shell Commands page.",
+        "Click on a session in the 'Active Sessions' list to focus it.",
+        "Observe focus highlight on the terminal panel.",
+        "Type command in the terminal panel's input line.",
+        "Press Enter to send command.",
+        "Observe output.",
+        "Click 'Interrupt (Ctrl+C)' to interrupt the running command.",
+        "Click 'Clear Output' to clear terminal output."
       ]
     }
   ],
-  "screens": {
-    "dashboard": {
-      "title": "Dashboard",
-      "layout": "Card grid + status banner",
-      "sections": [
-        "Device status card (model, Android, battery, WiFi IP)",
-        "Quick Actions grid",
-        "Recent packages / recent log filters"
+  "screens": [
+    {
+      "id": "shell-commands-page",
+      "name": "Shell Commands Page",
+      "layout_notes": [
+        "Implement a two-column layout: Left sidebar for 'Active Sessions' list, right main area for 'Terminal Panels'.",
+        "Sidebar width: fixed (e.g., 300px) with a minimum.",
+        "Terminal panels should arrange horizontally and scroll if many sessions exceed available width.",
+        "Global toolbar (header) should be compact and sticky.",
+        "Active Sessions list items should be compact and scannable.",
+        "Terminal panel controls should be discoverable but not intrusive, placed in a dedicated control bar below the output.",
+        "Focus management: keyboard navigation cycles logically through global toolbar, session list, broadcast input, and then terminal panels.",
+        "Use visual indicators for status (e.g., colored borders/pills)."
       ],
       "states": {
-        "empty": "Connect a device to see status and actions.",
-        "loading": "Skeleton loaders on device stats.",
-        "error": "Device unauthorized. Check the device screen and allow debugging."
+        "empty": [
+          "No 'Available Devices' detected or listed.",
+          "No 'Active Sessions' are pinned.",
+          "Message: 'No devices found. Connect your Android device and ensure ADB is running.'",
+          "Optional: Button to 'Scan for Devices'."
+        ],
+        "loading": [
+          "Displaying 'Active Sessions' list while restoring persistent sessions.",
+          "Terminal panels showing 'Connecting...' state with a spinner/progress indicator.",
+          "Global toolbar may show 'Scanning for devices...'"
+        ],
+        "error": [
+          "Device disconnected or unauthorized: 'Unauthorized' or 'Device offline' status pill/message in session list and terminal panel.",
+          "ADB server not running: Global error message, 'Connect Selected' button disabled.",
+          "Connection failed: 'Connection failed' state for individual terminal panel."
+        ],
+        "success": [
+          "All active sessions listed with clear status (Connected, Disconnected, Error).",
+          "Terminal panels display output and input lines.",
+          "Global broadcast input is active.",
+          "'Available Devices' selector shows available devices."
+        ]
       }
-    },
-    "actions": {
-      "title": "Actions",
-      "layout": "Categorized tiles with advanced toggle",
-      "notes": "Show only common actions by default."
-    },
-    "logcat": {
-      "title": "Logcat",
-      "layout": "Sticky filter bar + virtualized list",
-      "features": [
-        "Level filters and tag presets",
-        "Pause/Resume/Clear",
-        "Keyboard shortcuts"
-      ]
-    },
-    "files": {
-      "title": "Files",
-      "layout": "Two-pane (Local | Device)",
-      "interactions": "Drag and drop to push/pull files; context menu for operations."
-    },
-    "ui_inspector": {
-      "title": "UI Inspector",
-      "layout": "Three-pane: screenshot | tree | properties",
-      "toolbar": "Capture, Refresh, Export, Live Mirror toggle",
-      "notes": "If mirror dependency is missing, show setup guidance and fall back to static capture."
-    },
-    "apps": {
-      "title": "Apps",
-      "layout": "Searchable list with action row",
-      "actions": "Launch, clear data, uninstall"
-    },
-    "settings": {
-      "title": "Settings",
-      "sections": "ADB path, wireless pairing, output locations, log options, shortcuts"
     }
-  },
+  ],
   "issues": [
     {
-      "severity": "High",
-      "problem": "No clear onboarding or starting point.",
-      "solution": "Add a device-first empty state with guided setup."
+      "id": "ISSUE-001",
+      "title": "Visual Clutter and Hierarchy",
+      "severity": "medium",
+      "evidence": "Observed UI problems mention 'global toolbar/header can still feel visually heavy' and 'Multi-device layout needs clear hierarchy: session management vs. terminal viewing.'",
+      "recommendation": "Implement a dedicated sidebar for session management and a main content area for terminal panels. Condense global toolbar.",
+      "acceptance_criteria": [
+        "Page is divided into distinct session management and terminal viewing areas.",
+        "Global toolbar is visually lighter and more compact."
+      ]
     },
     {
-      "severity": "High",
-      "problem": "Information hierarchy is unclear.",
-      "solution": "Persistent navigation and global device context."
+      "id": "ISSUE-002",
+      "title": "Session List Scanability",
+      "severity": "medium",
+      "evidence": "Observed UI problems state 'Active sessions list should support fast scanning: status, device name/model, and quick actions.'",
+      "recommendation": "Enhance session list items with clear status indicators (color-coded pills/borders), device model, and easily accessible actions.",
+      "acceptance_criteria": [
+        "Session list items clearly display device status (connected, disconnected, error).",
+        "Device name/model is visible.",
+        "Quick actions (Connect/Disconnect/Remove) are present and visually distinct."
+      ]
     },
     {
-      "severity": "Medium",
-      "problem": "Visual clutter from mixed tasks.",
-      "solution": "Dedicated screens and progressive disclosure."
+      "id": "ISSUE-003",
+      "title": "Terminal Panel Controls Discoverability",
+      "severity": "low",
+      "evidence": "Observed UI problems mention 'Terminal panels should maximize output visibility (data density), while keeping essential controls discoverable.'",
+      "recommendation": "Place terminal controls (Connect/Disconnect, Ctrl+C, Clear, Auto-scroll) in a dedicated, unobtrusive bar within the panel, possibly revealed on hover or persistently visible but compact.",
+      "acceptance_criteria": [
+        "Essential terminal controls are discoverable without cluttering the output area.",
+        "Controls remain accessible via keyboard."
+      ]
+    },
+    {
+      "id": "ISSUE-004",
+      "title": "Ambiguity between Device Selection and Active Sessions",
+      "severity": "medium",
+      "evidence": "Current UX description mentions 'Device Context' selector and 'Active Sessions' list, implying two separate but related concepts that may cause confusion.",
+      "recommendation": "Clarify the role of the 'Device Context' selector. If it's for discovering devices to *add* to active sessions, make this relationship explicit. Rename it to 'Available Devices'.",
+      "acceptance_criteria": [
+        "User understands how to discover devices and add them to active sessions.",
+        "The relationship between device discovery and active session management is clear.",
+        "The 'Device Context' selector is renamed to 'Available Devices'."
+      ]
     }
   ],
   "backlog": [
     {
-      "priority": "P0",
-      "item": "App Shell + Global Device Context",
-      "desc": "Sidebar navigation, top bar device selector, status, command palette entry."
+      "id": "BACKLOG-001",
+      "title": "Implement Hierarchical Layout (Sidebar/Main)",
+      "type": "ui",
+      "impact": 4,
+      "effort": 3,
+      "risk": 1,
+      "dependencies": [],
+      "acceptance_criteria": [
+        "Page is divided into a left sidebar for 'Active Sessions' and a right main area for 'Terminal Panels'.",
+        "Sidebar has a fixed width of 300px.",
+        "Terminal panels display horizontally with horizontal scrolling if many sessions exceed width."
+      ]
     },
     {
-      "priority": "P0",
-      "item": "Onboarding & Empty States",
-      "desc": "First-run guidance for ADB, device connection, and next steps."
+      "id": "BACKLOG-002",
+      "title": "Enhance Session List Item Design",
+      "type": "ui",
+      "impact": 4,
+      "effort": 2,
+      "risk": 1,
+      "dependencies": [
+        "BACKLOG-001"
+      ],
+      "acceptance_criteria": [
+        "Session list items include color-coded status pills (e.g., green for connected, orange for disconnected, red for error).",
+        "Device model is displayed below serial number.",
+        "Quick actions (Connect/Disconnect/Remove) are present and visually distinct."
+      ]
     },
     {
-      "priority": "P1",
-      "item": "Wireless ADB Pairing",
-      "desc": "Pairing flow for QR or pairing code with clear status feedback."
+      "id": "BACKLOG-003",
+      "title": "Optimize Terminal Panel Controls",
+      "type": "ui",
+      "impact": 3,
+      "effort": 2,
+      "risk": 1,
+      "dependencies": [
+        "BACKLOG-001"
+      ],
+      "acceptance_criteria": [
+        "A compact control bar is added to each terminal panel (below output).",
+        "Controls include: Connect/Disconnect, Interrupt (Ctrl+C), Clear Output, Auto-scroll toggle.",
+        "Controls are persistently visible in the control bar.",
+        "Keyboard shortcuts for controls are implemented and documented."
+      ]
     },
     {
-      "priority": "P1",
-      "item": "Dashboard Quick Actions",
-      "desc": "Grid of common actions + recent packages/log filters."
+      "id": "BACKLOG-004",
+      "title": "Clarify Device Discovery vs. Active Sessions UI",
+      "type": "ux",
+      "impact": 3,
+      "effort": 1,
+      "risk": 1,
+      "dependencies": [],
+      "acceptance_criteria": [
+        "The 'Device Context' selector is renamed to 'Available Devices'.",
+        "A clear action (e.g., 'Add to Sessions' button or drag-and-drop) is provided to move a discovered device from 'Available Devices' to the 'Active Sessions' list.",
+        "The process of establishing a new session is intuitive."
+      ]
     },
     {
-      "priority": "P1",
-      "item": "Actions Catalog",
-      "desc": "Categorized action list with advanced toggle and input validation."
+      "id": "BACKLOG-005",
+      "title": "Implement Keyboard Navigation Focus Order",
+      "type": "a11y",
+      "impact": 5,
+      "effort": 2,
+      "risk": 1,
+      "dependencies": [
+        "BACKLOG-001",
+        "BACKLOG-003"
+      ],
+      "acceptance_criteria": [
+        "Keyboard focus cycles logically: Global Toolbar -> Available Devices Selector -> Active Sessions List -> Broadcast Input -> Terminal Panels (in order).",
+        "Focus indicators are highly visible and follow platform conventions."
+      ]
     },
     {
-      "priority": "P1",
-      "item": "Logcat Viewer",
-      "desc": "Virtualized list, filters, pause/resume, and shortcuts."
-    },
-    {
-      "priority": "P1",
-      "item": "File Manager",
-      "desc": "Two-pane file browser with push/pull and context menu."
-    },
-    {
-      "priority": "P2",
-      "item": "UI Inspector",
-      "desc": "Screenshot canvas + node tree + properties panel."
-    },
-    {
-      "priority": "P2",
-      "item": "UI Inspector Live Mirror",
-      "desc": "Optional live mirror mode (scrcpy or equivalent) with static capture fallback."
-    },
-    {
-      "priority": "P2",
-      "item": "Apps Manager",
-      "desc": "Searchable package list with actions."
-    },
-    {
-      "priority": "P2",
-      "item": "Command Palette",
-      "desc": "Global search and action launcher (Cmd/Ctrl+K)."
-    },
-    {
-      "priority": "P3",
-      "item": "Theme + Accessibility Settings",
-      "desc": "Light/dark toggle, font scaling, shortcut reference."
+      "id": "BACKLOG-006",
+      "title": "Improve Terminal Data Density",
+      "type": "ui",
+      "impact": 3,
+      "effort": 2,
+      "risk": 1,
+      "dependencies": [
+        "BACKLOG-001"
+      ],
+      "acceptance_criteria": [
+        "Terminal output area uses minimal padding and line spacing.",
+        "Default font size is compact yet readable; consider adding user-adjustable font size.",
+        "Status and control elements within panels are compact."
+      ]
     }
   ],
-  "components": {
-    "atoms": [
-      "Button (Primary, Secondary, Ghost, Destructive)",
-      "IconButton",
-      "Badge",
-      "Input",
-      "Toggle",
-      "Checkbox",
-      "Divider",
-      "Tooltip",
-      "Skeleton"
-    ],
-    "molecules": [
-      "DeviceSelector",
-      "QuickActionTile",
-      "FilterChip",
-      "LogLine",
-      "FileRow",
-      "EmptyState",
-      "Toast/InlineAlert"
-    ],
-    "organisms": [
-      "SidebarNav",
-      "TopBar",
-      "LogFilterBar",
-      "FileBrowserPane",
-      "InspectorTree",
-      "PropertyTable"
+  "components": [
+    {
+      "name": "Global Toolbar",
+      "purpose": "Header for global actions and context.",
+      "variants": [
+        "Default",
+        "Compact"
+      ],
+      "states": [
+        "Default",
+        "Scanning Devices",
+        "Broadcast Active"
+      ],
+      "a11y_notes": [
+        "Ensure all interactive elements are keyboard focusable and have clear, descriptive labels (e.g., using `aria-label`).",
+        "Use ARIA attributes for status updates (e.g., `aria-live` for scanning status)."
+      ]
+    },
+    {
+      "name": "Available Devices Selector",
+      "purpose": "Allows users to discover and select available ADB devices to add to active sessions.",
+      "variants": [
+        "Multi-select enabled",
+        "Single-select"
+      ],
+      "states": [
+        "No devices found",
+        "Devices found",
+        "Loading devices"
+      ],
+      "a11y_notes": [
+        "Use accessible form elements (e.g., checkboxes for multi-select, ARIA for listbox).",
+        "Provide clear labels and instructions.",
+        "Ensure focus management within the selector is logical."
+      ]
+    },
+    {
+      "name": "Active Sessions List",
+      "purpose": "Displays and manages the list of pinned, active shell sessions.",
+      "variants": [
+        "With pinned sessions",
+        "Empty state"
+      ],
+      "states": [
+        "Empty",
+        "Loading sessions",
+        "Sessions restored"
+      ],
+      "a11y_notes": [
+        "Each session item must be focusable and keyboard navigable.",
+        "Use ARIA live regions for status updates (e.g., when a session connects/disconnects).",
+        "Visually distinguish the currently focused session."
+      ]
+    },
+    {
+      "name": "Session List Item",
+      "purpose": "Represents a single pinned session in the Active Sessions List.",
+      "variants": [
+        "Connected",
+        "Disconnected",
+        "Error",
+        "Selected"
+      ],
+      "states": [
+        "Connected",
+        "Disconnected",
+        "Error",
+        "Connecting",
+        "Selected"
+      ],
+      "a11y_notes": [
+        "Clear visual distinction for selected state.",
+        "Status pill should have sufficient contrast and be screen-reader accessible.",
+        "Action buttons (Connect/Disconnect/Remove) within the item must be clearly labeled and focusable."
+      ]
+    },
+    {
+      "name": "Terminal Panel",
+      "purpose": "Displays interactive shell output and input for a single device.",
+      "variants": [
+        "Output view",
+        "Input view",
+        "With controls visible",
+        "With controls hidden (hover)"
+      ],
+      "states": [
+        "Connecting",
+        "Connected (Active)",
+        "Connected (Inactive)",
+        "Disconnected",
+        "Error",
+        "Empty output"
+      ],
+      "a11y_notes": [
+        "Terminal output should be readable by screen readers (e.g., using `aria-live` for new output).",
+        "Input line must be clearly focusable and indicate focus.",
+        "All controls must be keyboard accessible and have clear labels.",
+        "Ensure sufficient contrast for text and controls."
+      ]
+    },
+    {
+      "name": "Broadcast Input/Button",
+      "purpose": "Allows sending a command to all connected sessions.",
+      "variants": [
+        "Enabled",
+        "Disabled"
+      ],
+      "states": [
+        "Enabled",
+        "Disabled (no connected sessions)"
+      ],
+      "a11y_notes": [
+        "Input field must be clearly labeled (e.g., 'Broadcast command').",
+        "Button must be keyboard focusable and accessible.",
+        "Provide feedback if broadcast fails."
+      ]
+    }
+  ],
+  "design_tokens": {
+    "css_variables": "--app-spacing-tight: 8px;\n--app-spacing-medium: 16px;\n--app-border-radius-small: 4px;\n--app-color-status-connected: #4CAF50;\n--app-color-status-disconnected: #FFC107;\n--app-color-status-error: #F44336;\n--app-color-background-panel: #262626;\n--app-color-text-primary: #E0E0E0;\n--app-color-text-secondary: #BDBDBD;\n--app-color-focus-ring: #00BCD4;\n--app-sidebar-width: 300px;\n--app-terminal-panel-padding: 8px;\n--app-toolbar-height: 48px;",
+    "notes": [
+      "Introduce tighter spacing for density in session list and terminal panels.",
+      "Define explicit colors for status indicators.",
+      "Ensure sufficient contrast for text and status elements.",
+      "Define variables for fixed widths/heights like sidebar and toolbar for consistent layout."
     ]
   },
-  "design_tokens": {
-    "colors": {
-      "bg_app": "#F5F7FA",
-      "bg_panel": "#FFFFFF",
-      "bg_subtle": "#EEF2F7",
-      "border": "#D7DEE8",
-      "text": "#0F172A",
-      "text_muted": "#5B6B7F",
-      "primary": "#2563EB",
-      "primary_600": "#1D4ED8",
-      "accent": "#0F766E",
-      "success": "#16A34A",
-      "warning": "#D97706",
-      "danger": "#DC2626",
-      "log_info": "#2563EB",
-      "log_warn": "#D97706",
-      "log_error": "#DC2626"
-    },
-    "typography": {
-      "font_ui": "IBM Plex Sans, Segoe UI, system-ui, sans-serif",
-      "font_display": "Space Grotesk, IBM Plex Sans, sans-serif",
-      "font_code": "JetBrains Mono, Fira Code, monospace",
-      "size_xs": "12px",
-      "size_sm": "13px",
-      "size_md": "14px",
-      "size_lg": "16px",
-      "size_xl": "20px",
-      "size_2xl": "24px"
-    },
-    "spacing": {
-      "s2": "2px",
-      "s4": "4px",
-      "s8": "8px",
-      "s12": "12px",
-      "s16": "16px",
-      "s24": "24px",
-      "s32": "32px",
-      "s48": "48px"
-    },
-    "radius": {
-      "r6": "6px",
-      "r10": "10px",
-      "r14": "14px"
-    },
-    "elevation": {
-      "card": "0 1px 2px rgba(15, 23, 42, 0.08)",
-      "popover": "0 8px 24px rgba(15, 23, 42, 0.12)"
-    }
-  },
   "microcopy": {
-    "empty_device_list": "No device connected. Plug in via USB or enable wireless debugging.",
-    "wireless_pairing_hint": "Open Wireless Debugging on the device and scan the QR or enter the pairing code.",
-    "adb_missing": "ADB not found. Install Android Platform Tools and restart the app.",
-    "device_unauthorized": "Device unauthorized. Check the device screen and allow debugging.",
-    "connect_success": "Device connected and ready.",
-    "generic_error": "Something went wrong. Try reconnecting the device.",
-    "empty_logcat": "No logs yet. Start an app or adjust filters.",
-    "empty_files": "No files in this folder."
+    "tone": "Technical, direct, helpful",
+    "messages": [
+      {
+        "key": "session_list_empty_state",
+        "text": "No active sessions. Connect to devices to start shell sessions."
+      },
+      {
+        "key": "available_devices_label",
+        "text": "Available Devices"
+      },
+      {
+        "key": "connect_selected_button",
+        "text": "Connect Selected"
+      },
+      {
+        "key": "disconnect_selected_button",
+        "text": "Disconnect Selected"
+      },
+      {
+        "key": "broadcast_input_placeholder",
+        "text": "Enter command to broadcast to all connected sessions..."
+      },
+      {
+        "key": "broadcast_button",
+        "text": "Broadcast"
+      },
+      {
+        "key": "session_item_status_connected",
+        "text": "Connected"
+      },
+      {
+        "key": "session_item_status_disconnected",
+        "text": "Disconnected"
+      },
+      {
+        "key": "session_item_status_error",
+        "text": "Error"
+      },
+      {
+        "key": "terminal_panel_connecting_message",
+        "text": "Connecting to device..."
+      },
+      {
+        "key": "terminal_panel_error_message",
+        "text": "Connection lost. Click to reconnect."
+      },
+      {
+        "key": "terminal_control_interrupt",
+        "text": "Interrupt"
+      },
+      {
+        "key": "terminal_control_clear",
+        "text": "Clear Output"
+      },
+      {
+        "key": "terminal_control_autoscroll",
+        "text": "Auto-scroll"
+      },
+      {
+        "key": "session_remove_tooltip",
+        "text": "Remove session from active list"
+      }
+    ]
   },
   "rollout": {
-    "phase_1": "Shell + device context + onboarding",
-    "phase_2": "Dashboard, logcat, files (read-only)",
-    "phase_3": "UI Inspector, apps manager, advanced actions",
-    "phase_4": "Polish, accessibility, theme toggle"
+    "phases": [
+      "Internal testing with core users.",
+      "Beta release to a subset of users for feedback.",
+      "Full release."
+    ],
+    "feature_flags": [
+      "enable-shell-commands-v2-ui"
+    ],
+    "monitoring": [
+      "Track session connection/disconnection rates.",
+      "Monitor broadcast command usage and success rates.",
+      "Collect user feedback via in-app surveys and analytics.",
+      "Monitor performance metrics for large numbers of active sessions."
+    ]
   },
   "experiments": [
-    "Command palette for power users (Cmd/Ctrl+K).",
-    "Compact log view that hides PIDs to maximize message space."
+    {
+      "hypothesis": "Making terminal controls persistently visible rather than on hover will increase discoverability and reduce user errors in controlling terminal sessions.",
+      "metric": "Interaction rate with terminal controls (Ctrl+C, Clear, Connect/Disconnect) and reported errors.",
+      "success_criteria": "A 15% increase in terminal control interactions and a 10% decrease in reported terminal control issues within the first two weeks post-launch.",
+      "variants": [
+        "Controls always visible in a dedicated bar",
+        "Controls appear on terminal panel hover"
+      ]
+    }
   ]
 }

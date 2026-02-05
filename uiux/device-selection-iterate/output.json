@@ -1,0 +1,170 @@
+{
+  "version": "1.1.0",
+  "mode": "audit_and_optimize",
+  "assumptions": [
+    "Device group assignments (groupMap) and task execution history are available in the frontend state.",
+    "A device can appear in both 'Recent' and its specific 'Group' section (duplicates allowed for quick access).",
+    "The 'Primary' device concept is distinct from 'Selected' devices (active vs. target set).",
+    "The trigger button for the popover already exists in the top bar."
+  ],
+  "open_questions": [
+    "Should the 'Recent' list persist across app restarts?",
+    "How should the UI handle a device that is in 'Recent' but currently disconnected?",
+    "Is there a maximum height pixel value for the popover, or should it be viewport relative (e.g., 80vh)?",
+    "Does clicking a checkbox in the 'Recent' section also check the same device in its Group section?"
+  ],
+  "ux_goals": {
+    "clarity": "Distinct visual indicators for Primary (active) vs. Selected (multi-target) states.",
+    "efficiency": "Reduce time-to-select for frequently used devices via Recent section.",
+    "accessibility": "Full keyboard navigability (Tab/Arrow keys, Enter, Space, Esc) with high-contrast focus rings.",
+    "responsiveness": "Graceful handling of limited vertical space without clipping content."
+  },
+  "information_architecture": {
+    "structure": {
+      "Popover Header": [
+        "Search/Filter (Optional)",
+        "Select All / Clear All Controls"
+      ],
+      "Scrollable Content": [
+        "Recent Section (Dynamic, max 5)",
+        "Group Sections (Alphabetical)",
+        "Ungrouped Section"
+      ],
+      "Popover Footer": [
+        "Status Summary (e.g., '3 devices selected')"
+      ]
+    }
+  },
+  "user_flows": [
+    {
+      "name": "Select Primary Device",
+      "steps": [
+        "User clicks or tabs to Device Context trigger",
+        "Popover opens centered to trigger",
+        "User navigates to desired device in 'Recent' or Group list",
+        "User clicks row body OR presses Enter/Space",
+        "Row highlights as Primary",
+        "Popover closes (optional) or stays open for multi-selection"
+      ]
+    },
+    {
+      "name": "Multi-select Targets",
+      "steps": [
+        "User opens popover",
+        "User clicks checkboxes for multiple devices",
+        "Counter updates in footer/header",
+        "User presses Esc or clicks outside to close"
+      ]
+    }
+  ],
+  "screens": [
+    {
+      "name": "Device Context Popover",
+      "description": "Main container for device selection logic.",
+      "states": [
+        "Loading (Skeleton rows)",
+        "Empty (No devices connected illustration)",
+        "Populated (Recent + Groups)",
+        "Scrolled (Header sticky, shadow hint)",
+        "Overflow (Max height reached)"
+      ]
+    }
+  ],
+  "issues": [
+    {
+      "severity": "High",
+      "description": "Current popover gets cut off on small screens/windows."
+    },
+    {
+      "severity": "Medium",
+      "description": "No visual grouping makes finding specific devices slow in large labs."
+    },
+    {
+      "severity": "High",
+      "description": "Lack of focus styles makes keyboard usage impossible."
+    }
+  ],
+  "backlog": [
+    {
+      "priority": "P0",
+      "task": "Implement Popover positioning logic (Center align + Viewport collision detection)",
+      "effort": "Medium"
+    },
+    {
+      "priority": "P0",
+      "task": "Refactor Device List to support Sections (Recent, Groups, Ungrouped)",
+      "effort": "High"
+    },
+    {
+      "priority": "P1",
+      "task": "Implement 'Recent' logic based on task history",
+      "effort": "Medium"
+    },
+    {
+      "priority": "P1",
+      "task": "Update DeviceRow component for clear Primary/Selected/Focus states",
+      "effort": "Medium"
+    },
+    {
+      "priority": "P2",
+      "task": "Add specific keyboard event handlers (Arrow navigation, Esc to close)",
+      "effort": "Medium"
+    }
+  ],
+  "components": [
+    {
+      "name": "DevicePopover",
+      "props": "isOpen, anchorEl, onClose, devices, groups, recentIds",
+      "usage": "Top-level container managing positioning and focus trap."
+    },
+    {
+      "name": "DeviceSection",
+      "props": "title, children (rows)",
+      "usage": "Visual separator for Recent, Groups, and Ungrouped lists."
+    },
+    {
+      "name": "DeviceRow",
+      "props": "device, isPrimary, isSelected, onToggleSelect, onSetPrimary",
+      "usage": "Interactive list item with checkbox and status details."
+    },
+    {
+      "name": "StatusIndicator",
+      "props": "status (online/offline/busy)",
+      "usage": "Visual dot/icon indicating device availability."
+    }
+  ],
+  "design_tokens": {
+    "css_variables": {
+      "--popover-max-height": "min(500px, 80vh)",
+      "--popover-width": "320px",
+      "--section-header-bg": "var(--bg-surface-subtle)",
+      "--section-header-text": "var(--text-secondary)",
+      "--row-hover-bg": "var(--bg-action-hover)",
+      "--row-focus-ring": "2px solid var(--primary-focus)",
+      "--row-primary-bg": "var(--primary-surface-light)"
+    }
+  },
+  "microcopy": {
+    "recent_header": "Recent",
+    "ungrouped_header": "Ungrouped",
+    "empty_state": "No devices connected",
+    "device_status_offline": "Offline",
+    "search_placeholder": "Filter devices..."
+  },
+  "rollout": [
+    {
+      "phase": "Phase 1",
+      "description": "Internal alpha with new layout and grouping. Verify keyboard nav."
+    },
+    {
+      "phase": "Phase 2",
+      "description": "Beta release. Monitor 'Recent' usage accuracy."
+    }
+  ],
+  "experiments": [
+    {
+      "hypothesis": "Pinning 'Select All' for specific groups improves workflow for bulk actions.",
+      "metric": "Usage of bulk selection vs individual clicks."
+    }
+  ]
+}

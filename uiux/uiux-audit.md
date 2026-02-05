@@ -1,44 +1,37 @@
 # UI/UX Audit
 
-## Context
-- Evidence sources: user report ("completely can't understand the design"), no screenshots provided.
-- Assumption: current UI exposes too many controls at once and lacks a clear starting point.
-
 ## Issues
-### ISSUE: No clear entry point or guidance
-- Severity: High
-- Evidence: User cannot understand where to start; no onboarding guidance reported.
-- Recommendation: Add a first-run guided state with device setup steps and a single primary action.
+### ISSUE-001: Visual Clutter and Hierarchy
+- Severity: medium
+- Evidence: Observed UI problems mention 'global toolbar/header can still feel visually heavy' and 'Multi-device layout needs clear hierarchy: session management vs. terminal viewing.'
+- Recommendation: Implement a dedicated sidebar for session management and a main content area for terminal panels. Condense global toolbar.
 - Acceptance Criteria:
-  - First run shows device setup checklist with a single CTA.
-  - When a device connects, user is routed to Dashboard with status and quick actions.
+  - Page is divided into distinct session management and terminal viewing areas.
+  - Global toolbar is visually lighter and more compact.
 
-### ISSUE: Information hierarchy is unclear
-- Severity: High
-- Evidence: User feedback indicates overall confusion.
-- Recommendation: Introduce persistent navigation and a global device context header.
+### ISSUE-002: Session List Scanability
+- Severity: medium
+- Evidence: Observed UI problems state 'Active sessions list should support fast scanning: status, device name/model, and quick actions.'
+- Recommendation: Enhance session list items with clear status indicators (color-coded pills/borders), device model, and easily accessible actions.
 - Acceptance Criteria:
-  - Sidebar navigation visible on all screens.
-  - Selected device and connection status always visible.
+  - Session list items clearly display device status (connected, disconnected, error).
+  - Device name/model is visible.
+  - Quick actions (Connect/Disconnect/Remove) are present and visually distinct.
 
-### ISSUE: Overloaded screens with mixed tasks
-- Severity: Medium
-- Evidence: Likely multiple task types appear in one place (assumption).
-- Recommendation: Separate modules (Actions, Logcat, Files, UI Inspector) into dedicated screens.
+### ISSUE-003: Terminal Panel Controls Discoverability
+- Severity: low
+- Evidence: Observed UI problems mention 'Terminal panels should maximize output visibility (data density), while keeping essential controls discoverable.'
+- Recommendation: Place terminal controls (Connect/Disconnect, Ctrl+C, Clear, Auto-scroll) in a dedicated, unobtrusive bar within the panel, possibly revealed on hover or persistently visible but compact.
 - Acceptance Criteria:
-  - Each primary task has a dedicated screen with task-specific controls only.
+  - Essential terminal controls are discoverable without cluttering the output area.
+  - Controls remain accessible via keyboard.
 
-### ISSUE: Poor discoverability of key actions
-- Severity: Medium
-- Evidence: User report suggests they cannot find what to do.
-- Recommendation: Provide a Dashboard with "Quick Actions" and "Recent" sections.
+### ISSUE-004: Ambiguity between Device Selection and Active Sessions
+- Severity: medium
+- Evidence: Current UX description mentions 'Device Context' selector and 'Active Sessions' list, implying two separate but related concepts that may cause confusion.
+- Recommendation: Clarify the role of the 'Device Context' selector. If it's for discovering devices to *add* to active sessions, make this relationship explicit. Rename it to 'Available Devices'.
 - Acceptance Criteria:
-  - Dashboard lists at least 6 common actions and recent packages/log filters.
+  - User understands how to discover devices and add them to active sessions.
+  - The relationship between device discovery and active session management is clear.
+  - The 'Device Context' selector is renamed to 'Available Devices'.
 
-### ISSUE: Accessibility and keyboard flow unclear
-- Severity: Medium
-- Evidence: No stated support; requirement is keyboard-first.
-- Recommendation: Define focus order, shortcuts, and visible focus states.
-- Acceptance Criteria:
-  - Full keyboard access to navigation, device selection, and primary actions.
-  - Visible focus ring and skip-to-content shortcut.
