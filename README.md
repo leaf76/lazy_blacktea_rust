@@ -15,6 +15,8 @@ Lazy Blacktea is a desktop console for Android device automation. This edition u
 - Wireless ADB pairing helper (QR/pairing code flow)
 - App management (list, uninstall, force stop, clear data, enable/disable, open info)
 - Bugreport generation with streaming progress and cancel
+- Bugreport analysis with summary, categories, timeline, and Task Center context (saved as JSON)
+- Bugreport log viewer with filters and search (cached index for large reports)
 - Bluetooth monitor (snapshot + log events)
 - scrcpy integration with configurable launch settings
 
@@ -50,6 +52,13 @@ cargo test --all --all-features
 - Task Center keeps the last 50 tasks and persists across restarts.
 - File transfers report progress in Task Center when the installed `adb` supports `-p` (falls back automatically).
 - UI Inspector capture includes an embedded screenshot preview; export writes XML/HTML/PNG files to the configured output folder.
+- Bugreport analysis writes a `*_analysis.json` file next to the generated bugreport output.
+- Bugreport log viewer caches parsed logcat indexes under `~/.lazy_blacktea_cache/bugreport/`.
+- Device refresh performs a fast summary update first, then refreshes detailed fields in the background.
+- WiFi/Bluetooth toggles update device state immediately and sync details shortly after.
+- Copy Device Info writes a Markdown bullet list to the clipboard.
+- Screenshot capture falls back to `adb pull` when `exec-out` fails, with sanitized filenames.
+- scrcpy launch reports immediate failures when the process exits on startup.
 - Form rows align labels with a fixed width and tighten spacing in smaller windows.
 - App shell + routing are implemented in `src/App.tsx` with `HashRouter` in `src/main.tsx`.
 - UI layout uses compact density, grouped sidebar navigation, and a device status top bar.

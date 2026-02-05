@@ -51,6 +51,8 @@ lazy_blacktea_rust/
 | APK installer | `src/App.tsx` | Single/multi/bundle install flow + launch |
 | Logcat helpers | `src/logcat.ts` | Filter/regex/search utilities |
 | UI inspector export | `src-tauri/src/app/commands.rs` | capture/export UI hierarchy + screenshot |
+| Bugreport analysis | `src-tauri/src/app/bugreport_analysis.rs`, `src/App.tsx` | local parser + right-side analysis panel |
+| Bugreport log viewer | `src-tauri/src/app/bugreport_logcat.rs`, `src/App.tsx` | cached index + filterable log viewer |
 | Wireless pairing | `src-tauri/src/app/commands.rs`, `src/api.ts`, `src/App.tsx` | adb pair/connect flow |
 | Pairing helpers | `src/pairing.ts` | QR/pair output parsing + reducer |
 
@@ -62,6 +64,11 @@ lazy_blacktea_rust/
 - File Explorer uses `adb ls/pull/push` plus `mkdir/mv/rm` for browsing, download/upload, and basic file management.
 - Task Center keeps the last 50 tasks and persists across restarts.
 - File transfers emit progress events when the installed `adb` supports `-p` (fallback is automatic).
+- Device refresh uses a fast summary fetch before loading detailed fields in the background.
+- WiFi/Bluetooth toggles update device state immediately and then re-sync details.
+- Copy Device Info writes a Markdown bullet list to the clipboard.
+- Screenshot capture falls back to `adb pull` when `exec-out` fails, with sanitized filenames.
+- scrcpy launch reports immediate failures if the process exits on startup.
 - Avoid blocking UI: long tasks are handled in Rust threads.
 - Config stored at `~/.lazy_blacktea_config.json` (or `%USERPROFILE%\\.lazy_blacktea_config.json` on Windows) with legacy compatibility.
 - Tauri plugins in use: opener, dialog, clipboard-manager.
