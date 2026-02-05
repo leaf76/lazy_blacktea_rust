@@ -810,6 +810,7 @@ function App() {
   const [files, setFiles] = useState<DeviceFileEntry[]>([]);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [filesSelectedPaths, setFilesSelectedPaths] = useState<string[]>([]);
+  const [filesSearchQuery, setFilesSearchQuery] = useState("");
   const [filesOverwriteEnabled, setFilesOverwriteEnabled] = useState(true);
   const [filesDropActive, setFilesDropActive] = useState(false);
   const [filesModal, setFilesModal] = useState<
@@ -944,6 +945,10 @@ function App() {
       : selectedCount === 1
         ? activeSerial ?? "No device selected"
         : `${selectedCount} devices selected`;
+  const hasFileSelection = filesSelectedPaths.length > 0;
+  const fileSelectionLabel = hasFileSelection
+    ? `${filesSelectedPaths.length} items selected`
+    : "Select files to enable bulk actions.";
   const primaryDeviceLabel =
     activeDevice?.detail?.model ?? activeDevice?.summary.model ?? activeSerial ?? "Select a device";
   const requiresSingleSelection = useMemo(
@@ -3177,6 +3182,37 @@ function App() {
   const handleFilesGoUp = async () => {
     await handleFilesRefresh(deviceParentDir(filesPath));
   };
+
+  const fileBreadcrumbs = useMemo(() => {
+    const normalized = normalizeDeviceDir(filesPath);
+    if (!normalized || normalized === "/") {
+      return [{ label: "/", path: "/" }];
+    }
+    const parts = normalized.split("/").filter(Boolean);
+    const crumbs = [{ label: "/", path: "/" }];
+    let current = "";
+    parts.forEach((part) => {
+      current = `${current}/${part}`;
+      crumbs.push({ label: part, path: current });
+    });
+    return crumbs;
+  }, [filesPath]);
+
+  const filteredFiles = useMemo(() => {
+    const query = filesSearchQuery.trim().toLowerCase();
+    if (!query) {
+      return files;
+    }
+    return files.filter((entry) => {
+      const name = entry.name.toLowerCase();
+      const path = entry.path.toLowerCase();
+      return name.includes(query) || path.includes(query);
+    });
+  }, [files, filesSearchQuery]);
+
+  const fileFilterSummary = filesSearchQuery.trim()
+    ? `${filteredFiles.length} of ${files.length} items`
+    : `${files.length} items`;
 
   const openFilesMkdirModal = () => {
     setFilesModal({ type: "mkdir", name: "" });
@@ -5797,25 +5833,29 @@ function App() {
 	                      </div>
 	                    </div>
 	                  )}
-	                  <div className="page-header">
-	                    <div>
-	                      <h1>File Explorer</h1>
-	                      <p className="muted">Browse device storage, pull files, and upload files.</p>
-	                    </div>
-	                  </div>
-	                  <section className="panel">
-	                    <div className="panel-header">
-	                      <h2>Device Files</h2>
-	                      <span>{selectedSummaryLabel}</span>
-	                    </div>
-	                    <div className="form-row">
-	                      <label>Path</label>
-	                      <input value={filesPath} onChange={(event) => setFilesPath(event.target.value)} />
+                  <div className="page-header">
+                    <div>
+                      <h1>File Explorer</h1>
+                      <p className="muted">Browse device storage, download files, and upload files.</p>
+                    </div>
+                  </div>
+                  <section className="panel">
+                    <div className="panel-header">
+                      <h2>Device Files</h2>
+                      <span>{selectedSummaryLabel}</span>
+                    </div>
+                    <div className="form-row">
+                      <label>Device path</label>
+                      <input
+                        value={filesPath}
+                        onChange={(event) => setFilesPath(event.target.value)}
+                        placeholder="/sdcard"
+                      />
                       <button className="ghost" onClick={handleFilesGoUp} disabled={busy || selectedSerials.length !== 1}>
                         Up
                       </button>
                       <button onClick={() => void handleFilesRefresh()} disabled={busy || selectedSerials.length !== 1}>
-                        Load
+                        Go
                       </button>
                       <button
                         className="ghost"
@@ -5827,54 +5867,68 @@ function App() {
                       <button onClick={handleFileUpload} disabled={busy || selectedSerials.length !== 1}>
                         Upload
                       </button>
-	                      <label className="toggle">
-	                        <input
-	                          type="checkbox"
-	                          checked={filesOverwriteEnabled}
-	                          onChange={(event) => setFilesOverwriteEnabled(event.target.checked)}
-	                        />
-	                        Overwrite
-	                      </label>
-	                    </div>
-	                    <div className="file-toolbar">
-	                      <span className="muted">
-	                        {filesSelectedPaths.length ? `${filesSelectedPaths.length} selected` : "No selection"}
-	                      </span>
-	                      <div className="file-toolbar-actions">
-                        <button
-                          className="ghost"
-                          onClick={() => setFilesSelectedPaths([])}
-                          disabled={busy || selectedSerials.length !== 1 || filesSelectedPaths.length === 0}
-                        >
-                          Clear
-                        </button>
-                        <button
-                          onClick={handleFilesPullSelected}
-                          disabled={busy || selectedSerials.length !== 1 || filesSelectedPaths.length === 0}
-                        >
-                          Pull selected
-                        </button>
-                        <button
-                          className="danger"
-                          onClick={openFilesDeleteSelectedModal}
-                          disabled={busy || selectedSerials.length !== 1 || filesSelectedPaths.length === 0}
-                        >
-                          Delete selected
-                        </button>
-	                      </div>
-	                    </div>
-	                    <div className="split">
-	                      <div className="file-list">
-	                        {files.length === 0 ? (
-	                          <p className="muted">No files loaded.</p>
-	                        ) : (
-	                          files.map((entry) => (
-	                            <div key={entry.path} className="file-row">
-	                              <input
-	                                type="checkbox"
-	                                checked={isFileSelected(entry.path)}
-	                                onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
-	                                disabled={busy}
+                      <label className="toggle">
+                        <input
+                          type="checkbox"
+                          checked={filesOverwriteEnabled}
+                          onChange={(event) => setFilesOverwriteEnabled(event.target.checked)}
+                        />
+                        Overwrite existing
+                      </label>
+                    </div>
+                    <div className="file-breadcrumbs">
+                      <span className="file-breadcrumbs-label">Breadcrumbs</span>
+                      <div className="file-breadcrumbs-trail">
+                        {fileBreadcrumbs.map((crumb, index) => (
+                          <span key={crumb.path} className="file-breadcrumbs-item">
+                            <button
+                              className="ghost file-breadcrumb"
+                              onClick={() => void handleFilesRefresh(crumb.path)}
+                              disabled={busy || selectedSerials.length !== 1}
+                              aria-label={`Go to ${crumb.path}`}
+                            >
+                              {crumb.label}
+                            </button>
+                            {index < fileBreadcrumbs.length - 1 && (
+                              <span className="file-breadcrumbs-sep">/</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="form-row file-search-row">
+                      <label>Quick filter</label>
+                      <input
+                        value={filesSearchQuery}
+                        onChange={(event) => setFilesSearchQuery(event.target.value)}
+                        placeholder="Type to filter by name or path"
+                      />
+                      <button
+                        className="ghost"
+                        onClick={() => setFilesSearchQuery("")}
+                        disabled={busy || !filesSearchQuery.trim()}
+                      >
+                        Clear filter
+                      </button>
+                      <span className="muted file-filter-meta">{fileFilterSummary}</span>
+                    </div>
+                    <div className="split">
+                      <div className="file-list">
+                        {files.length === 0 ? (
+                          <p className="muted">No files loaded. Click Go to load the folder.</p>
+                        ) : filteredFiles.length === 0 ? (
+                          <p className="muted">No matches. Clear the filter to see all items.</p>
+                        ) : (
+                          filteredFiles.map((entry) => (
+                            <div
+                              key={entry.path}
+                              className={`file-row${isFileSelected(entry.path) ? " is-selected" : ""}`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isFileSelected(entry.path)}
+                                onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
+                                disabled={busy}
 	                                aria-label={`Select ${entry.name}`}
 	                              />
 	                              <div className="file-row-main">
@@ -5883,18 +5937,18 @@ function App() {
 	                                  {entry.is_dir ? "Directory" : "File"} · {entry.size_bytes ?? "--"} bytes
 	                                </p>
 	                              </div>
-	                              <div className="file-row-actions">
-	                                {entry.is_dir ? (
+                              <div className="file-row-actions">
+                                {entry.is_dir ? (
                                   <button
                                     className="ghost"
                                     onClick={() => void handleFilesRefresh(entry.path)}
                                     disabled={busy || selectedSerials.length !== 1}
                                   >
-                                    Open
+                                    Open folder
                                   </button>
                                 ) : (
                                   <button onClick={() => handleFilePull(entry)} disabled={busy || selectedSerials.length !== 1}>
-                                    Pull
+                                    Download
                                   </button>
                                 )}
                                 <button
@@ -5914,9 +5968,9 @@ function App() {
 	                              </div>
 	                            </div>
 	                          ))
-	                        )}
-	                      </div>
-	                      <div className="preview-panel">
+                        )}
+                      </div>
+                      <div className="preview-panel">
                         <h3>Preview</h3>
                         {filePreview?.is_text && filePreview.preview_text ? (
                           <pre>{filePreview.preview_text}</pre>
@@ -5924,7 +5978,7 @@ function App() {
                           <p className="muted">
                             {filePreview
                               ? `Preview not available (${filePreview.mime_type}).`
-                              : "Pull a file to preview."}
+                              : "Download a file to preview."}
                           </p>
                         )}
                         {filePreview && (
@@ -5932,6 +5986,31 @@ function App() {
                             Open Externally
                           </button>
                         )}
+                      </div>
+                    </div>
+                    <div className="file-bulk-bar">
+                      <span className="muted">{fileSelectionLabel}</span>
+                      <div className="file-bulk-actions">
+                        <button
+                          className="ghost"
+                          onClick={() => setFilesSelectedPaths([])}
+                          disabled={busy || selectedSerials.length !== 1 || !hasFileSelection}
+                        >
+                          Clear selection
+                        </button>
+                        <button
+                          onClick={handleFilesPullSelected}
+                          disabled={busy || selectedSerials.length !== 1 || !hasFileSelection}
+                        >
+                          Download selected
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={openFilesDeleteSelectedModal}
+                          disabled={busy || selectedSerials.length !== 1 || !hasFileSelection}
+                        >
+                          Delete selected
+                        </button>
                       </div>
                     </div>
                   </section>

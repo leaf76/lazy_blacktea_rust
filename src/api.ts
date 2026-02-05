@@ -158,15 +158,21 @@ export const installApkBatch = async (
   allowTestPackages: boolean,
   extraArgs?: string,
 ) => {
+  const traceId = createTraceId();
   return invoke<CommandResponse<ApkBatchInstallResult>>("install_apk_batch", {
     serials,
     apk_path: apkPath,
+    apkPath,
     replace,
     allow_downgrade: allowDowngrade,
+    allowDowngrade,
     grant,
     allow_test_packages: allowTestPackages,
+    allowTestPackages,
     extra_args: extraArgs,
-    trace_id: createTraceId(),
+    extraArgs,
+    trace_id: traceId,
+    traceId,
   });
 };
 
