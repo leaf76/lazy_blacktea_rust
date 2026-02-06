@@ -63,13 +63,33 @@ jobs:
       - name: Build Tauri bundles (unsigned)
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
-      - name: Upload assets to GitHub Release
+      - name: Zip macOS .app bundle(s)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          for app in src-tauri/target/release/bundle/macos/*.app; do
+            if [ -d "$app" ]; then
+              echo "Zipping: $app"
+              ditto -c -k --sequesterRsrc --keepParent "$app" "${app}.zip"
+            fi
+          done
+
+      - name: Upload macOS assets to GitHub Release
+        if: runner.os == 'macOS'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           files: |
             src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/*.app/**
+            src-tauri/target/release/bundle/macos/*.app.zip
+
+      - name: Upload Linux assets to GitHub Release
+        if: runner.os == 'Linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          fail_on_unmatched_files: true
+          files: |
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/deb/*.deb
