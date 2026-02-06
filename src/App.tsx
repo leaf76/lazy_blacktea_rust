@@ -791,6 +791,17 @@ const DeviceTerminalPanel = memo(function DeviceTerminalPanel({
 function App() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
+  type DeviceSelectionMode = "single" | "multi";
+  const DEVICE_SELECTION_MODE_STORAGE_KEY = "lazy_blacktea_device_selection_mode_v1";
+  const [deviceSelectionMode, setDeviceSelectionMode] = useState<DeviceSelectionMode>(() => {
+    try {
+      const raw = localStorage.getItem(DEVICE_SELECTION_MODE_STORAGE_KEY);
+      return raw === "single" || raw === "multi" ? raw : "multi";
+    } catch (error) {
+      console.warn("Failed to load device selection mode from storage.", error);
+      return "multi";
+    }
+  });
   const [terminalBySerial, setTerminalBySerial] = useState<Record<string, TerminalDeviceState>>({});
   const [terminalBroadcast, setTerminalBroadcast] = useState("");
   const [terminalActiveSerials, setTerminalActiveSerials] = useState<string[]>([]);
@@ -1012,14 +1023,6 @@ function App() {
     }
     return "warn";
   }, [activeSerial, deviceStatus]);
-  const deviceBySerial = useMemo(() => {
-    const map = new Map<string, DeviceInfo>();
-    devices.forEach((device) => {
-      map.set(device.summary.serial, device);
-    });
-    return map;
-  }, [devices]);
-
   useEffect(() => {
     const prevSerial = perfLastSerialRef.current;
     const nextSerial = isPerformanceView ? activeSerial ?? null : null;
@@ -1047,31 +1050,6 @@ function App() {
     }
     perfLastSerialRef.current = nextSerial;
   }, [isPerformanceView, activeSerial]);
-  const recentDeviceSerials = useMemo(() => {
-    const serials: string[] = [];
-    const tasks = [...taskState.items].sort((a, b) => b.started_at - a.started_at);
-    for (const task of tasks) {
-      for (const serial of Object.keys(task.devices)) {
-        if (!serials.includes(serial)) {
-          serials.push(serial);
-        }
-        if (serials.length >= 5) {
-          break;
-        }
-      }
-      if (serials.length >= 5) {
-        break;
-      }
-    }
-    return serials;
-  }, [taskState.items]);
-  const recentDevices = useMemo(
-    () =>
-      recentDeviceSerials
-        .map((serial) => deviceBySerial.get(serial))
-        .filter((device): device is DeviceInfo => Boolean(device)),
-    [deviceBySerial, recentDeviceSerials],
-  );
   const groupedDevices = useMemo(() => {
     const grouped = new Map<string, DeviceInfo[]>();
     const ungrouped: DeviceInfo[] = [];
@@ -1089,21 +1067,6 @@ function App() {
     const groupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
     return { groupNames, grouped, ungrouped };
   }, [devices, groupMap]);
-  const recentSerialSet = useMemo(() => new Set(recentDeviceSerials), [recentDeviceSerials]);
-  const groupedDevicesFiltered = useMemo(() => {
-    const grouped = new Map<string, DeviceInfo[]>();
-    groupedDevices.grouped.forEach((list, group) => {
-      const filtered = list.filter((device) => !recentSerialSet.has(device.summary.serial));
-      if (filtered.length > 0) {
-        grouped.set(group, filtered);
-      }
-    });
-    const ungrouped = groupedDevices.ungrouped.filter(
-      (device) => !recentSerialSet.has(device.summary.serial),
-    );
-    const groupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
-    return { groupNames, grouped, ungrouped };
-  }, [groupedDevices, recentSerialSet]);
   const latestBugreportTask = useMemo(() => {
     if (!latestBugreportTaskId) {
       return null;
@@ -1278,6 +1241,21 @@ function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEVICE_SELECTION_MODE_STORAGE_KEY, deviceSelectionMode);
+    } catch (error) {
+      console.warn("Failed to persist device selection mode to storage.", error);
+    }
+  }, [DEVICE_SELECTION_MODE_STORAGE_KEY, deviceSelectionMode]);
+
+  const handleSetDeviceSelectionMode = (mode: DeviceSelectionMode) => {
+    setDeviceSelectionMode(mode);
+    if (mode === "single") {
+      setSelectedSerials((prev) => (prev.length > 0 ? [prev[0]] : []));
+    }
+  };
 
   useEffect(() => {
     const key = "lazy_blacktea_tasks_v1";
@@ -2432,6 +2410,14 @@ function App() {
     setSelectedSerials((prev) =>
       prev.includes(serial) ? prev.filter((item) => item !== serial) : [...prev, serial],
     );
+  };
+
+  const toggleDeviceInContextPopover = (serial: string) => {
+    if (deviceSelectionMode === "multi") {
+      toggleDevice(serial);
+      return;
+    }
+    setSelectedSerials((prev) => (prev.includes(serial) ? [] : [serial]));
   };
 
   const handleDeviceRowSelect = (
@@ -5210,30 +5196,57 @@ function App() {
         : device.summary.state === "unauthorized"
           ? "error"
           : "warn";
-    return (
-      <div
-        key={serial}
-        className={`device-popover-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
-        onClick={() => handleSelectActiveSerial(serial)}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            handleSelectActiveSerial(serial);
-          }
-        }}
-      >
-        <label className="device-check">
-          <input
-            type="checkbox"
-            checked={isSelected}
-            onClick={(event) => event.stopPropagation()}
-            onChange={() => toggleDevice(serial)}
-            disabled={busy}
-            aria-label={`Select ${name}`}
-          />
-        </label>
+	    return (
+	      <div
+	        key={serial}
+	        className={`device-popover-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
+	        onClick={(event) => {
+	          const target = event.target as HTMLElement | null;
+	          if (target?.closest(".device-check")) {
+	            return;
+	          }
+	          // Row click sets primary; clicking the current primary again toggles it off.
+	          if (isActive && isSelected) {
+	            toggleDeviceInContextPopover(serial);
+	            return;
+	          }
+	          if (deviceSelectionMode === "single") {
+	            setSelectedSerials((prev) => (prev.length === 1 && prev[0] === serial ? prev : [serial]));
+	            return;
+	          }
+	          handleSelectActiveSerial(serial);
+	        }}
+	        role="button"
+	        tabIndex={0}
+	        onKeyDown={(event) => {
+	          const target = event.target as HTMLElement | null;
+	          if (target?.closest(".device-check")) {
+	            return;
+	          }
+	          if (event.key === "Enter" || event.key === " ") {
+	            event.preventDefault();
+	            if (isActive && isSelected) {
+	              toggleDeviceInContextPopover(serial);
+	              return;
+	            }
+	            if (deviceSelectionMode === "single") {
+	              setSelectedSerials((prev) => (prev.length === 1 && prev[0] === serial ? prev : [serial]));
+	              return;
+	            }
+	            handleSelectActiveSerial(serial);
+	          }
+	        }}
+	      >
+	        <label className="device-check" onClick={(event) => event.stopPropagation()}>
+	          <input
+	            type="checkbox"
+	            checked={isSelected}
+	            onClick={(event) => event.stopPropagation()}
+	            onChange={() => toggleDeviceInContextPopover(serial)}
+	            disabled={busy}
+	            aria-label={`Select ${name}`}
+	          />
+	        </label>
         <div className="device-popover-meta">
           <span className="device-popover-name">{name}</span>
           <span className="device-popover-serial">{serial}</span>
@@ -5590,60 +5603,78 @@ function App() {
                 ref={devicePopoverRef}
                 style={devicePopoverLeft != null ? { left: devicePopoverLeft } : undefined}
                 onKeyDown={handlePopoverKeyDown}
-              >
-                <div className="device-popover-header">
-                  <div>
-                    <strong>Devices</strong>
-                    <span className="muted">{devices.length} connected</span>
-                  </div>
-                  <div className="button-row compact">
-                    <button
-                      className="ghost"
-                      onClick={selectAllDevices}
-                      disabled={busy || devices.length === 0}
-                    >
-                      Select all
-                    </button>
-                    <button
-                      className="ghost"
-                      onClick={clearSelection}
-                      disabled={busy || selectedCount === 0}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-                <p className="muted device-popover-note">
-                  Use checkboxes to include devices. Click a row to set the primary device.
-                </p>
+	              >
+	                <div className="device-popover-header">
+	                  <div className="device-popover-header-top">
+	                    <div className="device-popover-header-info">
+	                      <strong>Devices</strong>
+	                      <span className="muted">{devices.length} connected</span>
+	                    </div>
+	                    <div className="device-popover-header-actions">
+	                      {deviceSelectionMode === "multi" && (
+	                        <button
+	                          className="ghost"
+	                          onClick={selectAllDevices}
+	                          disabled={busy || devices.length === 0}
+	                        >
+	                          Select all
+	                        </button>
+	                      )}
+	                      <button
+	                        className="ghost"
+	                        onClick={clearSelection}
+	                        disabled={busy || selectedCount === 0}
+	                      >
+	                        Clear
+	                      </button>
+	                    </div>
+	                  </div>
+
+	                  <div className="device-popover-mode" role="group" aria-label="Selection mode">
+	                    <button
+	                      type="button"
+	                      className={deviceSelectionMode === "single" ? "active" : ""}
+	                      onClick={() => handleSetDeviceSelectionMode("single")}
+	                      disabled={busy}
+	                      title="Single device selection"
+	                    >
+	                      Single
+	                    </button>
+	                    <button
+	                      type="button"
+	                      className={deviceSelectionMode === "multi" ? "active" : ""}
+	                      onClick={() => handleSetDeviceSelectionMode("multi")}
+	                      disabled={busy}
+	                      title="Multi-device selection"
+	                    >
+	                      Multi
+	                    </button>
+	                  </div>
+	                </div>
+	                <p className="muted device-popover-note">
+	                  Use checkboxes to select devices. Switch modes with Single/Multi. Click a row to set the primary
+	                  device.
+	                </p>
                 <div className="device-popover-list">
                   {devices.length === 0 ? (
                     <p className="muted">No devices detected.</p>
                   ) : (
                     <>
-                      {recentDevices.length > 0 && (
-                        <div className="device-popover-section">
-                          <div className="device-popover-section-title">Recent</div>
-                          <div className="device-popover-section-body">
-                            {recentDevices.map(renderDeviceRow)}
-                          </div>
-                        </div>
-                      )}
-                      {groupedDevicesFiltered.groupNames.map((group) => (
+                      {groupedDevices.groupNames.map((group) => (
                         <div className="device-popover-section" key={group}>
                           <div className="device-popover-section-title">{group}</div>
                           <div className="device-popover-section-body">
-                            {groupedDevicesFiltered.grouped.get(group)?.map(renderDeviceRow)}
+                            {groupedDevices.grouped.get(group)?.map(renderDeviceRow)}
                           </div>
                         </div>
                       ))}
-                      {groupedDevicesFiltered.ungrouped.length > 0 && (
+                      {groupedDevices.ungrouped.length > 0 && (
                         <div className="device-popover-section">
                           <div className="device-popover-section-title">
-                            {groupedDevicesFiltered.groupNames.length > 0 ? "Ungrouped" : "Devices"}
+                            {groupedDevices.groupNames.length > 0 ? "Ungrouped" : "Devices"}
                           </div>
                           <div className="device-popover-section-body">
-                            {groupedDevicesFiltered.ungrouped.map(renderDeviceRow)}
+                            {groupedDevices.ungrouped.map(renderDeviceRow)}
                           </div>
                         </div>
                       )}
