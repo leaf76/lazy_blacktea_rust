@@ -32,34 +32,16 @@ pub struct AdvertisingSet {
     pub service_uuids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdvertisingState {
     pub is_advertising: bool,
     pub sets: Vec<AdvertisingSet>,
 }
 
-impl Default for AdvertisingState {
-    fn default() -> Self {
-        Self {
-            is_advertising: false,
-            sets: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScanningState {
     pub is_scanning: bool,
     pub clients: Vec<String>,
-}
-
-impl Default for ScanningState {
-    fn default() -> Self {
-        Self {
-            is_scanning: false,
-            clients: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -2,7 +2,8 @@ mod app;
 
 use app::commands::{
     adb_connect, adb_pair, cancel_bugreport, capture_screenshot, capture_ui_hierarchy, check_scrcpy,
-    check_adb, clear_app_data, clear_logcat, delete_device_path, export_logcat,
+    check_adb, clear_app_data, clear_logcat, delete_device_path, export_diagnostics_bundle,
+    export_logcat,
     export_ui_hierarchy, force_stop_app, generate_bugreport, get_config, install_apk_batch,
     launch_app, launch_scrcpy, list_apps, list_device_files, list_devices, mkdir_device_dir,
     open_app_info, prepare_bugreport_logcat, preview_local_file, pull_device_file, push_device_file,
@@ -28,6 +29,7 @@ pub fn run() {
             save_app_config,
             reset_config,
             check_adb,
+            export_diagnostics_bundle,
             list_devices,
             adb_pair,
             adb_connect,

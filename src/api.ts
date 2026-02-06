@@ -39,6 +39,16 @@ export const checkAdb = async (commandPath?: string) => {
   return invoke<CommandResponse<AdbInfo>>("check_adb", payload);
 };
 
+export const exportDiagnosticsBundle = async (outputDir?: string) => {
+  const payload: Record<string, unknown> = {
+    trace_id: createTraceId(),
+  };
+  if (outputDir && outputDir.trim()) {
+    payload.output_dir = outputDir;
+  }
+  return invoke<CommandResponse<string>>("export_diagnostics_bundle", payload);
+};
+
 export const saveConfig = async (config: AppConfig) => {
   return invoke<CommandResponse<AppConfig>>("save_app_config", {
     config,

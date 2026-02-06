@@ -10,6 +10,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+use tracing::warn;
+use uuid::Uuid;
 use zip::read::ZipArchive;
 
 const LOGCAT_TABLE: &str = "logcat";
@@ -43,7 +45,16 @@ struct ParsedLogcatLine {
     raw_line: String,
 }
 
-pub fn prepare_bugreport_logcat(source_path: &Path) -> Result<BugreportLogSummary, String> {
+pub fn prepare_bugreport_logcat(
+    source_path: &Path,
+    trace_id: &str,
+) -> Result<BugreportLogSummary, String> {
+    let trace_id = trace_id.trim();
+    let trace_id = if trace_id.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        trace_id.to_string()
+    };
     if !source_path.exists() {
         return Err("Bugreport path not found".to_string());
     }
@@ -67,18 +78,36 @@ pub fn prepare_bugreport_logcat(source_path: &Path) -> Result<BugreportLogSummar
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
 
-    if let Some(meta) = load_meta(&meta_path) {
-        if meta.source_size == source_size
-            && meta.source_modified == source_modified
-            && meta.source_path == source_path.to_string_lossy()
-            && db_path.exists()
-        {
-            return Ok(meta_to_summary(meta, db_path));
+    match load_meta(&meta_path) {
+        Ok(Some(meta)) => {
+            if meta.source_size == source_size
+                && meta.source_modified == source_modified
+                && meta.source_path == source_path.to_string_lossy()
+                && db_path.exists()
+            {
+                return Ok(meta_to_summary(meta, db_path));
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                error = %err,
+                "Failed to load bugreport logcat cache meta; rebuilding index"
+            );
+            if let Err(err) = fs::remove_file(&meta_path) {
+                warn!(
+                    trace_id = %trace_id,
+                    error = %err,
+                    "Failed to remove invalid bugreport logcat cache meta"
+                );
+            }
         }
     }
 
     if db_path.exists() {
-        let _ = fs::remove_file(&db_path);
+        fs::remove_file(&db_path)
+            .map_err(|err| format!("Failed to remove stale cache db: {err}"))?;
     }
 
     let meta = build_logcat_index(
@@ -117,7 +146,7 @@ pub fn query_bugreport_logcat(
         .map_err(|err| format!("Failed to prepare logcat query: {err}"))?;
 
     let mut rows = Vec::new();
-    let mut rows_iter = stmt
+    let rows_iter = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok(BugreportLogRow {
                 id: row.get(0)?,
@@ -132,7 +161,7 @@ pub fn query_bugreport_logcat(
         })
         .map_err(|err| format!("Failed to execute logcat query: {err}"))?;
 
-    while let Some(row) = rows_iter.next() {
+    for row in rows_iter {
         rows.push(row.map_err(|err| format!("Failed to read logcat row: {err}"))?);
     }
 
@@ -162,7 +191,7 @@ fn build_query_sql(
 ) -> (String, Vec<rusqlite::types::Value>) {
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     let mut clauses: Vec<String> = Vec::new();
-    let mut from = format!("{LOGCAT_TABLE}");
+    let mut from = LOGCAT_TABLE.to_string();
 
     let levels = normalize_levels(filters.levels);
     if !levels.is_empty() {
@@ -173,7 +202,7 @@ fn build_query_sql(
         }
     }
 
-    if let Some(tag) = filters.tag.and_then(|value| normalize_text(value)) {
+    if let Some(tag) = filters.tag.and_then(normalize_text) {
         clauses.push(format!("{LOGCAT_TABLE}.tag = ?"));
         params.push(tag.into());
     }
@@ -185,7 +214,7 @@ fn build_query_sql(
 
     if let Some(start_ts) = filters
         .start_ts
-        .and_then(|value| normalize_text(value))
+        .and_then(normalize_text)
         .and_then(|value| parse_ts_key(&value).map(|key| (value, key)))
     {
         clauses.push(format!("{LOGCAT_TABLE}.ts_key >= ?"));
@@ -194,7 +223,7 @@ fn build_query_sql(
 
     if let Some(end_ts) = filters
         .end_ts
-        .and_then(|value| normalize_text(value))
+        .and_then(normalize_text)
         .and_then(|value| parse_ts_key(&value).map(|key| (value, key)))
     {
         clauses.push(format!("{LOGCAT_TABLE}.ts_key <= ?"));
@@ -206,7 +235,7 @@ fn build_query_sql(
     let include_terms = if include_terms.is_empty() {
         filters
             .text
-            .and_then(|value| normalize_text(value))
+            .and_then(normalize_text)
             .map(|value| vec![value])
             .unwrap_or_default()
     } else {
@@ -281,10 +310,7 @@ fn normalize_levels(levels: Vec<String>) -> Vec<String> {
 }
 
 fn normalize_text_list(values: Vec<String>) -> Vec<String> {
-    values
-        .into_iter()
-        .filter_map(normalize_text)
-        .collect()
+    values.into_iter().filter_map(normalize_text).collect()
 }
 
 fn fts_escape_and(input: &str) -> String {
@@ -406,6 +432,7 @@ fn build_logcat_index(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stream_logcat_lines<R: Read>(
     reader: R,
     connection: &mut Connection,
@@ -436,7 +463,7 @@ fn stream_logcat_lines<R: Read>(
             break;
         }
         let line = String::from_utf8_lossy(&buffer);
-        let trimmed = line.trim_end_matches(|ch| ch == '\n' || ch == '\r');
+        let trimmed = line.trim_end_matches(&['\n', '\r'][..]);
         if trimmed.is_empty() {
             continue;
         }
@@ -526,11 +553,11 @@ fn update_time_range(
     if ts_key == 0 {
         return;
     }
-    if min_ts_key.map_or(true, |value| ts_key < value) {
+    if min_ts_key.is_none_or(|value| ts_key < value) {
         *min_ts_key = Some(ts_key);
         *min_ts_raw = Some(ts_raw.clone());
     }
-    if max_ts_key.map_or(true, |value| ts_key > value) {
+    if max_ts_key.is_none_or(|value| ts_key > value) {
         *max_ts_key = Some(ts_key);
         *max_ts_raw = Some(ts_raw);
     }
@@ -631,9 +658,14 @@ fn find_bugreport_entry(archive: &mut ZipArchive<File>) -> Result<usize, String>
     chosen_index.ok_or_else(|| "No bugreport entry found in archive".to_string())
 }
 
-fn load_meta(path: &Path) -> Option<LogcatCacheMeta> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+fn load_meta(path: &Path) -> Result<Option<LogcatCacheMeta>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(|err| format!("Failed to read cache meta: {err}"))?;
+    let parsed = serde_json::from_slice(&bytes)
+        .map_err(|err| format!("Failed to parse cache meta: {err}"))?;
+    Ok(Some(parsed))
 }
 
 fn meta_to_summary(meta: LogcatCacheMeta, db_path: PathBuf) -> BugreportLogSummary {
@@ -668,12 +700,22 @@ fn stable_path_hash(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn parse_ts_key_orders_values() {
         let first = parse_ts_key("01-01 00:00:00.000").unwrap();
         let second = parse_ts_key("01-01 00:00:00.100").unwrap();
         assert!(second > first);
+    }
+
+    #[test]
+    fn load_meta_reports_parse_errors() {
+        let dir = TempDir::new().expect("tmp");
+        let path = dir.path().join("meta.json");
+        fs::write(&path, b"{not json").expect("write");
+        let err = load_meta(&path).expect_err("expected error");
+        assert!(err.contains("Failed to parse cache meta"));
     }
 
     #[test]

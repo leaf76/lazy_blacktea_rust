@@ -64,7 +64,11 @@ pub fn check_scrcpy_availability() -> ScrcpyAvailability {
     result
 }
 
-pub fn build_scrcpy_command(serial: &str, settings: &ScrcpySettings, major_version: i32) -> Vec<String> {
+pub fn build_scrcpy_command(
+    serial: &str,
+    settings: &ScrcpySettings,
+    major_version: i32,
+) -> Vec<String> {
     let mut args = vec!["scrcpy".to_string(), "-s".to_string(), serial.to_string()];
     let audio_mode = if major_version >= 3 {
         AudioFlagMode::NoAudioOnly
@@ -106,7 +110,12 @@ pub fn build_scrcpy_command(serial: &str, settings: &ScrcpySettings, major_versi
         args.push(settings.max_size.to_string());
     }
     if !settings.extra_args.trim().is_empty() {
-        args.extend(settings.extra_args.split_whitespace().map(|s| s.to_string()));
+        args.extend(
+            settings
+                .extra_args
+                .split_whitespace()
+                .map(|s| s.to_string()),
+        );
     }
     args
 }
@@ -116,6 +125,46 @@ enum AudioFlagMode {
     AudioToggle,
     NoAudioOnly,
     Unsupported,
+}
+
+fn try_version(command: &str) -> Option<String> {
+    let output = Command::new(command).arg("--version").output().ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_scrcpy_major(output: &str) -> i32 {
+    let lower = output.to_lowercase();
+    for token in lower.split_whitespace() {
+        if token.starts_with("scrcpy") {
+            let version = token.trim_start_matches("scrcpy");
+            if let Some(version) = version.strip_prefix("v") {
+                if let Some(major) = version.split('.').next() {
+                    if let Ok(value) = major.parse::<i32>() {
+                        return value;
+                    }
+                }
+            }
+        }
+        if let Some(major) = token.split('.').next() {
+            if let Ok(value) = major.parse::<i32>() {
+                return value;
+            }
+        }
+    }
+    2
+}
+
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path.to_string()
 }
 
 #[cfg(test)]
@@ -177,47 +226,4 @@ mod tests {
         assert!(!has_flag(&args, "--audio"));
         assert!(!has_flag(&args, "--no-audio"));
     }
-}
-
-fn try_version(command: &str) -> Option<String> {
-    let output = Command::new(command)
-        .arg("--version")
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        None
-    }
-}
-
-fn parse_scrcpy_major(output: &str) -> i32 {
-    let lower = output.to_lowercase();
-    for token in lower.split_whitespace() {
-        if token.starts_with("scrcpy") {
-            let version = token.trim_start_matches("scrcpy");
-            if let Some(version) = version.strip_prefix("v") {
-                if let Some(major) = version.split('.').next() {
-                    if let Ok(value) = major.parse::<i32>() {
-                        return value;
-                    }
-                }
-            }
-        }
-        if let Some(major) = token.split('.').next() {
-            if let Ok(value) = major.parse::<i32>() {
-                return value;
-            }
-        }
-    }
-    2
-}
-
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-    path.to_string()
 }

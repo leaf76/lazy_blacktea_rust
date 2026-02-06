@@ -25,27 +25,208 @@ use crate::app::adb::parse::{
     parse_bluetooth_manager_state, parse_dumpsys_version_name as parse_gms_version_name,
     parse_getprop_map, parse_ls_la, parse_settings_bool,
 };
-use crate::app::adb::paths::{device_parent_dir, sanitize_filename_component, validate_device_path};
+use crate::app::adb::paths::{
+    device_parent_dir, sanitize_filename_component, validate_device_path,
+};
 use crate::app::adb::runner::{run_adb, run_command_with_timeout};
 use crate::app::adb::scrcpy::{build_scrcpy_command, check_scrcpy_availability};
 use crate::app::adb::transfer::parse_progress_percent;
 use crate::app::bluetooth::service::start_bluetooth_monitor as start_bluetooth_monitor_service;
 use crate::app::bugreport_logcat;
-use crate::app::config::{
-    clamp_terminal_buffer_lines, load_config, save_config, AppConfig,
-};
+use crate::app::config::{clamp_terminal_buffer_lines, load_config, save_config, AppConfig};
+use crate::app::diagnostics;
 use crate::app::error::AppError;
 use crate::app::models::{
     AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppInfo,
     BugreportLogFilters, BugreportLogPage, BugreportLogSummary, BugreportResult, CommandResponse,
-    CommandResult, DeviceFileEntry,
-    DeviceInfo, FilePreview, HostCommandResult, LogcatExportResult, ScrcpyInfo,
-    TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
+    CommandResult, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LogcatExportResult,
+    ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
+    UiHierarchyExportResult,
 };
 use crate::app::state::{AppState, BugreportHandle, LogcatHandle, RecordingHandle};
 use crate::app::terminal::{TerminalSession, TERMINAL_EVENT_NAME};
 use crate::app::ui_capture::png_bytes_to_data_url;
 use crate::app::ui_xml::render_device_ui_html;
+
+#[cfg(test)]
+mod tests;
+
+type LogcatEmitter = Arc<dyn Fn(LogcatEvent) + Send + Sync>;
+type BugreportChildHolder = Arc<std::sync::Mutex<Option<std::process::Child>>>;
+type BugreportReservation = (Arc<AtomicBool>, BugreportChildHolder);
+
+fn start_logcat_inner(
+    serial: String,
+    filter: Option<String>,
+    adb_program: &str,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, LogcatHandle>>,
+    emitter: LogcatEmitter,
+    trace_id: &str,
+    spawn_logcat: impl FnOnce(&str, &str, Option<&str>, &str) -> Result<std::process::Child, AppError>,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let mut guard = registry
+        .lock()
+        .map_err(|_| AppError::system("Logcat registry locked", trace_id))?;
+    if guard.contains_key(&serial) {
+        return Err(AppError::validation("Logcat already running", trace_id));
+    }
+
+    let mut child = spawn_logcat(
+        adb_program,
+        &serial,
+        filter.as_deref().filter(|value| !value.trim().is_empty()),
+        trace_id,
+    )?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::system("Failed to capture logcat stdout", trace_id))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::system("Failed to capture logcat stderr", trace_id))?;
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_flag_stdout = Arc::clone(&stop_flag);
+    let stop_flag_stderr = Arc::clone(&stop_flag);
+
+    let batch_limit = 50usize;
+    let batch_delay = Duration::from_millis(60);
+
+    let emitter_stdout = Arc::clone(&emitter);
+    let serial_stdout = serial.clone();
+    let trace_stdout = trace_id.to_string();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let mut pending: Vec<String> = Vec::new();
+        let mut last_emit = Instant::now();
+        for line_result in reader.lines() {
+            if stop_flag_stdout.load(Ordering::Relaxed) {
+                break;
+            }
+            let line = match line_result {
+                Ok(line) => line,
+                Err(err) => {
+                    warn!(trace_id = %trace_stdout, error = %err, "failed to read logcat stdout");
+                    break;
+                }
+            };
+            pending.push(line);
+            if pending.len() >= batch_limit || last_emit.elapsed() >= batch_delay {
+                let batch = std::mem::take(&mut pending);
+                (emitter_stdout)(LogcatEvent {
+                    serial: serial_stdout.clone(),
+                    line: None,
+                    lines: batch,
+                    trace_id: trace_stdout.clone(),
+                });
+                last_emit = Instant::now();
+            }
+        }
+        if !pending.is_empty() {
+            (emitter_stdout)(LogcatEvent {
+                serial: serial_stdout,
+                line: None,
+                lines: pending,
+                trace_id: trace_stdout,
+            });
+        }
+    });
+
+    let emitter_stderr = Arc::clone(&emitter);
+    let serial_stderr = serial.clone();
+    let trace_stderr = trace_id.to_string();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut pending: Vec<String> = Vec::new();
+        let mut last_emit = Instant::now();
+        for line_result in reader.lines() {
+            if stop_flag_stderr.load(Ordering::Relaxed) {
+                break;
+            }
+            let line = match line_result {
+                Ok(line) => line,
+                Err(err) => {
+                    warn!(trace_id = %trace_stderr, error = %err, "failed to read logcat stderr");
+                    break;
+                }
+            };
+            pending.push(format!("STDERR: {line}"));
+            if pending.len() >= batch_limit || last_emit.elapsed() >= batch_delay {
+                let batch = std::mem::take(&mut pending);
+                (emitter_stderr)(LogcatEvent {
+                    serial: serial_stderr.clone(),
+                    line: None,
+                    lines: batch,
+                    trace_id: trace_stderr.clone(),
+                });
+                last_emit = Instant::now();
+            }
+        }
+        if !pending.is_empty() {
+            (emitter_stderr)(LogcatEvent {
+                serial: serial_stderr,
+                line: None,
+                lines: pending,
+                trace_id: trace_stderr,
+            });
+        }
+    });
+
+    guard.insert(serial, LogcatHandle { child, stop_flag });
+    Ok(true)
+}
+
+fn stop_logcat_inner(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, LogcatHandle>>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let mut guard = registry
+        .lock()
+        .map_err(|_| AppError::system("Logcat registry locked", trace_id))?;
+    let mut handle = match guard.remove(&serial) {
+        Some(handle) => handle,
+        None => return Err(AppError::validation("Logcat not running", trace_id)),
+    };
+    handle.stop_flag.store(true, Ordering::Relaxed);
+    let _ = handle.child.kill();
+    let _ = handle.child.wait();
+    Ok(true)
+}
+
+fn reserve_bugreport_handle(
+    serial: &str,
+    state: &AppState,
+    trace_id: &str,
+) -> Result<BugreportReservation, AppError> {
+    ensure_non_empty(serial, "serial", trace_id)?;
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let child: BugreportChildHolder = Arc::new(std::sync::Mutex::new(None));
+
+    let mut guard = state
+        .bugreport_processes
+        .lock()
+        .map_err(|_| AppError::system("Bugreport registry locked", trace_id))?;
+    if guard.contains_key(serial) {
+        return Err(AppError::validation("Bugreport already running", trace_id));
+    }
+    guard.insert(
+        serial.to_string(),
+        BugreportHandle {
+            cancel_flag: Arc::clone(&cancel_flag),
+            child: Arc::clone(&child),
+        },
+    );
+
+    Ok((cancel_flag, child))
+}
 
 #[derive(Clone, serde::Serialize)]
 pub struct LogcatEvent {
@@ -79,6 +260,16 @@ fn ensure_non_empty(value: &str, field: &str, trace_id: &str) -> Result<(), AppE
             trace_id,
         ));
     }
+    Ok(())
+}
+
+fn validate_generate_bugreport_inputs(
+    serial: &str,
+    output_dir: &str,
+    trace_id: &str,
+) -> Result<(), AppError> {
+    ensure_non_empty(serial, "serial", trace_id)?;
+    ensure_non_empty(output_dir, "output_dir", trace_id)?;
     Ok(())
 }
 
@@ -248,7 +439,7 @@ fn run_adb_transfer_with_progress(
 }
 
 fn get_adb_program(trace_id: &str) -> Result<String, AppError> {
-    let config = load_config().map_err(|err| AppError::system(err.error, trace_id))?;
+    let config = load_config(trace_id)?;
     let program = resolve_adb_program(&config.adb.command_path);
     if let Err(message) = validate_adb_program(&program) {
         return Err(AppError::validation(message, trace_id));
@@ -259,7 +450,7 @@ fn get_adb_program(trace_id: &str) -> Result<String, AppError> {
 #[tauri::command(async)]
 pub fn get_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfig>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
-    let config = load_config().map_err(|err| AppError::system(err.error, &trace_id))?;
+    let config = load_config(&trace_id)?;
     Ok(CommandResponse {
         trace_id,
         data: config,
@@ -272,7 +463,7 @@ pub fn save_app_config(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<AppConfig>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
-    save_config(&config).map_err(|err| AppError::system(err.error, &trace_id))?;
+    save_config(&config, &trace_id)?;
     Ok(CommandResponse {
         trace_id,
         data: config,
@@ -283,7 +474,7 @@ pub fn save_app_config(
 pub fn reset_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfig>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     let config = AppConfig::default();
-    save_config(&config).map_err(|err| AppError::system(err.error, &trace_id))?;
+    save_config(&config, &trace_id)?;
     Ok(CommandResponse {
         trace_id,
         data: config,
@@ -298,7 +489,7 @@ pub fn check_adb(
     let trace_id = resolve_trace_id(trace_id);
     info!(trace_id = %trace_id, "check_adb");
 
-    let config = load_config().map_err(|err| AppError::system(err.error, &trace_id))?;
+    let config = load_config(&trace_id)?;
     let program = command_path
         .as_deref()
         .map(normalize_command_path)
@@ -360,6 +551,34 @@ pub fn check_adb(
                 Some(output.stderr.trim().to_string())
             },
         },
+    })
+}
+
+#[tauri::command(async)]
+pub fn export_diagnostics_bundle(
+    output_dir: Option<String>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<String>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    info!(trace_id = %trace_id, "export_diagnostics_bundle");
+
+    // Best-effort: diagnostics bundle should still be generated even if config is broken.
+    let adb_program = match load_config(&trace_id) {
+        Ok(config) => resolve_adb_program(&config.adb.command_path),
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                error = %err,
+                "Failed to load config for diagnostics adb program, falling back to default"
+            );
+            "adb".to_string()
+        }
+    };
+
+    let bundle_path = diagnostics::export_diagnostics_bundle(&adb_program, output_dir, &trace_id)?;
+    Ok(CommandResponse {
+        trace_id,
+        data: bundle_path.to_string_lossy().to_string(),
     })
 }
 
@@ -607,6 +826,7 @@ pub fn run_shell(
     serials: Vec<String>,
     command: String,
     parallel: Option<bool>,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
@@ -616,9 +836,10 @@ pub fn run_shell(
     }
 
     let adb_program = get_adb_program(&trace_id)?;
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config(&trace_id)?;
     let timeout = Duration::from_secs(config.command.command_timeout.max(1) as u64);
     let use_parallel = parallel.unwrap_or(config.command.parallel_execution);
+    let scheduler = Arc::clone(&state.scheduler);
 
     let mut results = Vec::with_capacity(serials.len());
     if use_parallel {
@@ -628,7 +849,13 @@ pub fn run_shell(
             let trace_id_clone = trace_id.clone();
             let command_clone = command.clone();
             let adb_program_clone = adb_program.clone();
-            handles.push(std::thread::spawn(move || {
+            let scheduler_clone = Arc::clone(&scheduler);
+            handles.push(std::thread::spawn(move || -> Result<_, AppError> {
+                let _permit = scheduler_clone.acquire_global();
+                let device_lock = scheduler_clone.device_lock(&serial);
+                let _device_guard = device_lock
+                    .lock()
+                    .map_err(|_| AppError::system("Device lock poisoned", &trace_id_clone))?;
                 let args = vec![
                     "-s".to_string(),
                     serial.clone(),
@@ -638,8 +865,8 @@ pub fn run_shell(
                     command_clone,
                 ];
                 let output =
-                    run_command_with_timeout(&adb_program_clone, &args, timeout, &trace_id_clone);
-                (index, serial, output)
+                    run_command_with_timeout(&adb_program_clone, &args, timeout, &trace_id_clone)?;
+                Ok((index, serial, output))
             }));
         }
 
@@ -647,8 +874,7 @@ pub fn run_shell(
         for handle in handles {
             let (index, serial, output) = handle
                 .join()
-                .map_err(|_| AppError::system("Shell command thread panicked", &trace_id))?;
-            let output = output?;
+                .map_err(|_| AppError::system("Shell command thread panicked", &trace_id))??;
             collected.push((
                 index,
                 CommandResult {
@@ -664,6 +890,11 @@ pub fn run_shell(
     } else {
         for serial in serials {
             ensure_non_empty(&serial, "serial", &trace_id)?;
+            let _permit = scheduler.acquire_global();
+            let device_lock = scheduler.device_lock(&serial);
+            let _device_guard = device_lock
+                .lock()
+                .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
             let args = vec![
                 "-s".to_string(),
                 serial.clone(),
@@ -699,7 +930,9 @@ pub fn run_shell(
                     .saturating_sub(config.command.max_history_size);
                 config.command_history = config.command_history.split_off(start);
             }
-            let _ = save_config(&config);
+            if let Err(err) = save_config(&config, &trace_id) {
+                warn!(trace_id = %trace_id, error = %err, "Failed to save command history");
+            }
         }
     }
 
@@ -717,7 +950,7 @@ pub fn persist_terminal_state(
 ) -> Result<CommandResponse<bool>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
 
-    let mut config = load_config().unwrap_or_default();
+    let mut config = load_config(&trace_id)?;
 
     let mut unique_restore_sessions = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -745,8 +978,12 @@ pub fn persist_terminal_state(
     config.terminal.restore_sessions = unique_restore_sessions;
     config.terminal.buffers = next_buffers;
 
-    save_config(&config)
-        .map_err(|err| AppError::system(format!("Failed to persist terminal state: {err}"), &trace_id))?;
+    save_config(&config, &trace_id).map_err(|err| {
+        AppError::system(
+            format!("Failed to persist terminal state: {err}"),
+            &trace_id,
+        )
+    })?;
 
     Ok(CommandResponse {
         trace_id,
@@ -803,7 +1040,12 @@ pub fn start_terminal_session(
         trace_id.clone(),
         emitter,
     )
-    .map_err(|err| AppError::dependency(format!("Failed to start terminal session: {err}"), &trace_id))?;
+    .map_err(|err| {
+        AppError::dependency(
+            format!("Failed to start terminal session: {err}"),
+            &trace_id,
+        )
+    })?;
 
     guard.insert(serial.clone(), session);
 
@@ -834,7 +1076,10 @@ pub fn write_terminal_session(
     };
     if not_running {
         guard.remove(&serial);
-        return Err(AppError::validation("Terminal session not running", &trace_id));
+        return Err(AppError::validation(
+            "Terminal session not running",
+            &trace_id,
+        ));
     }
     let session = guard
         .get(&serial)
@@ -877,6 +1122,7 @@ pub fn stop_terminal_session(
 pub fn reboot_devices(
     serials: Vec<String>,
     mode: Option<String>,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
@@ -886,24 +1132,55 @@ pub fn reboot_devices(
 
     let adb_program = get_adb_program(&trace_id)?;
     let mode = mode.unwrap_or_else(|| "system".to_string());
-    let mut results = Vec::with_capacity(serials.len());
-    for serial in serials {
+    let scheduler = Arc::clone(&state.scheduler);
+
+    let mut handles = Vec::new();
+    for (index, serial) in serials.into_iter().enumerate() {
         ensure_non_empty(&serial, "serial", &trace_id)?;
-        let mut args = vec!["-s".to_string(), serial.clone(), "reboot".to_string()];
-        match mode.as_str() {
-            "recovery" => args.push("recovery".to_string()),
-            "bootloader" => args.push("bootloader".to_string()),
-            _ => {}
-        }
-        let output =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
-        results.push(CommandResult {
-            serial,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_code: output.exit_code,
-        });
+        let scheduler_clone = Arc::clone(&scheduler);
+        let trace_clone = trace_id.clone();
+        let adb_program_clone = adb_program.clone();
+        let mode_clone = mode.clone();
+        handles.push(std::thread::spawn(move || -> Result<_, AppError> {
+            let _permit = scheduler_clone.acquire_global();
+            let device_lock = scheduler_clone.device_lock(&serial);
+            let _device_guard = device_lock
+                .lock()
+                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+
+            let mut args = vec!["-s".to_string(), serial.clone(), "reboot".to_string()];
+            match mode_clone.as_str() {
+                "recovery" => args.push("recovery".to_string()),
+                "bootloader" => args.push("bootloader".to_string()),
+                _ => {}
+            }
+            let output = run_command_with_timeout(
+                &adb_program_clone,
+                &args,
+                Duration::from_secs(10),
+                &trace_clone,
+            )?;
+            Ok((
+                index,
+                CommandResult {
+                    serial,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_code: output.exit_code,
+                },
+            ))
+        }));
     }
+
+    let mut collected = Vec::new();
+    for handle in handles {
+        let (index, result) = handle
+            .join()
+            .map_err(|_| AppError::system("Reboot thread panicked", &trace_id))??;
+        collected.push((index, result));
+    }
+    collected.sort_by_key(|item| item.0);
+    let results = collected.into_iter().map(|item| item.1).collect();
 
     Ok(CommandResponse {
         trace_id,
@@ -915,6 +1192,7 @@ pub fn reboot_devices(
 pub fn set_wifi_state(
     serials: Vec<String>,
     enable: bool,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
@@ -923,26 +1201,56 @@ pub fn set_wifi_state(
     }
 
     let adb_program = get_adb_program(&trace_id)?;
-    let mut results = Vec::with_capacity(serials.len());
-    for serial in serials {
+    let scheduler = Arc::clone(&state.scheduler);
+
+    let mut handles = Vec::new();
+    for (index, serial) in serials.into_iter().enumerate() {
         ensure_non_empty(&serial, "serial", &trace_id)?;
-        let args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "shell".to_string(),
-            "svc".to_string(),
-            "wifi".to_string(),
-            if enable { "enable" } else { "disable" }.to_string(),
-        ];
-        let output =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
-        results.push(CommandResult {
-            serial,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_code: output.exit_code,
-        });
+        let scheduler_clone = Arc::clone(&scheduler);
+        let trace_clone = trace_id.clone();
+        let adb_program_clone = adb_program.clone();
+        handles.push(std::thread::spawn(move || -> Result<_, AppError> {
+            let _permit = scheduler_clone.acquire_global();
+            let device_lock = scheduler_clone.device_lock(&serial);
+            let _device_guard = device_lock
+                .lock()
+                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+
+            let args = vec![
+                "-s".to_string(),
+                serial.clone(),
+                "shell".to_string(),
+                "svc".to_string(),
+                "wifi".to_string(),
+                if enable { "enable" } else { "disable" }.to_string(),
+            ];
+            let output = run_command_with_timeout(
+                &adb_program_clone,
+                &args,
+                Duration::from_secs(10),
+                &trace_clone,
+            )?;
+            Ok((
+                index,
+                CommandResult {
+                    serial,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_code: output.exit_code,
+                },
+            ))
+        }));
     }
+
+    let mut collected = Vec::new();
+    for handle in handles {
+        let (index, result) = handle
+            .join()
+            .map_err(|_| AppError::system("WiFi toggle thread panicked", &trace_id))??;
+        collected.push((index, result));
+    }
+    collected.sort_by_key(|item| item.0);
+    let results = collected.into_iter().map(|item| item.1).collect();
 
     Ok(CommandResponse {
         trace_id,
@@ -954,6 +1262,7 @@ pub fn set_wifi_state(
 pub fn set_bluetooth_state(
     serials: Vec<String>,
     enable: bool,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
@@ -962,46 +1271,80 @@ pub fn set_bluetooth_state(
     }
 
     let adb_program = get_adb_program(&trace_id)?;
-    let mut results = Vec::with_capacity(serials.len());
-    for serial in serials {
+    let scheduler = Arc::clone(&state.scheduler);
+
+    let mut handles = Vec::new();
+    for (index, serial) in serials.into_iter().enumerate() {
         ensure_non_empty(&serial, "serial", &trace_id)?;
-        let mut args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "shell".to_string(),
-            "svc".to_string(),
-            "bluetooth".to_string(),
-            if enable { "enable" } else { "disable" }.to_string(),
-        ];
-        let mut output =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id);
-        if output
-            .as_ref()
-            .ok()
-            .and_then(|out| out.exit_code)
-            .unwrap_or(1)
-            != 0
-        {
-            args = vec![
+        let scheduler_clone = Arc::clone(&scheduler);
+        let trace_clone = trace_id.clone();
+        let adb_program_clone = adb_program.clone();
+        handles.push(std::thread::spawn(move || -> Result<_, AppError> {
+            let _permit = scheduler_clone.acquire_global();
+            let device_lock = scheduler_clone.device_lock(&serial);
+            let _device_guard = device_lock
+                .lock()
+                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+
+            let mut args = vec![
                 "-s".to_string(),
                 serial.clone(),
                 "shell".to_string(),
-                "service".to_string(),
-                "call".to_string(),
-                "bluetooth_manager".to_string(),
-                if enable { "8" } else { "9" }.to_string(),
+                "svc".to_string(),
+                "bluetooth".to_string(),
+                if enable { "enable" } else { "disable" }.to_string(),
             ];
-            output =
-                run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id);
-        }
-        let output = output?;
-        results.push(CommandResult {
-            serial,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_code: output.exit_code,
-        });
+            let mut output = run_command_with_timeout(
+                &adb_program_clone,
+                &args,
+                Duration::from_secs(10),
+                &trace_clone,
+            );
+            if output
+                .as_ref()
+                .ok()
+                .and_then(|out| out.exit_code)
+                .unwrap_or(1)
+                != 0
+            {
+                args = vec![
+                    "-s".to_string(),
+                    serial.clone(),
+                    "shell".to_string(),
+                    "service".to_string(),
+                    "call".to_string(),
+                    "bluetooth_manager".to_string(),
+                    if enable { "8" } else { "9" }.to_string(),
+                ];
+                output = run_command_with_timeout(
+                    &adb_program_clone,
+                    &args,
+                    Duration::from_secs(10),
+                    &trace_clone,
+                );
+            }
+            let output = output?;
+            Ok((
+                index,
+                CommandResult {
+                    serial,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_code: output.exit_code,
+                },
+            ))
+        }));
     }
+
+    let mut collected = Vec::new();
+    for handle in handles {
+        let (index, result) = handle
+            .join()
+            .map_err(|_| AppError::system("Bluetooth toggle thread panicked", &trace_id))??;
+        collected.push((index, result));
+    }
+    collected.sort_by_key(|item| item.0);
+    let results = collected.into_iter().map(|item| item.1).collect();
 
     Ok(CommandResponse {
         trace_id,
@@ -1009,8 +1352,8 @@ pub fn set_bluetooth_state(
     })
 }
 
-#[tauri::command(async)]
-pub fn install_apk_batch(
+#[allow(clippy::too_many_arguments)]
+fn install_apk_batch_inner(
     serials: Vec<String>,
     apk_path: String,
     replace: bool,
@@ -1018,9 +1361,10 @@ pub fn install_apk_batch(
     grant: bool,
     allow_test_packages: bool,
     extra_args: Option<String>,
-    trace_id: Option<String>,
-) -> Result<CommandResponse<ApkBatchInstallResult>, AppError> {
-    let trace_id = resolve_trace_id(trace_id);
+    state: &AppState,
+    trace_id: &str,
+) -> Result<ApkBatchInstallResult, AppError> {
+    let trace_id = trace_id.to_string();
     ensure_non_empty(&apk_path, "apk_path", &trace_id)?;
     if serials.is_empty() {
         return Err(AppError::validation("serials is required", &trace_id));
@@ -1057,10 +1401,7 @@ pub fn install_apk_batch(
                 );
             }
             result.total_duration_seconds = start.elapsed().as_secs_f64();
-            return Ok(CommandResponse {
-                trace_id,
-                data: result,
-            });
+            return Ok(result);
         }
         split_bundle = Some(bundle);
     } else {
@@ -1081,10 +1422,7 @@ pub fn install_apk_batch(
                 );
             }
             result.total_duration_seconds = start.elapsed().as_secs_f64();
-            return Ok(CommandResponse {
-                trace_id,
-                data: result,
-            });
+            return Ok(result);
         }
     }
 
@@ -1094,9 +1432,8 @@ pub fn install_apk_batch(
         .map(|item| item.to_string())
         .collect::<Vec<_>>();
 
-    let use_parallel = load_config()
-        .map(|config| config.command.parallel_execution)
-        .unwrap_or(true);
+    let use_parallel = load_config(&trace_id)?.command.parallel_execution;
+    let scheduler = Arc::clone(&state.scheduler);
 
     let mut handles = Vec::new();
     for serial in serials {
@@ -1105,8 +1442,24 @@ pub fn install_apk_batch(
         let split_paths = split_bundle.as_ref().map(|bundle| bundle.apk_paths.clone());
         let apk_path_clone = apk_path.clone();
         let adb_program_clone = adb_program.clone();
+        let scheduler_clone = Arc::clone(&scheduler);
         handles.push(std::thread::spawn(move || {
             let start_device = std::time::Instant::now();
+            let _permit = scheduler_clone.acquire_global();
+            let device_lock = scheduler_clone.device_lock(&serial);
+            let _device_guard = match device_lock.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return ApkInstallResult {
+                        serial,
+                        success: false,
+                        error_code: ApkInstallErrorCode::UnknownError,
+                        raw_output: "Device lock poisoned".to_string(),
+                        duration_seconds: start_device.elapsed().as_secs_f64(),
+                        device_model: None,
+                    };
+                }
+            };
             let mut args = vec!["-s".to_string(), serial.clone()];
             if let Some(paths) = split_paths {
                 args.push("install-multiple".to_string());
@@ -1199,6 +1552,35 @@ pub fn install_apk_batch(
 
     result.total_duration_seconds = start.elapsed().as_secs_f64();
 
+    Ok(result)
+}
+
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+pub fn install_apk_batch(
+    serials: Vec<String>,
+    apk_path: String,
+    replace: bool,
+    allow_downgrade: bool,
+    grant: bool,
+    allow_test_packages: bool,
+    extra_args: Option<String>,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<ApkBatchInstallResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let result = install_apk_batch_inner(
+        serials,
+        apk_path,
+        replace,
+        allow_downgrade,
+        grant,
+        allow_test_packages,
+        extra_args,
+        state.inner(),
+        &trace_id,
+    )?;
+
     Ok(CommandResponse {
         trace_id,
         data: result,
@@ -1216,7 +1598,7 @@ pub fn capture_screenshot(
     ensure_non_empty(&output_dir, "output_dir", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    let config = load_config().unwrap_or_default();
+    let config = load_config(&trace_id)?;
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
     let safe_serial = sanitize_filename_component(&serial);
     let filename = format!("screenshot_{}_{}.png", safe_serial, timestamp);
@@ -1293,7 +1675,10 @@ pub fn capture_screenshot(
         )?;
         if capture_output.exit_code.unwrap_or(1) != 0 {
             return Err(AppError::dependency(
-                format!("Fallback screencap failed: {}", capture_output.stderr.trim()),
+                format!(
+                    "Fallback screencap failed: {}",
+                    capture_output.stderr.trim()
+                ),
                 &trace_id,
             ));
         }
@@ -1304,12 +1689,8 @@ pub fn capture_screenshot(
             remote_path.clone(),
             output_path_string.clone(),
         ];
-        let pull_output = run_command_with_timeout(
-            &adb_program,
-            &pull_args,
-            Duration::from_secs(20),
-            &trace_id,
-        )?;
+        let pull_output =
+            run_command_with_timeout(&adb_program, &pull_args, Duration::from_secs(20), &trace_id)?;
         if pull_output.exit_code.unwrap_or(1) != 0 {
             return Err(AppError::dependency(
                 format!("Fallback pull failed: {}", pull_output.stderr.trim()),
@@ -1324,9 +1705,12 @@ pub fn capture_screenshot(
             "-f".to_string(),
             remote_path,
         ];
-        if let Err(err) =
-            run_command_with_timeout(&adb_program, &cleanup_args, Duration::from_secs(10), &trace_id)
-        {
+        if let Err(err) = run_command_with_timeout(
+            &adb_program,
+            &cleanup_args,
+            Duration::from_secs(10),
+            &trace_id,
+        ) {
             warn!(
                 trace_id = %trace_id,
                 error = %err.error,
@@ -1344,8 +1728,7 @@ pub fn capture_screenshot(
         Err(err) => Err(AppError::dependency(
             format!(
                 "Screenshot failed (exec-out): {}. Fallback failed: {}",
-                exec_error,
-                err.error
+                exec_error, err.error
             ),
             &trace_id,
         )),
@@ -1370,7 +1753,7 @@ pub fn start_screen_record(
         return Err(AppError::validation("Recording already active", &trace_id));
     }
 
-    let config = load_config().unwrap_or_default();
+    let config = load_config(&trace_id)?;
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
     let remote_path = format!("/sdcard/screenrecord_{}_{}.mp4", serial, timestamp);
 
@@ -1491,7 +1874,7 @@ pub fn stop_screen_record(
         }
     }
 
-    let config = load_config().unwrap_or_default();
+    let config = load_config(&trace_id)?;
     let output_dir = output_dir
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| config.output_path.clone());
@@ -2203,6 +2586,7 @@ pub fn open_app_info(
 pub fn launch_app(
     serials: Vec<String>,
     package_name: String,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
@@ -2212,29 +2596,60 @@ pub fn launch_app(
     }
 
     let adb_program = get_adb_program(&trace_id)?;
-    let mut results = Vec::with_capacity(serials.len());
-    for serial in serials {
+    let scheduler = Arc::clone(&state.scheduler);
+
+    let mut handles = Vec::new();
+    for (index, serial) in serials.into_iter().enumerate() {
         ensure_non_empty(&serial, "serial", &trace_id)?;
-        let args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "shell".to_string(),
-            "monkey".to_string(),
-            "-p".to_string(),
-            package_name.clone(),
-            "-c".to_string(),
-            "android.intent.category.LAUNCHER".to_string(),
-            "1".to_string(),
-        ];
-        let output =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
-        results.push(CommandResult {
-            serial,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_code: output.exit_code,
-        });
+        let scheduler_clone = Arc::clone(&scheduler);
+        let trace_clone = trace_id.clone();
+        let adb_program_clone = adb_program.clone();
+        let package_clone = package_name.clone();
+        handles.push(std::thread::spawn(move || -> Result<_, AppError> {
+            let _permit = scheduler_clone.acquire_global();
+            let device_lock = scheduler_clone.device_lock(&serial);
+            let _device_guard = device_lock
+                .lock()
+                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+
+            let args = vec![
+                "-s".to_string(),
+                serial.clone(),
+                "shell".to_string(),
+                "monkey".to_string(),
+                "-p".to_string(),
+                package_clone,
+                "-c".to_string(),
+                "android.intent.category.LAUNCHER".to_string(),
+                "1".to_string(),
+            ];
+            let output = run_command_with_timeout(
+                &adb_program_clone,
+                &args,
+                Duration::from_secs(10),
+                &trace_clone,
+            )?;
+            Ok((
+                index,
+                CommandResult {
+                    serial,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_code: output.exit_code,
+                },
+            ))
+        }));
     }
+
+    let mut collected = Vec::new();
+    for handle in handles {
+        let (index, result) = handle
+            .join()
+            .map_err(|_| AppError::system("Launch app thread panicked", &trace_id))??;
+        collected.push((index, result));
+    }
+    collected.sort_by_key(|item| item.0);
+    let results = collected.into_iter().map(|item| item.1).collect();
 
     Ok(CommandResponse {
         trace_id,
@@ -2260,6 +2675,7 @@ pub fn check_scrcpy(trace_id: Option<String>) -> Result<CommandResponse<ScrcpyIn
 #[tauri::command(async)]
 pub fn launch_scrcpy(
     serials: Vec<String>,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
@@ -2271,11 +2687,26 @@ pub fn launch_scrcpy(
     if !availability.available {
         return Err(AppError::dependency("scrcpy is not available", &trace_id));
     }
-    let config = load_config().unwrap_or_default();
+    let config = load_config(&trace_id)?;
+    let scheduler = Arc::clone(&state.scheduler);
 
     let mut results = Vec::with_capacity(serials.len());
     for serial in serials {
         ensure_non_empty(&serial, "serial", &trace_id)?;
+        let _permit = scheduler.acquire_global();
+        let device_lock = scheduler.device_lock(&serial);
+        let _device_guard = match device_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                results.push(CommandResult {
+                    serial,
+                    stdout: String::new(),
+                    stderr: "Device lock poisoned".to_string(),
+                    exit_code: Some(1),
+                });
+                continue;
+            }
+        };
         let mut args = build_scrcpy_command(&serial, &config.scrcpy, availability.major_version);
         if !availability.command_path.trim().is_empty() {
             args[0] = availability.command_path.clone();
@@ -2283,7 +2714,10 @@ pub fn launch_scrcpy(
         let mut iter = args.into_iter();
         let command_path = iter.next().unwrap_or_else(|| "scrcpy".to_string());
         let mut command = Command::new(command_path);
-        command.args(iter).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .args(iter)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let spawn_result = command.spawn();
         match spawn_result {
             Ok(mut child) => {
@@ -2295,7 +2729,11 @@ pub fn launch_scrcpy(
                             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                             let exit_code = output.status.code().unwrap_or(1);
                             let (final_exit, final_stderr) = if output.status.success() {
-                                let detail = if !stderr.is_empty() { stderr } else { stdout.clone() };
+                                let detail = if !stderr.is_empty() {
+                                    stderr
+                                } else {
+                                    stdout.clone()
+                                };
                                 let message = if detail.is_empty() {
                                     "scrcpy exited immediately".to_string()
                                 } else {
@@ -2365,7 +2803,7 @@ pub fn capture_ui_hierarchy(
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    let config = load_config().unwrap_or_default();
+    let config = load_config(&trace_id)?;
     let output = Command::new(&adb_program)
         .args(["-s", &serial, "exec-out", "uiautomator", "dump", "/dev/tty"])
         .output()
@@ -2458,7 +2896,7 @@ pub fn export_ui_hierarchy(
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    let config = load_config().unwrap_or_default();
+    let config = load_config(&trace_id)?;
     let resolved_dir = output_dir
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| {
@@ -2570,145 +3008,35 @@ pub fn start_logcat(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<bool>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
-    ensure_non_empty(&serial, "serial", &trace_id)?;
-
     let adb_program = get_adb_program(&trace_id)?;
-    let mut guard = state
-        .logcat_processes
-        .lock()
-        .map_err(|_| AppError::system("Logcat registry locked", &trace_id))?;
-    if guard.contains_key(&serial) {
-        return Err(AppError::validation("Logcat already running", &trace_id));
-    }
-
-    let mut cmd = Command::new(&adb_program);
-    cmd.args(["-s", &serial, "logcat"]);
-    if let Some(filter) = filter.as_ref().filter(|value| !value.trim().is_empty()) {
-        cmd.args(filter.split_whitespace());
-    }
-
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| AppError::dependency(format!("Failed to start logcat: {err}"), &trace_id))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AppError::system("Failed to capture logcat stdout", &trace_id))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| AppError::system("Failed to capture logcat stderr", &trace_id))?;
-
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_flag_stdout = Arc::clone(&stop_flag);
-    let stop_flag_stderr = Arc::clone(&stop_flag);
-    let batch_limit = 50usize;
-    let batch_delay = Duration::from_millis(60);
-    let app_stdout = app.clone();
-    let serial_stdout = serial.clone();
-    let trace_stdout = trace_id.clone();
-
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        let mut pending: Vec<String> = Vec::new();
-        let mut last_emit = Instant::now();
-        for line_result in reader.lines() {
-            if stop_flag_stdout.load(Ordering::Relaxed) {
-                break;
-            }
-            let line = match line_result {
-                Ok(line) => line,
-                Err(err) => {
-                    warn!(trace_id = %trace_stdout, error = %err, "failed to read logcat stdout");
-                    break;
-                }
-            };
-            pending.push(line);
-            if pending.len() >= batch_limit || last_emit.elapsed() >= batch_delay {
-                let batch = std::mem::take(&mut pending);
-                if let Err(err) = app_stdout.emit(
-                    "logcat-line",
-                    LogcatEvent {
-                        serial: serial_stdout.clone(),
-                        line: None,
-                        lines: batch,
-                        trace_id: trace_stdout.clone(),
-                    },
-                ) {
-                    warn!(trace_id = %trace_stdout, error = %err, "failed to emit logcat line");
-                }
-                last_emit = Instant::now();
-            }
-        }
-        if !pending.is_empty() {
-            if let Err(err) = app_stdout.emit(
-                "logcat-line",
-                LogcatEvent {
-                    serial: serial_stdout.clone(),
-                    line: None,
-                    lines: pending,
-                    trace_id: trace_stdout.clone(),
-                },
-            ) {
-                warn!(trace_id = %trace_stdout, error = %err, "failed to emit logcat line");
-            }
+    let trace_emit = trace_id.clone();
+    let emitter: LogcatEmitter = Arc::new(move |event: LogcatEvent| {
+        if let Err(err) = app.emit("logcat-line", event) {
+            warn!(trace_id = %trace_emit, error = %err, "failed to emit logcat line");
         }
     });
 
-    let app_stderr = app.clone();
-    let serial_stderr = serial.clone();
-    let trace_stderr = trace_id.clone();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        let mut pending: Vec<String> = Vec::new();
-        let mut last_emit = Instant::now();
-        for line_result in reader.lines() {
-            if stop_flag_stderr.load(Ordering::Relaxed) {
-                break;
+    start_logcat_inner(
+        serial,
+        filter,
+        &adb_program,
+        &state.logcat_processes,
+        emitter,
+        &trace_id,
+        |program, serial, filter, trace_id| {
+            let mut cmd = Command::new(program);
+            cmd.args(["-s", serial, "logcat"]);
+            if let Some(filter) = filter {
+                cmd.args(filter.split_whitespace());
             }
-            let line = match line_result {
-                Ok(line) => line,
-                Err(err) => {
-                    warn!(trace_id = %trace_stderr, error = %err, "failed to read logcat stderr");
-                    break;
-                }
-            };
-            pending.push(format!("STDERR: {line}"));
-            if pending.len() >= batch_limit || last_emit.elapsed() >= batch_delay {
-                let batch = std::mem::take(&mut pending);
-                if let Err(err) = app_stderr.emit(
-                    "logcat-line",
-                    LogcatEvent {
-                        serial: serial_stderr.clone(),
-                        line: None,
-                        lines: batch,
-                        trace_id: trace_stderr.clone(),
-                    },
-                ) {
-                    warn!(trace_id = %trace_stderr, error = %err, "failed to emit logcat stderr");
-                }
-                last_emit = Instant::now();
-            }
-        }
-        if !pending.is_empty() {
-            if let Err(err) = app_stderr.emit(
-                "logcat-line",
-                LogcatEvent {
-                    serial: serial_stderr.clone(),
-                    line: None,
-                    lines: pending,
-                    trace_id: trace_stderr.clone(),
-                },
-            ) {
-                warn!(trace_id = %trace_stderr, error = %err, "failed to emit logcat stderr");
-            }
-        }
-    });
-
-    guard.insert(serial, LogcatHandle { child, stop_flag });
+            cmd.stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|err| {
+                    AppError::dependency(format!("Failed to start logcat: {err}"), trace_id)
+                })
+        },
+    )?;
 
     Ok(CommandResponse {
         trace_id,
@@ -2723,19 +3051,7 @@ pub fn stop_logcat(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<bool>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
-    ensure_non_empty(&serial, "serial", &trace_id)?;
-
-    let mut guard = state
-        .logcat_processes
-        .lock()
-        .map_err(|_| AppError::system("Logcat registry locked", &trace_id))?;
-    let mut handle = match guard.remove(&serial) {
-        Some(handle) => handle,
-        None => return Err(AppError::validation("Logcat not running", &trace_id)),
-    };
-    handle.stop_flag.store(true, Ordering::Relaxed);
-    let _ = handle.child.kill();
-    let _ = handle.child.wait();
+    stop_logcat_inner(serial, &state.logcat_processes, &trace_id)?;
 
     Ok(CommandResponse {
         trace_id,
@@ -2784,7 +3100,7 @@ pub fn export_logcat(
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
-    let config = load_config().unwrap_or_default();
+    let config = load_config(&trace_id)?;
     let resolved_dir = output_dir
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| {
@@ -2889,8 +3205,7 @@ pub fn generate_bugreport(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<BugreportResult>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
-    ensure_non_empty(&serial, "serial", &trace_id)?;
-    ensure_non_empty(&output_dir, "output_dir", &trace_id)?;
+    validate_generate_bugreport_inputs(&serial, &output_dir, &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
     fs::create_dir_all(&output_dir).map_err(|err| {
@@ -2900,24 +3215,7 @@ pub fn generate_bugreport(
     let filename = format!("bugreport_{}_{}.zip", serial, timestamp);
     let output_path = PathBuf::from(output_dir).join(filename);
 
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    let child = Arc::new(std::sync::Mutex::new(None));
-    {
-        let mut guard = state
-            .bugreport_processes
-            .lock()
-            .map_err(|_| AppError::system("Bugreport registry locked", &trace_id))?;
-        if guard.contains_key(&serial) {
-            return Err(AppError::validation("Bugreport already running", &trace_id));
-        }
-        guard.insert(
-            serial.clone(),
-            BugreportHandle {
-                cancel_flag: Arc::clone(&cancel_flag),
-                child: Arc::clone(&child),
-            },
-        );
-    }
+    let (cancel_flag, child) = reserve_bugreport_handle(&serial, &state, &trace_id)?;
 
     let mut result = BugreportResult {
         serial: serial.clone(),
@@ -3038,20 +3336,30 @@ pub fn cancel_bugreport(
     })
 }
 
+fn prepare_bugreport_logcat_inner(
+    source_path: &str,
+    trace_id: &str,
+) -> Result<BugreportLogSummary, AppError> {
+    ensure_non_empty(source_path, "source_path", trace_id)?;
+    let path = PathBuf::from(source_path);
+    bugreport_logcat::prepare_bugreport_logcat(&path, trace_id)
+        .map_err(|err| AppError::system(err, trace_id))
+}
+
 #[tauri::command(async)]
 pub async fn prepare_bugreport_logcat(
     source_path: String,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<BugreportLogSummary>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
-    ensure_non_empty(&source_path, "source_path", &trace_id)?;
-    let path = PathBuf::from(&source_path);
+    let trace_for_worker = trace_id.clone();
+    let source_for_worker = source_path.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        bugreport_logcat::prepare_bugreport_logcat(&path)
+        prepare_bugreport_logcat_inner(&source_for_worker, &trace_for_worker)
     })
     .await
     .map_err(|_| AppError::system("Bugreport log index thread failed", &trace_id))?
-    .map_err(|err| AppError::system(err, &trace_id))?;
+    ?;
 
     Ok(CommandResponse {
         trace_id,

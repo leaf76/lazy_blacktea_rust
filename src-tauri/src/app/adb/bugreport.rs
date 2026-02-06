@@ -15,7 +15,7 @@ pub fn parse_bugreportz_line(line: &str) -> BugreportzPayload {
     }
     let upper = raw.to_uppercase();
     if upper.starts_with("PROGRESS") {
-        let payload = raw.splitn(2, ':').nth(1).unwrap_or("").trim();
+        let payload = raw.split_once(':').map(|x| x.1).unwrap_or("").trim();
         if payload.is_empty() {
             return BugreportzPayload::Unknown {
                 raw: line.to_string(),
@@ -38,7 +38,7 @@ pub fn parse_bugreportz_line(line: &str) -> BugreportzPayload {
         };
     }
     if upper.starts_with("OK") {
-        let payload = raw.splitn(2, ':').nth(1).unwrap_or("").trim();
+        let payload = raw.split_once(':').map(|x| x.1).unwrap_or("").trim();
         if payload.is_empty() {
             return BugreportzPayload::Unknown {
                 raw: line.to_string(),
@@ -54,7 +54,7 @@ pub fn parse_bugreportz_line(line: &str) -> BugreportzPayload {
         };
     }
     if upper.starts_with("FAIL") {
-        let payload = raw.splitn(2, ':').nth(1).unwrap_or(raw).trim();
+        let payload = raw.split_once(':').map(|x| x.1).unwrap_or(raw).trim();
         return BugreportzPayload::Fail {
             reason: payload.to_string(),
         };

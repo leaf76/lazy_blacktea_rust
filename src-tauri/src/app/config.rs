@@ -4,6 +4,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::app::error::AppError;
+use tracing::warn;
+use uuid::Uuid;
+
+fn normalize_trace_id(trace_id: &str) -> String {
+    let trimmed = trace_id.trim();
+    if trimmed.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 
 fn resolve_default_output_dir(download_dir: Option<PathBuf>, home_dir: Option<PathBuf>) -> String {
     if let Some(dir) = download_dir {
@@ -103,17 +114,9 @@ impl Default for CommandSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AdbSettings {
     pub command_path: String,
-}
-
-impl Default for AdbSettings {
-    fn default() -> Self {
-        Self {
-            command_path: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -269,21 +272,12 @@ impl Default for LogcatViewerSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TerminalSettings {
     #[serde(default)]
     pub restore_sessions: Vec<String>,
     #[serde(default)]
     pub buffers: HashMap<String, Vec<String>>,
-}
-
-impl Default for TerminalSettings {
-    fn default() -> Self {
-        Self {
-            restore_sessions: Vec::new(),
-            buffers: HashMap::new(),
-        }
-    }
 }
 
 pub const TERMINAL_PERSIST_MAX_LINES: usize = 500;
@@ -391,23 +385,26 @@ pub fn backup_config_path() -> PathBuf {
     PathBuf::from(home).join(".lazy_blacktea_config.backup.json")
 }
 
-pub fn load_config() -> Result<AppConfig, AppError> {
-    load_config_from_path(&config_path())
+pub fn load_config(trace_id: &str) -> Result<AppConfig, AppError> {
+    load_config_from_path(&config_path(), trace_id)
 }
 
-pub fn save_config(config: &AppConfig) -> Result<(), AppError> {
-    save_config_to_path(config, &config_path(), &backup_config_path())
+pub fn save_config(config: &AppConfig, trace_id: &str) -> Result<(), AppError> {
+    save_config_to_path(config, &config_path(), &backup_config_path(), trace_id)
 }
 
-pub fn load_config_from_path(path: &Path) -> Result<AppConfig, AppError> {
+pub fn load_config_from_path(path: &Path, trace_id: &str) -> Result<AppConfig, AppError> {
+    let trace_id = normalize_trace_id(trace_id);
     if !path.exists() {
         return Ok(AppConfig::default());
     }
     let raw = fs::read_to_string(path)
-        .map_err(|err| AppError::system(format!("Failed to read config: {err}"), ""))?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|err| AppError::system(format!("Failed to parse config: {err}"), ""))?;
-    let mut config: AppConfig = serde_json::from_value(value.clone()).unwrap_or_default();
+        .map_err(|err| AppError::system(format!("Failed to read config: {err}"), &trace_id))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+        AppError::validation(format!("Failed to parse config JSON: {err}"), &trace_id)
+    })?;
+    let mut config: AppConfig = serde_json::from_value(value.clone())
+        .map_err(|err| AppError::validation(format!("Config file is invalid: {err}"), &trace_id))?;
     config = apply_legacy_overrides(config, &value);
     Ok(validate_config(config))
 }
@@ -416,17 +413,27 @@ pub fn save_config_to_path(
     config: &AppConfig,
     path: &Path,
     backup_path: &Path,
+    trace_id: &str,
 ) -> Result<(), AppError> {
+    let trace_id = normalize_trace_id(trace_id);
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::system(format!("Failed to create config dir: {err}"), &trace_id)
+        })?;
     }
     if path.exists() {
-        let _ = fs::copy(path, backup_path);
+        if let Err(err) = fs::copy(path, backup_path) {
+            warn!(
+                trace_id = %trace_id,
+                error = %err,
+                "Failed to backup config file"
+            );
+        }
     }
     let payload = serde_json::to_string_pretty(config)
-        .map_err(|err| AppError::system(format!("Failed to serialize config: {err}"), ""))?;
+        .map_err(|err| AppError::system(format!("Failed to serialize config: {err}"), &trace_id))?;
     fs::write(path, payload)
-        .map_err(|err| AppError::system(format!("Failed to write config: {err}"), ""))?;
+        .map_err(|err| AppError::system(format!("Failed to write config: {err}"), &trace_id))?;
     Ok(())
 }
 
@@ -507,6 +514,7 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn merges_legacy_values() {
@@ -582,6 +590,19 @@ mod tests {
     }
 
     #[test]
+    fn load_config_reports_invalid_config_instead_of_silently_defaulting() {
+        let dir = TempDir::new().expect("tmp");
+        let path = dir.path().join("config.json");
+        // window_width is expected to be a number; a string should fail deserialization.
+        let payload = r#"{ "ui": { "window_width": "oops" } }"#;
+        fs::write(&path, payload).expect("write");
+
+        let err = load_config_from_path(&path, "test-trace").expect_err("expected error");
+        assert_eq!(err.code, "ERR_VALIDATION");
+        assert_eq!(err.trace_id, "test-trace");
+    }
+
+    #[test]
     fn clamp_terminal_buffer_lines_trims_length_and_count() {
         let mut lines = vec![
             "short".to_string(),
@@ -592,6 +613,8 @@ mod tests {
         }
         clamp_terminal_buffer_lines(&mut lines);
         assert!(lines.len() <= TERMINAL_PERSIST_MAX_LINES);
-        assert!(lines.iter().all(|line| line.len() <= TERMINAL_PERSIST_MAX_LINE_CHARS));
+        assert!(lines
+            .iter()
+            .all(|line| line.len() <= TERMINAL_PERSIST_MAX_LINE_CHARS));
     }
 }

@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::app::bluetooth::service::BluetoothMonitorHandle;
+use crate::app::scheduler::TaskScheduler;
 use crate::app::terminal::TerminalSession;
 
 pub struct LogcatHandle {
@@ -22,6 +23,7 @@ pub struct BugreportHandle {
 }
 
 pub struct AppState {
+    pub scheduler: Arc<TaskScheduler>,
     pub recording_processes: Mutex<HashMap<String, RecordingHandle>>,
     pub logcat_processes: Mutex<HashMap<String, LogcatHandle>>,
     pub bugreport_processes: Mutex<HashMap<String, BugreportHandle>>,
@@ -32,6 +34,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            scheduler: Arc::new(TaskScheduler::new(8)),
             recording_processes: Mutex::new(HashMap::new()),
             logcat_processes: Mutex::new(HashMap::new()),
             bugreport_processes: Mutex::new(HashMap::new()),

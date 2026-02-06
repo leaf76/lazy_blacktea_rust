@@ -67,7 +67,8 @@ pub fn start_bluetooth_monitor(
                 "shell".to_string(),
                 "sh".to_string(),
                 "-c".to_string(),
-                "dumpsys bluetooth_manager && echo '---SEPARATOR---' && dumpsys bluetooth_adapter".to_string(),
+                "dumpsys bluetooth_manager && echo '---SEPARATOR---' && dumpsys bluetooth_adapter"
+                    .to_string(),
             ];
             let output = run_command_with_timeout(
                 &adb_program_snapshot,
@@ -84,8 +85,11 @@ pub fn start_bluetooth_monitor(
                     if changed {
                         last_activity = Some(Instant::now());
                     }
-                    let snapshot =
-                        parser_snapshot.parse_snapshot(&serial_snapshot, &raw, start.elapsed().as_secs_f64());
+                    let snapshot = parser_snapshot.parse_snapshot(
+                        &serial_snapshot,
+                        &raw,
+                        start.elapsed().as_secs_f64(),
+                    );
                     let update = machine.apply_snapshot(&snapshot);
                     emit_snapshot(&app_snapshot, snapshot, &trace_snapshot);
                     if update.changed {
@@ -129,10 +133,17 @@ pub fn start_bluetooth_monitor(
             None => return,
         };
         let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line in reader.lines() {
             if stop_logcat.load(Ordering::Relaxed) {
                 break;
             }
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    warn!(trace_id = %trace_logcat, error = %err, "failed to read bluetooth logcat stdout");
+                    break;
+                }
+            };
             if let Some(event) =
                 parser_logcat.parse_log_line(&serial_logcat, &line, current_timestamp())
             {
@@ -143,7 +154,9 @@ pub fn start_bluetooth_monitor(
                 }
             }
         }
-        let _ = child.kill();
+        if let Err(err) = child.kill() {
+            warn!(trace_id = %trace_logcat, error = %err, "failed to stop bluetooth logcat child");
+        }
     }));
 
     BluetoothMonitorHandle { stop_flag, threads }
@@ -179,7 +192,7 @@ fn adjust_interval(current: f64, last_activity: Option<Instant>, now: Instant) -
     };
     let idle_time = now.duration_since(last).as_secs_f64();
     if idle_time < IDLE_THRESHOLD_S {
-        current.min(DEFAULT_INTERVAL_S).max(MIN_INTERVAL_S)
+        current.clamp(MIN_INTERVAL_S, DEFAULT_INTERVAL_S)
     } else {
         let slowdown = (1.0 + (idle_time - IDLE_THRESHOLD_S) / 60.0).min(2.0);
         (DEFAULT_INTERVAL_S * slowdown).min(MAX_INTERVAL_S)

@@ -87,12 +87,7 @@ impl BluetoothParser {
         }
     }
 
-    pub fn parse_log_line(
-        &self,
-        serial: &str,
-        line: &str,
-        timestamp: f64,
-    ) -> Option<ParsedEvent> {
+    pub fn parse_log_line(&self, serial: &str, line: &str, timestamp: f64) -> Option<ParsedEvent> {
         if line.trim().is_empty() {
             return None;
         }
@@ -120,11 +115,7 @@ impl BluetoothParser {
         None
     }
 
-    fn extract_scanning_state(
-        &self,
-        lines: &[String],
-        lowered: &[String],
-    ) -> ScanningState {
+    fn extract_scanning_state(&self, lines: &[String], lowered: &[String]) -> ScanningState {
         let scanning_keywords = [
             "startscan",
             "isdiscovering: true",
@@ -152,14 +143,13 @@ impl BluetoothParser {
                 }
             }
         }
-        ScanningState { is_scanning, clients }
+        ScanningState {
+            is_scanning,
+            clients,
+        }
     }
 
-    fn extract_advertising_state(
-        &self,
-        lines: &[String],
-        lowered: &[String],
-    ) -> AdvertisingState {
+    fn extract_advertising_state(&self, lines: &[String], lowered: &[String]) -> AdvertisingState {
         let advertising_keywords = [
             "startadvertising",
             "onadvertisingsetstarted",
@@ -175,7 +165,10 @@ impl BluetoothParser {
         } else {
             Vec::new()
         };
-        AdvertisingState { is_advertising, sets }
+        AdvertisingState {
+            is_advertising,
+            sets,
+        }
     }
 
     fn build_advertising_set(&self, lines: &[String]) -> AdvertisingSet {
@@ -185,9 +178,7 @@ impl BluetoothParser {
             .re_tx_power
             .captures(&raw_dump)
             .map(|caps| caps[1].to_string());
-        let data_length = self
-            .extract_int(&self.re_data_len, &raw_dump)
-            .unwrap_or(0);
+        let data_length = self.extract_int(&self.re_data_len, &raw_dump).unwrap_or(0);
         let uuids = self.extract_uuids(&raw_dump);
         let set_id = self
             .re_set_id
@@ -225,9 +216,14 @@ impl BluetoothParser {
         for line in lines {
             let line_stripped = line.trim();
             let line_lower = line_stripped.to_lowercase();
-            if ["bonded devices", "bonded_devices", "paired devices", "getbondeddevices"]
-                .iter()
-                .any(|header| line_lower.contains(header))
+            if [
+                "bonded devices",
+                "bonded_devices",
+                "paired devices",
+                "getbondeddevices",
+            ]
+            .iter()
+            .any(|header| line_lower.contains(header))
             {
                 in_bonded_section = true;
                 continue;
@@ -257,7 +253,10 @@ impl BluetoothParser {
         }
         if let Some(caps) = self.re_bonded_device.captures(line) {
             let address = caps[1].to_uppercase();
-            let name = caps.get(2).or_else(|| caps.get(3)).map(|m| m.as_str().trim().to_string());
+            let name = caps
+                .get(2)
+                .or_else(|| caps.get(3))
+                .map(|m| m.as_str().trim().to_string());
             return Some(BondedDevice {
                 address,
                 name,
@@ -282,8 +281,16 @@ impl BluetoothParser {
     }
 
     fn classify_event(&self, lowered_line: &str) -> Option<BluetoothEventType> {
-        let advertising_keywords = ["startadvertising", "onadvertisingsetstarted", "isadvertising: true"];
-        let advertising_stop = ["stopadvertising", "onadvertisingsetstopped", "isadvertising: false"];
+        let advertising_keywords = [
+            "startadvertising",
+            "onadvertisingsetstarted",
+            "isadvertising: true",
+        ];
+        let advertising_stop = [
+            "stopadvertising",
+            "onadvertisingsetstopped",
+            "isadvertising: false",
+        ];
         let scanning_keywords = [
             "startscan",
             "isdiscovering: true",
@@ -292,19 +299,31 @@ impl BluetoothParser {
             "onscanresult",
         ];
         let scanning_stop = ["stopscan", "isdiscovering: false", "isscanning: false"];
-        if advertising_keywords.iter().any(|keyword| lowered_line.contains(keyword)) {
+        if advertising_keywords
+            .iter()
+            .any(|keyword| lowered_line.contains(keyword))
+        {
             return Some(BluetoothEventType::AdvertisingStart);
         }
-        if advertising_stop.iter().any(|keyword| lowered_line.contains(keyword)) {
+        if advertising_stop
+            .iter()
+            .any(|keyword| lowered_line.contains(keyword))
+        {
             return Some(BluetoothEventType::AdvertisingStop);
         }
         if lowered_line.contains("onscanresult") {
             return Some(BluetoothEventType::ScanResult);
         }
-        if scanning_keywords.iter().any(|keyword| lowered_line.contains(keyword)) {
+        if scanning_keywords
+            .iter()
+            .any(|keyword| lowered_line.contains(keyword))
+        {
             return Some(BluetoothEventType::ScanStart);
         }
-        if scanning_stop.iter().any(|keyword| lowered_line.contains(keyword)) {
+        if scanning_stop
+            .iter()
+            .any(|keyword| lowered_line.contains(keyword))
+        {
             return Some(BluetoothEventType::ScanStop);
         }
         if lowered_line.contains("connect") && lowered_line.contains("gatt") {
@@ -326,7 +345,11 @@ impl BluetoothParser {
         (None, line.trim().to_string())
     }
 
-    fn extract_metadata(&self, lowered_line: &str, message: &str) -> HashMap<String, serde_json::Value> {
+    fn extract_metadata(
+        &self,
+        lowered_line: &str,
+        message: &str,
+    ) -> HashMap<String, serde_json::Value> {
         let mut metadata = HashMap::new();
         if let Some(caps) = self.re_set_id.captures(lowered_line) {
             if let Ok(set_id) = caps[1].parse::<i32>() {
@@ -334,7 +357,10 @@ impl BluetoothParser {
             }
         }
         if let Some(caps) = self.re_tx_power.captures(lowered_line) {
-            metadata.insert("tx_power".to_string(), serde_json::json!(caps[1].to_uppercase()));
+            metadata.insert(
+                "tx_power".to_string(),
+                serde_json::json!(caps[1].to_uppercase()),
+            );
         }
         if let Some(caps) = self.re_data_len.captures(lowered_line) {
             if let Ok(value) = caps[1].parse::<i32>() {
@@ -342,7 +368,10 @@ impl BluetoothParser {
             }
         }
         if let Some(caps) = self.re_client_uid.captures(message) {
-            metadata.insert("client".to_string(), serde_json::json!(format!("uid/{}", &caps[1])));
+            metadata.insert(
+                "client".to_string(),
+                serde_json::json!(format!("uid/{}", &caps[1])),
+            );
         } else if let Some(caps) = self.re_client.captures(message) {
             metadata.insert("client".to_string(), serde_json::json!(caps[1].to_string()));
         }
@@ -360,7 +389,7 @@ impl BluetoothParser {
         if let Some(caps) = self.re_uuids.captures(text) {
             let raw_list = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             return raw_list
-                .split(|ch| ch == ',' || ch == ':')
+                .split(&[',', ':'][..])
                 .filter_map(|item| {
                     let trimmed = item.trim();
                     if trimmed.is_empty() {

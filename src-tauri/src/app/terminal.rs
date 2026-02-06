@@ -34,15 +34,18 @@ impl TerminalSession {
             .stderr(Stdio::piped());
 
         let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            std::io::Error::other("Failed to capture stdin")
-        })?;
-        let mut stdout = child.stdout.take().ok_or_else(|| {
-            std::io::Error::other("Failed to capture stdout")
-        })?;
-        let mut stderr = child.stderr.take().ok_or_else(|| {
-            std::io::Error::other("Failed to capture stderr")
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("Failed to capture stdin"))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("Failed to capture stdout"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("Failed to capture stderr"))?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_stdout = Arc::clone(&stop_flag);
@@ -85,7 +88,14 @@ impl TerminalSession {
                 };
                 let chunk = String::from_utf8_lossy(&temp[..read_count]);
                 pending.push_str(&chunk);
-                if pending.len() >= batch_max_len || last_emit.elapsed() >= batch_delay {
+                // Flush on common "end of burst" signals. With blocking reads, a time-based
+                // flush alone can stall forever when only a single small chunk arrives.
+                if pending.len() >= batch_max_len
+                    || read_count < temp.len()
+                    || chunk.contains('\n')
+                    || chunk.contains('\r')
+                    || last_emit.elapsed() >= batch_delay
+                {
                     let flush = std::mem::take(&mut pending);
                     (emitter_stdout)(TerminalEvent {
                         serial: serial_stdout.clone(),
@@ -131,7 +141,14 @@ impl TerminalSession {
                 };
                 let chunk = String::from_utf8_lossy(&temp[..read_count]);
                 pending.push_str(&chunk);
-                if pending.len() >= batch_max_len || last_emit.elapsed() >= batch_delay {
+                // Flush on common "end of burst" signals. With blocking reads, a time-based
+                // flush alone can stall forever when only a single small chunk arrives.
+                if pending.len() >= batch_max_len
+                    || read_count < temp.len()
+                    || chunk.contains('\n')
+                    || chunk.contains('\r')
+                    || last_emit.elapsed() >= batch_delay
+                {
                     let flush = std::mem::take(&mut pending);
                     (emitter_stderr)(TerminalEvent {
                         serial: serial_stderr.clone(),
@@ -261,15 +278,16 @@ mod tests {
             let _ = tx.send(event);
         });
 
-        let (program, args, input_sequence): (&str, Vec<String>, Vec<(&str, bool)>) = if cfg!(windows) {
-            (
-                "cmd.exe",
-                vec!["/Q".to_string(), "/K".to_string()],
-                vec![("echo hello", true), ("exit", true)],
-            )
-        } else {
-            ("cat", vec![], vec![("hello", true)])
-        };
+        let (program, args, input_sequence): (&str, Vec<String>, Vec<(&str, bool)>) =
+            if cfg!(windows) {
+                (
+                    "cmd.exe",
+                    vec!["/Q".to_string(), "/K".to_string()],
+                    vec![("echo hello", true), ("exit", true)],
+                )
+            } else {
+                ("cat", vec![], vec![("hello", true)])
+            };
 
         let session = TerminalSession::spawn(
             program,
