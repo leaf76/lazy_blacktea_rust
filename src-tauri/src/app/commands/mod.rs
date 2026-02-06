@@ -50,8 +50,8 @@ use crate::app::models::{
 use crate::app::perf::parse::{
     build_perf_script, compute_cpu_percent_x100, parse_battery_totals, parse_cpu_freq_khz,
     parse_cpu_totals, parse_mem_totals, parse_net_totals, parse_per_core_cpu_totals,
-    split_marked_sections, BatteryTotals, CpuTotals, MemTotals, NetTotals, MARK_BATTERY,
-    MARK_CPUFREQ, MARK_MEMINFO, MARK_NETDEV, MARK_PROC_STAT,
+    split_marked_sections, BatteryTotals, CpuTotals, MemTotals, NetTotals, MARK_CPUFREQ,
+    MARK_MEMINFO, MARK_NETDEV, MARK_PROC_STAT,
 };
 use crate::app::state::{
     AppState, BugreportHandle, LogcatHandle, PerfMonitorHandle, RecordingHandle,
@@ -3457,6 +3457,11 @@ pub fn start_perf_monitor(
             let mut missed_frames_instant_prev: Option<Instant> = None;
             let mut missed_frames_per_sec_x100: Option<u16> = None;
             let mut last_missed_check = Instant::now();
+            let mut battery_last = BatteryTotals {
+                level: None,
+                temperature_decic: None,
+            };
+            let mut last_battery_check: Option<Instant> = None;
 
             {
                 let args = vec![
@@ -3465,16 +3470,38 @@ pub fn start_perf_monitor(
                     "shell".to_string(),
                     r#"dumpsys SurfaceFlinger --latency | sed -n "1p""#.to_string(),
                 ];
-                if let Ok(output) = run_command_with_timeout(
-                    &adb_program_spawn,
-                    &args,
-                    Duration::from_secs(3),
-                    &trace_spawn,
-                ) {
-                    if output.exit_code.unwrap_or_default() == 0 {
-                        if let Some(period_ns) = parse_surfaceflinger_latency_ns(&output.stdout) {
-                            display_refresh_hz_x100 = compute_refresh_hz_x100(period_ns);
+                let output = {
+                    let _permit = scheduler.acquire_global();
+                    let device_lock = scheduler.device_lock(&serial_spawn);
+                    let device_guard = device_lock.lock().ok();
+                    device_guard.map(|_guard| {
+                        run_command_with_timeout(
+                            &adb_program_spawn,
+                            &args,
+                            Duration::from_secs(3),
+                            &trace_spawn,
+                        )
+                    })
+                };
+
+                match output {
+                    Some(Ok(output)) => {
+                        if output.exit_code.unwrap_or_default() == 0 {
+                            if let Some(period_ns) = parse_surfaceflinger_latency_ns(&output.stdout)
+                            {
+                                display_refresh_hz_x100 = compute_refresh_hz_x100(period_ns);
+                            }
                         }
+                    }
+                    Some(Err(err)) => {
+                        warn!(
+                            trace_id = %trace_spawn,
+                            error = %err,
+                            "failed to read SurfaceFlinger latency"
+                        );
+                    }
+                    None => {
+                        warn!(trace_id = %trace_spawn, "device lock poisoned");
                     }
                 }
             }
@@ -3485,11 +3512,31 @@ pub fn start_perf_monitor(
                 }
 
                 let loop_started = Instant::now();
-                let _permit = scheduler.acquire_global();
-                let device_lock = scheduler.device_lock(&serial_spawn);
-                let device_guard = match device_lock.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
+
+                let args = vec![
+                    "-s".to_string(),
+                    serial_spawn.clone(),
+                    "shell".to_string(),
+                    perf_script.clone(),
+                ];
+
+                let output = {
+                    let _permit = scheduler.acquire_global();
+                    let device_lock = scheduler.device_lock(&serial_spawn);
+                    let device_guard = device_lock.lock().ok();
+                    device_guard.map(|_guard| {
+                        run_command_with_timeout(
+                            &adb_program_spawn,
+                            &args,
+                            Duration::from_secs(3),
+                            &trace_spawn,
+                        )
+                    })
+                };
+
+                let output = match output {
+                    Some(output) => output,
+                    None => {
                         emit_perf_event(
                             &app_emit,
                             PerfEvent {
@@ -3503,22 +3550,6 @@ pub fn start_perf_monitor(
                         continue;
                     }
                 };
-
-                let args = vec![
-                    "-s".to_string(),
-                    serial_spawn.clone(),
-                    "shell".to_string(),
-                    perf_script.clone(),
-                ];
-
-                let output = run_command_with_timeout(
-                    &adb_program_spawn,
-                    &args,
-                    Duration::from_secs(3),
-                    &trace_spawn,
-                );
-
-                drop(device_guard);
 
                 let output = match output {
                     Ok(output) => output,
@@ -3595,10 +3626,6 @@ pub fn start_perf_monitor(
                     .get(MARK_CPUFREQ)
                     .map(|value| value.as_str())
                     .unwrap_or("");
-                let battery = sections
-                    .get(MARK_BATTERY)
-                    .map(|value| value.as_str())
-                    .unwrap_or("");
 
                 let cpu_curr = match parse_cpu_totals(proc_stat) {
                     Ok(value) => value,
@@ -3671,21 +3698,74 @@ pub fn start_perf_monitor(
                     }
                 };
 
-                let battery_totals = match parse_battery_totals(battery) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        warn!(trace_id = %trace_spawn, error = %err, "failed to parse battery");
-                        BatteryTotals {
-                            level: None,
-                            temperature_decic: None,
-                        }
-                    }
-                };
-
                 let sample_instant = Instant::now();
                 let dt_ms =
                     net_prev_instant.map(|prev| sample_instant.duration_since(prev).as_millis());
                 let ts_ms = Utc::now().timestamp_millis();
+
+                if last_battery_check.is_none()
+                    || last_battery_check
+                        .map(|prev| sample_instant.duration_since(prev))
+                        .unwrap_or(Duration::from_secs(0))
+                        >= Duration::from_secs(10)
+                {
+                    last_battery_check = Some(sample_instant);
+                    let args = vec![
+                        "-s".to_string(),
+                        serial_spawn.clone(),
+                        "shell".to_string(),
+                        "dumpsys battery".to_string(),
+                    ];
+                    let output = {
+                        let _permit = scheduler.acquire_global();
+                        let device_lock = scheduler.device_lock(&serial_spawn);
+                        let device_guard = device_lock.lock().ok();
+                        device_guard.map(|_guard| {
+                            run_command_with_timeout(
+                                &adb_program_spawn,
+                                &args,
+                                Duration::from_secs(3),
+                                &trace_spawn,
+                            )
+                        })
+                    };
+
+                    match output {
+                        Some(Ok(output)) => {
+                            if output.exit_code.unwrap_or_default() == 0 {
+                                match parse_battery_totals(&output.stdout) {
+                                    Ok(value) => {
+                                        battery_last = value;
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            trace_id = %trace_spawn,
+                                            error = %err,
+                                            "failed to parse battery output"
+                                        );
+                                    }
+                                }
+                            } else {
+                                warn!(
+                                    trace_id = %trace_spawn,
+                                    exit_code = ?output.exit_code,
+                                    stderr = %output.stderr,
+                                    "battery dumpsys returned non-zero exit code"
+                                );
+                            }
+                        }
+                        Some(Err(err)) => {
+                            warn!(
+                                trace_id = %trace_spawn,
+                                error = %err,
+                                "failed to collect battery dumpsys"
+                            );
+                        }
+                        None => {
+                            warn!(trace_id = %trace_spawn, "device lock poisoned");
+                        }
+                    }
+                }
 
                 if missed_frames_total_prev.is_none()
                     || missed_frames_instant_prev.is_none()
@@ -3698,31 +3778,59 @@ pub fn start_perf_monitor(
                         "shell".to_string(),
                         r#"dumpsys SurfaceFlinger | sed -n "s/.*Total missed frame count: *\([0-9][0-9]*\).*/\1/p" | sed -n "1p""#.to_string(),
                     ];
-                    if let Ok(output) = run_command_with_timeout(
-                        &adb_program_spawn,
-                        &args,
-                        Duration::from_secs(3),
-                        &trace_spawn,
-                    ) {
-                        if output.exit_code.unwrap_or_default() == 0 {
-                            let digits = output.stdout.trim();
-                            if let Ok(total) = digits.parse::<u64>() {
-                                let now = Instant::now();
-                                if let (Some(prev_total), Some(prev_instant)) =
-                                    (missed_frames_total_prev, missed_frames_instant_prev)
-                                {
-                                    let delta = total.saturating_sub(prev_total) as u128;
-                                    let dt_ms = now.duration_since(prev_instant).as_millis();
-                                    if dt_ms > 0 {
-                                        let per_sec_x100 = ((delta * 100_000u128) / dt_ms)
-                                            .min(u16::MAX as u128)
-                                            as u16;
-                                        missed_frames_per_sec_x100 = Some(per_sec_x100);
+                    let output = {
+                        let _permit = scheduler.acquire_global();
+                        let device_lock = scheduler.device_lock(&serial_spawn);
+                        let device_guard = device_lock.lock().ok();
+                        device_guard.map(|_guard| {
+                            run_command_with_timeout(
+                                &adb_program_spawn,
+                                &args,
+                                Duration::from_secs(3),
+                                &trace_spawn,
+                            )
+                        })
+                    };
+
+                    match output {
+                        Some(Ok(output)) => {
+                            if output.exit_code.unwrap_or_default() == 0 {
+                                let digits = output.stdout.trim();
+                                if let Ok(total) = digits.parse::<u64>() {
+                                    let now = Instant::now();
+                                    if let (Some(prev_total), Some(prev_instant)) =
+                                        (missed_frames_total_prev, missed_frames_instant_prev)
+                                    {
+                                        let delta = total.saturating_sub(prev_total) as u128;
+                                        let dt_ms = now.duration_since(prev_instant).as_millis();
+                                        if dt_ms > 0 {
+                                            let per_sec_x100 = ((delta * 100_000u128) / dt_ms)
+                                                .min(u16::MAX as u128)
+                                                as u16;
+                                            missed_frames_per_sec_x100 = Some(per_sec_x100);
+                                        }
                                     }
+                                    missed_frames_total_prev = Some(total);
+                                    missed_frames_instant_prev = Some(now);
                                 }
-                                missed_frames_total_prev = Some(total);
-                                missed_frames_instant_prev = Some(now);
+                            } else {
+                                warn!(
+                                    trace_id = %trace_spawn,
+                                    exit_code = ?output.exit_code,
+                                    stderr = %output.stderr,
+                                    "SurfaceFlinger dumpsys returned non-zero exit code"
+                                );
                             }
+                        }
+                        Some(Err(err)) => {
+                            warn!(
+                                trace_id = %trace_spawn,
+                                error = %err,
+                                "failed to collect SurfaceFlinger missed frames"
+                            );
+                        }
+                        None => {
+                            warn!(trace_id = %trace_spawn, "device lock poisoned");
                         }
                     }
                 }
@@ -3737,7 +3845,7 @@ pub fn start_perf_monitor(
                     net_prev,
                     net_curr,
                     dt_ms,
-                    battery: battery_totals,
+                    battery: battery_last,
                     display_refresh_hz_x100,
                     missed_frames_per_sec_x100,
                 });

@@ -1093,7 +1093,8 @@ textarea {
 
 .bugreport-log-toolbar-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  /* Fixed 5-field layout: give Text filters more room to avoid cramped input. */
+  grid-template-columns: minmax(320px, 2fr) repeat(4, minmax(160px, 1fr));
   gap: 8px;
 }
 
@@ -1167,11 +1168,27 @@ textarea {
   gap: 6px;
   align-items: center;
   min-width: 0;
+  flex-wrap: wrap;
+}
+
+.bugreport-log-chip-entry select {
+  min-width: 0;
+  flex: 0 0 auto;
 }
 
 .bugreport-log-chip-entry input {
-  flex: 1 1 auto;
-  min-width: 120px;
+  flex: 1 1 260px;
+  min-width: 160px;
+}
+
+.bugreport-log-chip-entry button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1100px) {
+  .bugreport-log-toolbar-row {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
 }
 
 .bugreport-log-toolbar-actions {
@@ -2188,7 +2205,11 @@ textarea {
 }
 
 .logcat-presets .logcat-preset-row.single {
-  grid-template-columns: auto minmax(120px, 1.2fr) auto auto auto minmax(120px, 1fr) auto;
+  /* Allow wrapping to avoid horizontal overflow at mid-width layouts. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 .logcat-presets .logcat-preset-row + .logcat-preset-row {
@@ -2204,11 +2225,21 @@ textarea {
 .logcat-presets input {
   height: 28px;
   font-size: 10.5px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .logcat-presets button {
   padding: 4px 8px;
   font-size: 10.5px;
+}
+
+.logcat-presets .logcat-preset-row.single > select {
+  flex: 1 1 220px;
+}
+
+.logcat-presets .logcat-preset-row.single > input {
+  flex: 1 1 200px;
 }
 
 @media (max-width: 1000px) {

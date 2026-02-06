@@ -40,8 +40,6 @@ pub fn build_perf_script() -> String {
         "cat /proc/net/dev".to_string(),
         format!("echo {MARK_CPUFREQ}"),
         r#"for cpu in /sys/devices/system/cpu/cpu[0-9]*; do idx=${cpu##*/cpu}; freq=""; if [ -r "$cpu/cpufreq/scaling_cur_freq" ]; then freq=$(cat "$cpu/cpufreq/scaling_cur_freq" 2>/dev/null); fi; if [ -z "$freq" ] && [ -r "$cpu/cpufreq/cpuinfo_cur_freq" ]; then freq=$(cat "$cpu/cpufreq/cpuinfo_cur_freq" 2>/dev/null); fi; echo "cpu${idx}:${freq}"; done"#.to_string(),
-        format!("echo {MARK_BATTERY}"),
-        "dumpsys battery".to_string(),
     ]
     .join("; ")
 }
@@ -131,7 +129,7 @@ pub fn parse_cpu_totals(proc_stat: &str) -> Result<CpuTotals, String> {
 }
 
 pub fn parse_per_core_cpu_totals(proc_stat: &str) -> Result<Vec<CpuTotals>, String> {
-    let mut by_index: HashMap<usize, CpuTotals> = HashMap::new();
+    let mut cores: Vec<Option<CpuTotals>> = Vec::new();
 
     for line in proc_stat.lines() {
         let trimmed = line.trim_start();
@@ -188,29 +186,19 @@ pub fn parse_per_core_cpu_totals(proc_stat: &str) -> Result<Vec<CpuTotals>, Stri
             .saturating_add(guest)
             .saturating_add(guest_nice);
 
-        by_index.insert(
-            index,
-            CpuTotals {
-                total,
-                idle: idle_all,
-            },
-        );
-    }
-
-    if by_index.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let max_index = by_index.keys().copied().max().unwrap_or(0);
-    let mut cores: Vec<CpuTotals> = Vec::with_capacity(max_index + 1);
-    for idx in 0..=max_index {
-        if let Some(value) = by_index.get(&idx) {
-            cores.push(*value);
-        } else {
-            cores.push(CpuTotals { total: 0, idle: 0 });
+        if cores.len() <= index {
+            cores.resize_with(index + 1, || None);
         }
+        cores[index] = Some(CpuTotals {
+            total,
+            idle: idle_all,
+        });
     }
-    Ok(cores)
+
+    Ok(cores
+        .into_iter()
+        .map(|value| value.unwrap_or(CpuTotals { total: 0, idle: 0 }))
+        .collect())
 }
 
 pub fn compute_cpu_percent_x100(prev: CpuTotals, curr: CpuTotals) -> Option<u16> {
@@ -414,9 +402,9 @@ mod tests {
         let input = "cpu0:1800000\ncpu1:\ncpu2:abc\ncpu3:2\n";
         let map = parse_cpu_freq_khz(input);
         assert_eq!(map.get(&0).copied(), Some(1_800_000));
-        assert!(map.get(&1).is_none());
-        assert!(map.get(&2).is_none());
-        assert!(map.get(&3).is_none());
+        assert!(!map.contains_key(&1));
+        assert!(!map.contains_key(&2));
+        assert!(!map.contains_key(&3));
     }
 
     #[test]
