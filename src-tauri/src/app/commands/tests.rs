@@ -1,8 +1,9 @@
 use super::*;
 
 use std::process::{Command, Stdio};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -29,6 +30,14 @@ fn spawn_long_running_piped_child() -> std::process::Child {
     }
 }
 
+fn spawn_perf_stop_waiter(stop_flag: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop_flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+}
+
 #[test]
 fn start_logcat_inner_rejects_empty_serial() {
     let registry = Mutex::new(std::collections::HashMap::<String, LogcatHandle>::new());
@@ -47,6 +56,77 @@ fn start_logcat_inner_rejects_empty_serial() {
 
     assert_eq!(err.code, "ERR_VALIDATION");
     assert_eq!(err.trace_id, "trace-1");
+}
+
+#[test]
+fn start_perf_monitor_inner_rejects_empty_serial() {
+    let registry = Mutex::new(std::collections::HashMap::<String, PerfMonitorHandle>::new());
+    let err = start_perf_monitor_inner(" ".to_string(), &registry, "trace-perf-1", |_stop| {
+        panic!("spawn should not be called");
+    })
+    .expect_err("expected error");
+
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-perf-1");
+}
+
+#[test]
+fn start_perf_monitor_inner_rejects_when_already_running() {
+    let registry = Mutex::new(std::collections::HashMap::<String, PerfMonitorHandle>::new());
+
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            PerfMonitorHandle {
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                join: std::thread::spawn(|| {}),
+            },
+        );
+    }
+
+    let err = start_perf_monitor_inner("ABC".to_string(), &registry, "trace-perf-2", |_stop| {
+        std::thread::spawn(|| {})
+    })
+    .expect_err("expected already running");
+
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert!(err.error.to_lowercase().contains("already running"));
+
+    stop_perf_monitor_inner("ABC".to_string(), &registry, "trace-perf-2-stop").expect("stop ok");
+}
+
+#[test]
+fn stop_perf_monitor_inner_errors_when_not_running() {
+    let registry = Mutex::new(std::collections::HashMap::<String, PerfMonitorHandle>::new());
+    let err =
+        stop_perf_monitor_inner("ABC".to_string(), &registry, "trace-perf-3").expect_err("err");
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert!(err.error.to_lowercase().contains("not running"));
+}
+
+#[test]
+fn stop_perf_monitor_inner_stops_and_removes_handle() {
+    let registry = Mutex::new(std::collections::HashMap::<String, PerfMonitorHandle>::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let join = spawn_perf_stop_waiter(Arc::clone(&stop_flag));
+
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            PerfMonitorHandle {
+                stop_flag: Arc::clone(&stop_flag),
+                join,
+            },
+        );
+    }
+
+    stop_perf_monitor_inner("ABC".to_string(), &registry, "trace-perf-4").expect("stop ok");
+    assert!(stop_flag.load(Ordering::Relaxed));
+
+    let guard = registry.lock().expect("registry");
+    assert!(!guard.contains_key("ABC"));
 }
 
 #[test]
@@ -137,9 +217,8 @@ fn prepare_bugreport_logcat_inner_rejects_empty_path() {
 
 #[test]
 fn prepare_bugreport_logcat_inner_errors_for_missing_file() {
-    let err =
-        prepare_bugreport_logcat_inner("/this/path/does/not/exist/bugreport.zip", "trace-9")
-            .expect_err("err");
+    let err = prepare_bugreport_logcat_inner("/this/path/does/not/exist/bugreport.zip", "trace-9")
+        .expect_err("err");
     assert_eq!(err.code, "ERR_SYSTEM");
     assert_eq!(err.trace_id, "trace-9");
 }

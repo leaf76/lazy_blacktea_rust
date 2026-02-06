@@ -15,15 +15,17 @@ use uuid::Uuid;
 
 use crate::app::adb::apk::{extract_split_apks, get_apk_info, is_split_bundle, normalize_apk_path};
 use crate::app::adb::apps::{
-    package_entry_to_app_info, parse_dumpsys_version_code, parse_dumpsys_version_name,
-    parse_pm_list_packages_output,
+    package_entry_to_app_info, parse_dumpsys_first_install_time, parse_dumpsys_last_update_time,
+    parse_dumpsys_version_code, parse_dumpsys_version_name, parse_pm_list_packages_output,
+    parse_pm_path_output,
 };
 use crate::app::adb::bugreport::{parse_bugreportz_line, BugreportzPayload};
 use crate::app::adb::locator::{normalize_command_path, resolve_adb_program, validate_adb_program};
 use crate::app::adb::parse::{
     build_device_detail, parse_adb_devices, parse_audio_summary, parse_battery_level,
-    parse_bluetooth_manager_state, parse_dumpsys_version_name as parse_gms_version_name,
-    parse_getprop_map, parse_ls_la, parse_settings_bool,
+    parse_bluetooth_manager_state, parse_df_total_kb,
+    parse_dumpsys_version_name as parse_gms_version_name, parse_getprop_map, parse_ls_la,
+    parse_settings_bool, parse_wm_size,
 };
 use crate::app::adb::paths::{
     device_parent_dir, sanitize_filename_component, validate_device_path,
@@ -33,17 +35,26 @@ use crate::app::adb::scrcpy::{build_scrcpy_command, check_scrcpy_availability};
 use crate::app::adb::transfer::parse_progress_percent;
 use crate::app::bluetooth::service::start_bluetooth_monitor as start_bluetooth_monitor_service;
 use crate::app::bugreport_logcat;
-use crate::app::config::{clamp_terminal_buffer_lines, load_config, save_config, AppConfig};
+use crate::app::config::{
+    clamp_terminal_buffer_lines, load_config, normalize_config_for_save, save_config, AppConfig,
+};
 use crate::app::diagnostics;
 use crate::app::error::AppError;
 use crate::app::models::{
-    AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppInfo,
+    AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo, AppInfo,
     BugreportLogFilters, BugreportLogPage, BugreportLogSummary, BugreportResult, CommandResponse,
     CommandResult, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LogcatExportResult,
-    ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
+    PerfSnapshot, ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
     UiHierarchyExportResult,
 };
-use crate::app::state::{AppState, BugreportHandle, LogcatHandle, RecordingHandle};
+use crate::app::perf::parse::{
+    build_perf_script, compute_cpu_percent_x100, parse_battery_totals, parse_cpu_totals,
+    parse_mem_totals, parse_net_totals, split_marked_sections, BatteryTotals, CpuTotals, MemTotals,
+    NetTotals, MARK_BATTERY, MARK_MEMINFO, MARK_NETDEV, MARK_PROC_STAT,
+};
+use crate::app::state::{
+    AppState, BugreportHandle, LogcatHandle, PerfMonitorHandle, RecordingHandle,
+};
 use crate::app::terminal::{TerminalSession, TERMINAL_EVENT_NAME};
 use crate::app::ui_capture::png_bytes_to_data_url;
 use crate::app::ui_xml::render_device_ui_html;
@@ -200,6 +211,117 @@ fn stop_logcat_inner(
     Ok(true)
 }
 
+fn clamp_perf_interval_ms(input: Option<u64>) -> u64 {
+    let value = input.unwrap_or(1000);
+    value.clamp(500, 5000)
+}
+
+fn start_perf_monitor_inner(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, PerfMonitorHandle>>,
+    trace_id: &str,
+    spawn: impl FnOnce(Arc<AtomicBool>) -> std::thread::JoinHandle<()>,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let mut guard = registry
+        .lock()
+        .map_err(|_| AppError::system("Perf monitor registry locked", trace_id))?;
+    if guard.contains_key(&serial) {
+        return Err(AppError::validation(
+            "Perf monitor already running",
+            trace_id,
+        ));
+    }
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let join = spawn(Arc::clone(&stop_flag));
+    guard.insert(serial, PerfMonitorHandle { stop_flag, join });
+    Ok(true)
+}
+
+fn stop_perf_monitor_inner(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, PerfMonitorHandle>>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let handle = {
+        let mut guard = registry
+            .lock()
+            .map_err(|_| AppError::system("Perf monitor registry locked", trace_id))?;
+        match guard.remove(&serial) {
+            Some(handle) => handle,
+            None => return Err(AppError::validation("Perf monitor not running", trace_id)),
+        }
+    };
+
+    handle.stop_flag.store(true, Ordering::Relaxed);
+    handle
+        .join
+        .join()
+        .map_err(|_| AppError::system("Perf monitor thread panicked", trace_id))?;
+    Ok(true)
+}
+
+fn emit_perf_event(app: &AppHandle, event: PerfEvent) {
+    let trace_id = event.trace_id.clone();
+    if let Err(err) = app.emit("perf-snapshot", event) {
+        warn!(trace_id = %trace_id, error = %err, "failed to emit perf snapshot");
+    }
+}
+
+struct PerfSnapshotInput {
+    ts_ms: i64,
+    cpu_prev: Option<CpuTotals>,
+    cpu_curr: CpuTotals,
+    mem: MemTotals,
+    net_prev: Option<NetTotals>,
+    net_curr: NetTotals,
+    dt_ms: Option<u128>,
+    battery: BatteryTotals,
+}
+
+fn build_perf_snapshot(input: PerfSnapshotInput) -> PerfSnapshot {
+    let PerfSnapshotInput {
+        ts_ms,
+        cpu_prev,
+        cpu_curr,
+        mem,
+        net_prev,
+        net_curr,
+        dt_ms,
+        battery,
+    } = input;
+    let cpu_total_percent_x100 = cpu_prev.and_then(|prev| compute_cpu_percent_x100(prev, cpu_curr));
+
+    let mem_total_bytes = Some(mem.total_bytes);
+    let mem_used_bytes = Some(mem.total_bytes.saturating_sub(mem.available_bytes));
+
+    let (net_rx_bps, net_tx_bps) = match (net_prev, dt_ms) {
+        (Some(prev), Some(dt_ms)) if dt_ms > 0 => {
+            let rx_delta = net_curr.rx_bytes.saturating_sub(prev.rx_bytes) as u128;
+            let tx_delta = net_curr.tx_bytes.saturating_sub(prev.tx_bytes) as u128;
+            let rx_bps = ((rx_delta * 1000u128) / dt_ms).min(u64::MAX as u128) as u64;
+            let tx_bps = ((tx_delta * 1000u128) / dt_ms).min(u64::MAX as u128) as u64;
+            (Some(rx_bps), Some(tx_bps))
+        }
+        _ => (None, None),
+    };
+
+    PerfSnapshot {
+        ts_ms,
+        cpu_total_percent_x100,
+        mem_total_bytes,
+        mem_used_bytes,
+        net_rx_bps,
+        net_tx_bps,
+        battery_level: battery.level,
+        battery_temp_decic: battery.temperature_decic,
+    }
+}
+
 fn reserve_bugreport_handle(
     serial: &str,
     state: &AppState,
@@ -235,6 +357,16 @@ pub struct LogcatEvent {
     pub line: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<String>,
+    pub trace_id: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct PerfEvent {
+    pub serial: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<PerfSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub trace_id: String,
 }
 
@@ -463,6 +595,7 @@ pub fn save_app_config(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<AppConfig>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
+    let config = normalize_config_for_save(config);
     save_config(&config, &trace_id)?;
     Ok(CommandResponse {
         trace_id,
@@ -473,7 +606,7 @@ pub fn save_app_config(
 #[tauri::command(async)]
 pub fn reset_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfig>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
-    let config = AppConfig::default();
+    let config = normalize_config_for_save(AppConfig::default());
     save_config(&config, &trace_id)?;
     Ok(CommandResponse {
         trace_id,
@@ -725,6 +858,84 @@ pub fn list_devices(
                     }
                     if let Ok(gms_output) = gms_output {
                         detail.gms_version = parse_gms_version_name(&gms_output.stdout);
+                    }
+
+                    let wm_size_args = vec![
+                        "-s".to_string(),
+                        summary.serial.clone(),
+                        "shell".to_string(),
+                        "wm".to_string(),
+                        "size".to_string(),
+                    ];
+                    match run_command_with_timeout(
+                        &adb_program,
+                        &wm_size_args,
+                        Duration::from_secs(5),
+                        &trace_id,
+                    ) {
+                        Ok(out) => {
+                            let parsed = parse_wm_size(&out.stdout);
+                            if parsed.is_none() && !out.stdout.trim().is_empty() {
+                                warn!(trace_id = %trace_id, output = %out.stdout.trim(), "failed to parse wm size");
+                            }
+                            detail.resolution = parsed;
+                        }
+                        Err(err) => {
+                            warn!(trace_id = %trace_id, error = %err, "failed to load wm size");
+                        }
+                    }
+
+                    let df_args = vec![
+                        "-s".to_string(),
+                        summary.serial.clone(),
+                        "shell".to_string(),
+                        "df".to_string(),
+                        "-k".to_string(),
+                        "/data".to_string(),
+                    ];
+                    match run_command_with_timeout(
+                        &adb_program,
+                        &df_args,
+                        Duration::from_secs(5),
+                        &trace_id,
+                    ) {
+                        Ok(out) => match parse_df_total_kb(&out.stdout) {
+                            Ok(total_kb) => {
+                                detail.storage_total_bytes = Some(total_kb.saturating_mul(1024));
+                            }
+                            Err(err) => {
+                                warn!(trace_id = %trace_id, error = %err, "failed to parse df output");
+                            }
+                        },
+                        Err(err) => {
+                            warn!(trace_id = %trace_id, error = %err, "failed to load df output");
+                        }
+                    }
+
+                    let meminfo_args = vec![
+                        "-s".to_string(),
+                        summary.serial.clone(),
+                        "shell".to_string(),
+                        "cat".to_string(),
+                        "/proc/meminfo".to_string(),
+                    ];
+                    match run_command_with_timeout(
+                        &adb_program,
+                        &meminfo_args,
+                        Duration::from_secs(5),
+                        &trace_id,
+                    ) {
+                        Ok(out) => match parse_mem_totals(&out.stdout) {
+                            Ok(mem) => {
+                                detail.memory_total_bytes = Some(mem.total_bytes);
+                            }
+                            Err(err) => {
+                                warn!(trace_id = %trace_id, error = %err, "failed to parse /proc/meminfo");
+                            }
+                        },
+                        Err(err) => {
+                            warn!(trace_id = %trace_id, error = %err, "failed to load /proc/meminfo");
+                        }
                     }
                     Some(detail)
                 }
@@ -2373,7 +2584,15 @@ pub fn list_apps(
                     parse_dumpsys_version_name(&out.stdout),
                     parse_dumpsys_version_code(&out.stdout),
                 ),
-                Err(_) => (None, None),
+                Err(err) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        package_name = %entry.package_name,
+                        error = %err,
+                        "dumpsys package failed while listing apps"
+                    );
+                    (None, None)
+                }
             }
         } else {
             (None, None)
@@ -2386,6 +2605,128 @@ pub fn list_apps(
     Ok(CommandResponse {
         trace_id,
         data: apps,
+    })
+}
+
+#[tauri::command(async)]
+pub fn get_app_basic_info(
+    serial: String,
+    package_name: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<AppBasicInfo>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+    ensure_non_empty(&package_name, "package_name", &trace_id)?;
+
+    let adb_program = get_adb_program(&trace_id)?;
+
+    let dump_args = vec![
+        "-s".to_string(),
+        serial.clone(),
+        "shell".to_string(),
+        "dumpsys".to_string(),
+        "package".to_string(),
+        package_name.clone(),
+    ];
+    let output =
+        run_command_with_timeout(&adb_program, &dump_args, Duration::from_secs(10), &trace_id)?;
+    if output.exit_code.unwrap_or_default() != 0 {
+        return Err(AppError::dependency(
+            format!("Get app info failed: {}", output.stderr),
+            &trace_id,
+        ));
+    }
+
+    let version_name = parse_dumpsys_version_name(&output.stdout);
+    let version_code = parse_dumpsys_version_code(&output.stdout);
+    let first_install_time = parse_dumpsys_first_install_time(&output.stdout);
+    let last_update_time = parse_dumpsys_last_update_time(&output.stdout);
+
+    let pm_path_args = vec![
+        "-s".to_string(),
+        serial.clone(),
+        "shell".to_string(),
+        "pm".to_string(),
+        "path".to_string(),
+        package_name.clone(),
+    ];
+    let mut apk_paths = Vec::new();
+    match run_command_with_timeout(
+        &adb_program,
+        &pm_path_args,
+        Duration::from_secs(10),
+        &trace_id,
+    ) {
+        Ok(out) => {
+            if out.exit_code.unwrap_or_default() != 0 {
+                warn!(
+                    trace_id = %trace_id,
+                    package_name = %package_name,
+                    stderr = %out.stderr.trim(),
+                    "pm path returned non-zero exit code"
+                );
+            } else {
+                apk_paths = parse_pm_path_output(&out.stdout);
+            }
+        }
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                package_name = %package_name,
+                error = %err,
+                "pm path failed"
+            );
+        }
+    }
+
+    apk_paths.sort();
+    apk_paths.dedup();
+
+    const MAX_APK_PATHS: usize = 20;
+    let mut apk_size_bytes_total = None;
+    if !apk_paths.is_empty() {
+        if apk_paths.len() > MAX_APK_PATHS {
+            warn!(
+                trace_id = %trace_id,
+                package_name = %package_name,
+                apk_paths_len = apk_paths.len(),
+                max_apk_paths = MAX_APK_PATHS,
+                "Too many APK paths; skipping size calculation"
+            );
+        } else {
+            let mut total = 0u64;
+            let mut has_error = false;
+            for apk_path in &apk_paths {
+                match try_get_device_file_size_bytes(&adb_program, &serial, apk_path, &trace_id) {
+                    Some(size) => total = total.saturating_add(size),
+                    None => {
+                        has_error = true;
+                        warn!(
+                            trace_id = %trace_id,
+                            package_name = %package_name,
+                            apk_path = %apk_path,
+                            "Failed to resolve APK size"
+                        );
+                    }
+                }
+            }
+            if !has_error {
+                apk_size_bytes_total = Some(total);
+            }
+        }
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: AppBasicInfo {
+            package_name,
+            version_name,
+            version_code,
+            first_install_time,
+            last_update_time,
+            apk_paths,
+            apk_size_bytes_total,
+        },
     })
 }
 
@@ -2413,6 +2754,77 @@ pub fn uninstall_app(
         trace_id,
         data: success,
     })
+}
+
+fn try_get_device_file_size_bytes(
+    adb_program: &str,
+    serial: &str,
+    path: &str,
+    trace_id: &str,
+) -> Option<u64> {
+    let stat_args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "stat".to_string(),
+        "-c".to_string(),
+        "%s".to_string(),
+        path.to_string(),
+    ];
+    if let Ok(out) =
+        run_command_with_timeout(adb_program, &stat_args, Duration::from_secs(5), trace_id)
+    {
+        if out.exit_code.unwrap_or_default() == 0 {
+            if let Some(size) = parse_stat_size_output(&out.stdout) {
+                return Some(size);
+            }
+        }
+    }
+
+    let ls_args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "ls".to_string(),
+        "-la".to_string(),
+        path.to_string(),
+    ];
+    let out =
+        run_command_with_timeout(adb_program, &ls_args, Duration::from_secs(5), trace_id).ok()?;
+    if out.exit_code.unwrap_or_default() != 0 {
+        return None;
+    }
+
+    let (dir, base) = split_device_path(path);
+    let parsed = parse_ls_la(&dir, &out.stdout);
+    if parsed.len() == 1 {
+        return parsed[0].size_bytes;
+    }
+    parsed
+        .into_iter()
+        .find(|entry| entry.name == base || entry.path.ends_with(&format!("/{}", base)))
+        .and_then(|entry| entry.size_bytes)
+}
+
+fn parse_stat_size_output(output: &str) -> Option<u64> {
+    output
+        .lines()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty())
+        .and_then(|line| line.parse::<u64>().ok())
+}
+
+fn split_device_path(path: &str) -> (String, String) {
+    let trimmed = path.trim_end_matches('/');
+    if let Some((dir, base)) = trimmed.rsplit_once('/') {
+        let dir = if dir.is_empty() {
+            "/".to_string()
+        } else {
+            dir.to_string()
+        };
+        return (dir, base.to_string());
+    }
+    (".".to_string(), trimmed.to_string())
 }
 
 #[tauri::command(async)]
@@ -3000,6 +3412,287 @@ pub fn export_ui_hierarchy(
 }
 
 #[tauri::command(async)]
+pub fn start_perf_monitor(
+    serial: String,
+    interval_ms: Option<u64>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let interval_ms = clamp_perf_interval_ms(interval_ms);
+    let interval = Duration::from_millis(interval_ms);
+    let perf_script = build_perf_script();
+    let scheduler = Arc::clone(&state.scheduler);
+
+    let app_emit = app.clone();
+    let serial_spawn = serial.clone();
+    let trace_spawn = trace_id.clone();
+    let adb_program_spawn = adb_program.clone();
+
+    start_perf_monitor_inner(serial, &state.perf_monitors, &trace_id, move |stop_flag| {
+        std::thread::spawn(move || {
+            let mut cpu_prev: Option<CpuTotals> = None;
+            let mut net_prev: Option<NetTotals> = None;
+            let mut net_prev_instant: Option<Instant> = None;
+
+            loop {
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let loop_started = Instant::now();
+                let _permit = scheduler.acquire_global();
+                let device_lock = scheduler.device_lock(&serial_spawn);
+                let device_guard = match device_lock.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        emit_perf_event(
+                            &app_emit,
+                            PerfEvent {
+                                serial: serial_spawn.clone(),
+                                snapshot: None,
+                                error: Some("Device lock poisoned".to_string()),
+                                trace_id: trace_spawn.clone(),
+                            },
+                        );
+                        std::thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+                };
+
+                let args = vec![
+                    "-s".to_string(),
+                    serial_spawn.clone(),
+                    "shell".to_string(),
+                    perf_script.clone(),
+                ];
+
+                let output = run_command_with_timeout(
+                    &adb_program_spawn,
+                    &args,
+                    Duration::from_secs(3),
+                    &trace_spawn,
+                );
+
+                drop(device_guard);
+
+                let output = match output {
+                    Ok(output) => output,
+                    Err(err) => {
+                        warn!(trace_id = %trace_spawn, error = %err, "failed to collect perf output");
+                        emit_perf_event(
+                            &app_emit,
+                            PerfEvent {
+                                serial: serial_spawn.clone(),
+                                snapshot: None,
+                                error: Some(format!(
+                                    "Failed to collect performance data ({})",
+                                    err.code
+                                )),
+                                trace_id: trace_spawn.clone(),
+                            },
+                        );
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                if output.exit_code.unwrap_or_default() != 0 {
+                    warn!(
+                        trace_id = %trace_spawn,
+                        exit_code = ?output.exit_code,
+                        stderr = %output.stderr,
+                        "perf adb shell returned non-zero exit code"
+                    );
+                    emit_perf_event(
+                        &app_emit,
+                        PerfEvent {
+                            serial: serial_spawn.clone(),
+                            snapshot: None,
+                            error: Some("Failed to collect performance data".to_string()),
+                            trace_id: trace_spawn.clone(),
+                        },
+                    );
+                    sleep_with_stop(interval, &stop_flag);
+                    continue;
+                }
+
+                let sections = match split_marked_sections(&output.stdout) {
+                    Ok(sections) => sections,
+                    Err(err) => {
+                        warn!(trace_id = %trace_spawn, error = %err, "failed to split perf output");
+                        emit_perf_event(
+                            &app_emit,
+                            PerfEvent {
+                                serial: serial_spawn.clone(),
+                                snapshot: None,
+                                error: Some(format!("Failed to parse performance data: {err}")),
+                                trace_id: trace_spawn.clone(),
+                            },
+                        );
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                let proc_stat = sections
+                    .get(MARK_PROC_STAT)
+                    .map(|value| value.as_str())
+                    .unwrap_or("");
+                let meminfo = sections
+                    .get(MARK_MEMINFO)
+                    .map(|value| value.as_str())
+                    .unwrap_or("");
+                let netdev = sections
+                    .get(MARK_NETDEV)
+                    .map(|value| value.as_str())
+                    .unwrap_or("");
+                let battery = sections
+                    .get(MARK_BATTERY)
+                    .map(|value| value.as_str())
+                    .unwrap_or("");
+
+                let cpu_curr = match parse_cpu_totals(proc_stat) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!(trace_id = %trace_spawn, error = %err, "failed to parse /proc/stat");
+                        emit_perf_event(
+                            &app_emit,
+                            PerfEvent {
+                                serial: serial_spawn.clone(),
+                                snapshot: None,
+                                error: Some(format!("Failed to parse performance data: {err}")),
+                                trace_id: trace_spawn.clone(),
+                            },
+                        );
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                let mem = match parse_mem_totals(meminfo) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!(trace_id = %trace_spawn, error = %err, "failed to parse /proc/meminfo");
+                        emit_perf_event(
+                            &app_emit,
+                            PerfEvent {
+                                serial: serial_spawn.clone(),
+                                snapshot: None,
+                                error: Some(format!("Failed to parse performance data: {err}")),
+                                trace_id: trace_spawn.clone(),
+                            },
+                        );
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                let net_curr = match parse_net_totals(netdev) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!(trace_id = %trace_spawn, error = %err, "failed to parse /proc/net/dev");
+                        emit_perf_event(
+                            &app_emit,
+                            PerfEvent {
+                                serial: serial_spawn.clone(),
+                                snapshot: None,
+                                error: Some(format!("Failed to parse performance data: {err}")),
+                                trace_id: trace_spawn.clone(),
+                            },
+                        );
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                let battery_totals = match parse_battery_totals(battery) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!(trace_id = %trace_spawn, error = %err, "failed to parse battery");
+                        BatteryTotals {
+                            level: None,
+                            temperature_decic: None,
+                        }
+                    }
+                };
+
+                let sample_instant = Instant::now();
+                let dt_ms =
+                    net_prev_instant.map(|prev| sample_instant.duration_since(prev).as_millis());
+                let ts_ms = Utc::now().timestamp_millis();
+
+                let snapshot = build_perf_snapshot(PerfSnapshotInput {
+                    ts_ms,
+                    cpu_prev,
+                    cpu_curr,
+                    mem,
+                    net_prev,
+                    net_curr,
+                    dt_ms,
+                    battery: battery_totals,
+                });
+
+                cpu_prev = Some(cpu_curr);
+                net_prev = Some(net_curr);
+                net_prev_instant = Some(sample_instant);
+
+                emit_perf_event(
+                    &app_emit,
+                    PerfEvent {
+                        serial: serial_spawn.clone(),
+                        snapshot: Some(snapshot),
+                        error: None,
+                        trace_id: trace_spawn.clone(),
+                    },
+                );
+
+                let elapsed = loop_started.elapsed();
+                if elapsed < interval {
+                    sleep_with_stop(interval - elapsed, &stop_flag);
+                }
+            }
+        })
+    })?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+fn sleep_with_stop(duration: Duration, stop_flag: &Arc<AtomicBool>) {
+    let mut remaining = duration;
+    let chunk = Duration::from_millis(50);
+    while remaining > Duration::from_millis(0) {
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        let step = if remaining > chunk { chunk } else { remaining };
+        std::thread::sleep(step);
+        remaining = remaining.saturating_sub(step);
+    }
+}
+
+#[tauri::command(async)]
+pub fn stop_perf_monitor(
+    serial: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    stop_perf_monitor_inner(serial, &state.perf_monitors, &trace_id)?;
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
 pub fn start_logcat(
     serial: String,
     filter: Option<String>,
@@ -3358,8 +4051,7 @@ pub async fn prepare_bugreport_logcat(
         prepare_bugreport_logcat_inner(&source_for_worker, &trace_for_worker)
     })
     .await
-    .map_err(|_| AppError::system("Bugreport log index thread failed", &trace_id))?
-    ?;
+    .map_err(|_| AppError::system("Bugreport log index thread failed", &trace_id))??;
 
     Ok(CommandResponse {
         trace_id,

@@ -9,7 +9,11 @@ pub struct AppError {
 }
 
 impl AppError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>, trace_id: impl Into<String>) -> Self {
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        trace_id: impl Into<String>,
+    ) -> Self {
         Self {
             error: message.into(),
             code: code.into(),

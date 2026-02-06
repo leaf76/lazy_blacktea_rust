@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::models::{
-    AdvertisingState, BluetoothEventType, BluetoothState, ParsedEvent, ParsedSnapshot, ScanningState,
-    StateSummary,
+    AdvertisingState, BluetoothEventType, BluetoothState, ParsedEvent, ParsedSnapshot,
+    ScanningState, StateSummary,
 };
 
 #[derive(Debug, Clone)]
@@ -185,7 +185,10 @@ impl BluetoothStateMachine {
 
     fn calculate_metrics(&self) -> HashMap<String, serde_json::Value> {
         let mut metrics = HashMap::new();
-        metrics.insert("adapter_enabled".to_string(), serde_json::json!(self.adapter_enabled));
+        metrics.insert(
+            "adapter_enabled".to_string(),
+            serde_json::json!(self.adapter_enabled),
+        );
         metrics.insert(
             "advertising_sets".to_string(),
             serde_json::json!(self.advertising_snapshot.sets.len()),
@@ -235,6 +238,9 @@ mod tests {
             raw_text: String::new(),
         };
         let update = machine.apply_snapshot(&snapshot);
-        assert!(update.summary.active_states.contains(&BluetoothState::Scanning));
+        assert!(update
+            .summary
+            .active_states
+            .contains(&BluetoothState::Scanning));
     }
 }

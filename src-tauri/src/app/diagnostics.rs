@@ -37,8 +37,15 @@ struct DiagnosticsPayload {
     devices: DevicesPayload,
 }
 
-fn resolve_output_dir(config: Option<&AppConfig>, output_dir: Option<String>) -> Result<String, String> {
-    if let Some(dir) = output_dir.as_ref().map(|value| value.trim()).filter(|v| !v.is_empty()) {
+fn resolve_output_dir(
+    config: Option<&AppConfig>,
+    output_dir: Option<String>,
+) -> Result<String, String> {
+    if let Some(dir) = output_dir
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|v| !v.is_empty())
+    {
         return Ok(dir.to_string());
     }
     if let Some(config) = config {
@@ -70,9 +77,8 @@ pub fn export_diagnostics_bundle(
 
     let resolved_dir = resolve_output_dir(config.as_ref(), output_dir)
         .map_err(|message| AppError::validation(message, trace_id))?;
-    fs::create_dir_all(&resolved_dir).map_err(|err| {
-        AppError::system(format!("Failed to create output dir: {err}"), trace_id)
-    })?;
+    fs::create_dir_all(&resolved_dir)
+        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), trace_id))?;
 
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let safe_trace = sanitize_filename_component(trace_id);
@@ -126,7 +132,10 @@ pub fn export_diagnostics_bundle(
     };
 
     let json = serde_json::to_vec_pretty(&payload).map_err(|err| {
-        AppError::system(format!("Failed to serialize diagnostics payload: {err}"), trace_id)
+        AppError::system(
+            format!("Failed to serialize diagnostics payload: {err}"),
+            trace_id,
+        )
     })?;
 
     let file = fs::File::create(&bundle_path)
@@ -171,8 +180,8 @@ mod tests {
         )
         .expect("write config");
 
-        let bundle = export_diagnostics_bundle("adb-does-not-exist", None, "trace-test")
-            .expect("bundle");
+        let bundle =
+            export_diagnostics_bundle("adb-does-not-exist", None, "trace-test").expect("bundle");
 
         let bytes = fs::read(&bundle).expect("read bundle");
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("zip");

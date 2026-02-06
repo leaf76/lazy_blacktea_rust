@@ -9,9 +9,11 @@ export type DeviceSummary = {
 
 export type DeviceDetail = {
   serial: string;
+  name?: string | null;
   brand?: string | null;
   model?: string | null;
   device?: string | null;
+  serial_number?: string | null;
   android_version?: string | null;
   api_level?: string | null;
   battery_level?: number | null;
@@ -19,6 +21,10 @@ export type DeviceDetail = {
   bt_is_on?: boolean | null;
   gms_version?: string | null;
   build_fingerprint?: string | null;
+  processor?: string | null;
+  resolution?: string | null;
+  storage_total_bytes?: number | null;
+  memory_total_bytes?: number | null;
   audio_state?: string | null;
   bluetooth_manager_state?: string | null;
 };
@@ -88,6 +94,24 @@ export type LogcatEvent = {
   trace_id: string;
 };
 
+export type PerfSnapshot = {
+  ts_ms: number;
+  cpu_total_percent_x100?: number | null;
+  mem_total_bytes?: number | null;
+  mem_used_bytes?: number | null;
+  net_rx_bps?: number | null;
+  net_tx_bps?: number | null;
+  battery_level?: number | null;
+  battery_temp_decic?: number | null;
+};
+
+export type PerfEvent = {
+  serial: string;
+  snapshot?: PerfSnapshot | null;
+  error?: string | null;
+  trace_id: string;
+};
+
 export type TerminalSessionInfo = {
   serial: string;
   session_id: string;
@@ -143,6 +167,16 @@ export type AppInfo = {
   version_code?: string | null;
   is_system: boolean;
   apk_path?: string | null;
+};
+
+export type AppBasicInfo = {
+  package_name: string;
+  version_name?: string | null;
+  version_code?: string | null;
+  first_install_time?: string | null;
+  last_update_time?: string | null;
+  apk_paths: string[];
+  apk_size_bytes_total?: number | null;
 };
 
 export type BugreportResult = {

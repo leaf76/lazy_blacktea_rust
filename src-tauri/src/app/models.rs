@@ -14,9 +14,11 @@ pub struct DeviceSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceDetail {
     pub serial: String,
+    pub name: Option<String>,
     pub brand: Option<String>,
     pub model: Option<String>,
     pub device: Option<String>,
+    pub serial_number: Option<String>,
     pub android_version: Option<String>,
     pub api_level: Option<String>,
     pub battery_level: Option<u8>,
@@ -24,6 +26,10 @@ pub struct DeviceDetail {
     pub bt_is_on: Option<bool>,
     pub gms_version: Option<String>,
     pub build_fingerprint: Option<String>,
+    pub processor: Option<String>,
+    pub resolution: Option<String>,
+    pub storage_total_bytes: Option<u64>,
+    pub memory_total_bytes: Option<u64>,
     pub audio_state: Option<String>,
     pub bluetooth_manager_state: Option<String>,
 }
@@ -90,6 +96,18 @@ pub struct LogcatExportResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PerfSnapshot {
+    pub ts_ms: i64,
+    pub cpu_total_percent_x100: Option<u16>,
+    pub mem_total_bytes: Option<u64>,
+    pub mem_used_bytes: Option<u64>,
+    pub net_rx_bps: Option<u64>,
+    pub net_tx_bps: Option<u64>,
+    pub battery_level: Option<u8>,
+    pub battery_temp_decic: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandResponse<T> {
     pub trace_id: String,
     pub data: T,
@@ -119,6 +137,18 @@ pub struct AppInfo {
     pub version_code: Option<String>,
     pub is_system: bool,
     pub apk_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppBasicInfo {
+    pub package_name: String,
+    pub version_name: Option<String>,
+    pub version_code: Option<String>,
+    pub first_install_time: Option<String>,
+    pub last_update_time: Option<String>,
+    #[serde(default)]
+    pub apk_paths: Vec<String>,
+    pub apk_size_bytes_total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

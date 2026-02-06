@@ -91,6 +91,67 @@ pub fn parse_dumpsys_version_code(output: &str) -> Option<String> {
     None
 }
 
+pub fn parse_dumpsys_first_install_time(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("firstInstallTime=") {
+            return Some(value.trim().to_string());
+        }
+        if let Some(value) = trimmed.strip_prefix("firstInstallTime:") {
+            return Some(value.trim().to_string());
+        }
+        if let Some((_, tail)) = trimmed.split_once("firstInstallTime=") {
+            return Some(tail.trim().to_string());
+        }
+        if let Some((_, tail)) = trimmed.split_once("firstInstallTime:") {
+            return Some(tail.trim().to_string());
+        }
+    }
+    None
+}
+
+pub fn parse_dumpsys_last_update_time(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("lastUpdateTime=") {
+            return Some(value.trim().to_string());
+        }
+        if let Some(value) = trimmed.strip_prefix("lastUpdateTime:") {
+            return Some(value.trim().to_string());
+        }
+        if let Some((_, tail)) = trimmed.split_once("lastUpdateTime=") {
+            return Some(tail.trim().to_string());
+        }
+        if let Some((_, tail)) = trimmed.split_once("lastUpdateTime:") {
+            return Some(tail.trim().to_string());
+        }
+    }
+    None
+}
+
+pub fn parse_pm_path_output(output: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for raw in output.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("package:") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                paths.push(trimmed.to_string());
+            }
+        }
+    }
+    paths
+}
+
 pub fn package_entry_to_app_info(
     entry: PackageEntry,
     version_name: Option<String>,
@@ -131,5 +192,44 @@ mod tests {
         let output = "versionName=1.2.3\nversionCode=1000 minSdk=24\n";
         assert_eq!(parse_dumpsys_version_name(output).as_deref(), Some("1.2.3"));
         assert_eq!(parse_dumpsys_version_code(output).as_deref(), Some("1000"));
+    }
+
+    #[test]
+    fn parses_dumpsys_install_times() {
+        let output = "firstInstallTime=2026-01-02 03:04:05\nlastUpdateTime=2026-02-03 04:05:06\n";
+        assert_eq!(
+            parse_dumpsys_first_install_time(output).as_deref(),
+            Some("2026-01-02 03:04:05")
+        );
+        assert_eq!(
+            parse_dumpsys_last_update_time(output).as_deref(),
+            Some("2026-02-03 04:05:06")
+        );
+
+        let output_alt =
+            "something else\nfirstInstallTime: 2026-01-02 03:04:05\nlastUpdateTime: 2026-02-03 04:05:06\n";
+        assert_eq!(
+            parse_dumpsys_first_install_time(output_alt).as_deref(),
+            Some("2026-01-02 03:04:05")
+        );
+        assert_eq!(
+            parse_dumpsys_last_update_time(output_alt).as_deref(),
+            Some("2026-02-03 04:05:06")
+        );
+    }
+
+    #[test]
+    fn parses_pm_path_output() {
+        let output = "package:/data/app/com.example/base.apk\npackage:/data/app/com.example/split_config.en.apk\n";
+        let paths = parse_pm_path_output(output);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "/data/app/com.example/base.apk");
+        assert_eq!(paths[1], "/data/app/com.example/split_config.en.apk");
+
+        let output_with_noise = "\ninvalid line\npackage:/a.apk\n  package:/b.apk  \n";
+        let paths = parse_pm_path_output(output_with_noise);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "/a.apk");
+        assert_eq!(paths[1], "/b.apk");
     }
 }

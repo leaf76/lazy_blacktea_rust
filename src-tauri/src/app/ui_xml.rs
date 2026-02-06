@@ -128,7 +128,9 @@ pub fn render_device_ui_html(xml: &str) -> Result<String, String> {
                         let mut self_closing = false;
                         let mut attr_cursor = cursor;
                         while attr_cursor < bytes.len() {
-                            while attr_cursor < bytes.len() && bytes[attr_cursor].is_ascii_whitespace() {
+                            while attr_cursor < bytes.len()
+                                && bytes[attr_cursor].is_ascii_whitespace()
+                            {
                                 attr_cursor += 1;
                             }
                             if attr_cursor >= bytes.len() {
@@ -159,14 +161,18 @@ pub fn render_device_ui_html(xml: &str) -> Result<String, String> {
                                 return Err("Malformed attribute".into());
                             }
                             let name_end = attr_cursor;
-                            while attr_cursor < bytes.len() && bytes[attr_cursor].is_ascii_whitespace() {
+                            while attr_cursor < bytes.len()
+                                && bytes[attr_cursor].is_ascii_whitespace()
+                            {
                                 attr_cursor += 1;
                             }
                             if attr_cursor >= bytes.len() || bytes[attr_cursor] != b'=' {
                                 return Err("Malformed attribute assignment".into());
                             }
                             attr_cursor += 1;
-                            while attr_cursor < bytes.len() && bytes[attr_cursor].is_ascii_whitespace() {
+                            while attr_cursor < bytes.len()
+                                && bytes[attr_cursor].is_ascii_whitespace()
+                            {
                                 attr_cursor += 1;
                             }
                             if attr_cursor >= bytes.len() {

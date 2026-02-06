@@ -76,4 +76,3 @@ mod tests {
         assert_eq!(parse_progress_percent("%"), None);
     }
 }
-

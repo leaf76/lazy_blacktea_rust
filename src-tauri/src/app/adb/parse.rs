@@ -63,19 +63,51 @@ pub fn parse_getprop_map(output: &str) -> HashMap<String, String> {
     map
 }
 
+fn clean_prop_value(value: Option<&String>) -> Option<String> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
 pub fn build_device_detail(serial: &str, getprop_map: &HashMap<String, String>) -> DeviceDetail {
+    let processor = clean_prop_value(getprop_map.get("ro.soc.model"))
+        .or_else(|| clean_prop_value(getprop_map.get("ro.hardware")))
+        .or_else(|| clean_prop_value(getprop_map.get("ro.board.platform")))
+        .or_else(|| clean_prop_value(getprop_map.get("ro.product.cpu.abi")))
+        .or_else(|| {
+            let abilist = clean_prop_value(getprop_map.get("ro.product.cpu.abilist"))?;
+            let first = abilist.split(',').next().unwrap_or_default().trim();
+            if first.is_empty() {
+                None
+            } else {
+                Some(first.to_string())
+            }
+        });
+
     DeviceDetail {
         serial: serial.to_string(),
-        brand: getprop_map.get("ro.product.brand").cloned(),
-        model: getprop_map.get("ro.product.model").cloned(),
-        device: getprop_map.get("ro.product.device").cloned(),
-        android_version: getprop_map.get("ro.build.version.release").cloned(),
-        api_level: getprop_map.get("ro.build.version.sdk").cloned(),
+        name: clean_prop_value(getprop_map.get("ro.product.name")),
+        brand: clean_prop_value(getprop_map.get("ro.product.brand")),
+        model: clean_prop_value(getprop_map.get("ro.product.model")),
+        device: clean_prop_value(getprop_map.get("ro.product.device")),
+        serial_number: clean_prop_value(getprop_map.get("ro.boot.serialno"))
+            .or_else(|| clean_prop_value(getprop_map.get("ro.serialno"))),
+        android_version: clean_prop_value(getprop_map.get("ro.build.version.release")),
+        api_level: clean_prop_value(getprop_map.get("ro.build.version.sdk")),
         battery_level: None,
         wifi_is_on: None,
         bt_is_on: None,
         gms_version: None,
-        build_fingerprint: getprop_map.get("ro.build.fingerprint").cloned(),
+        build_fingerprint: clean_prop_value(getprop_map.get("ro.build.fingerprint")),
+        processor,
+        resolution: None,
+        storage_total_bytes: None,
+        memory_total_bytes: None,
         audio_state: None,
         bluetooth_manager_state: None,
     }
@@ -108,12 +140,82 @@ pub fn parse_settings_bool(output: &str) -> Option<bool> {
     }
 }
 
+pub fn parse_wm_size(output: &str) -> Option<String> {
+    let mut physical: Option<String> = None;
+    let mut override_size: Option<String> = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("override size:") {
+            let value = trimmed
+                .split_once(':')
+                .map(|item| item.1)
+                .unwrap_or("")
+                .trim();
+            override_size = parse_wm_size_value(value);
+        } else if lower.starts_with("physical size:") {
+            let value = trimmed
+                .split_once(':')
+                .map(|item| item.1)
+                .unwrap_or("")
+                .trim();
+            physical = parse_wm_size_value(value);
+        }
+    }
+
+    override_size.or(physical)
+}
+
+fn parse_wm_size_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (w_str, h_str) = value.split_once('x').or_else(|| value.split_once('X'))?;
+    let w = w_str.trim().parse::<u32>().ok()?;
+    let h = h_str.trim().parse::<u32>().ok()?;
+    Some(format!("{w}x{h}"))
+}
+
+pub fn parse_df_total_kb(output: &str) -> Result<u64, String> {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() < 2 {
+        return Err("Missing df output rows".to_string());
+    }
+
+    let header_cols: Vec<&str> = lines[0].split_whitespace().collect();
+    if header_cols.is_empty() {
+        return Err("Missing df header columns".to_string());
+    }
+
+    let size_idx = header_cols
+        .iter()
+        .position(|col| {
+            let col = col.to_ascii_lowercase();
+            col == "1k-blocks" || col == "1024-blocks" || col == "size"
+        })
+        .ok_or_else(|| "Missing df size column".to_string())?;
+
+    let data_cols: Vec<&str> = lines[1].split_whitespace().collect();
+    if data_cols.len() <= size_idx {
+        return Err("df row missing size column".to_string());
+    }
+
+    data_cols[size_idx]
+        .parse::<u64>()
+        .map_err(|_| "Invalid df size value".to_string())
+}
+
 pub fn parse_audio_summary(output: &str) -> Option<String> {
     let mode_re = Regex::new(r"(?i)\bmode\s*[:=]\s*([A-Za-z_]+)").ok()?;
     let ringer_re = Regex::new(r"(?i)\bringer\s+mode\s*[:=]\s*([A-Za-z_]+)").ok()?;
     let music_re = Regex::new(r"(?i)music\s+active\s*[:=]\s*([A-Za-z_]+)").ok()?;
-    let device_re = Regex::new(r"(?i)device\s+(?:current\s+)?state\s*[:=]\s*(.+)")
-        .ok()?;
+    let device_re = Regex::new(r"(?i)device\s+(?:current\s+)?state\s*[:=]\s*(.+)").ok()?;
     let sco_re = Regex::new(r"(?i)sco\s+state\s*[:=]\s*(.+)").ok()?;
 
     let mut summary: HashMap<&str, String> = HashMap::new();
@@ -235,10 +337,7 @@ pub fn parse_ls_la(path: &str, output: &str) -> Vec<DeviceFileEntry> {
             let is_dir = perm.starts_with('d');
             let size_bytes = tokens.get(4).and_then(|value| value.parse::<u64>().ok());
             let (modified_at, name_start_index) = if tokens.len() >= 9 {
-                (
-                    format!("{} {} {}", tokens[5], tokens[6], tokens[7]),
-                    8usize,
-                )
+                (format!("{} {} {}", tokens[5], tokens[6], tokens[7]), 8usize)
             } else {
                 (format!("{} {}", tokens[5], tokens[6]), 7usize)
             };
@@ -281,19 +380,52 @@ mod tests {
     fn parses_getprop_map() {
         let output = "[ro.product.brand]: [google]\n[ro.product.model]: [Pixel 7]\n";
         let map = parse_getprop_map(output);
-        assert_eq!(map.get("ro.product.brand").map(String::as_str), Some("google"));
-        assert_eq!(map.get("ro.product.model").map(String::as_str), Some("Pixel 7"));
+        assert_eq!(
+            map.get("ro.product.brand").map(String::as_str),
+            Some("google")
+        );
+        assert_eq!(
+            map.get("ro.product.model").map(String::as_str),
+            Some("Pixel 7")
+        );
     }
 
     #[test]
     fn builds_device_detail() {
-        let output = "[ro.product.brand]: [google]\n[ro.product.model]: [Pixel 7]\n[ro.build.version.sdk]: [34]\n";
+        let output = "[ro.product.name]: [panther]\n[ro.product.brand]: [google]\n[ro.product.model]: [Pixel 7]\n[ro.build.version.sdk]: [34]\n[ro.boot.serialno]: [unknown]\n[ro.serialno]: [ABC123]\n[ro.soc.model]: [Tensor G2]\n";
         let map = parse_getprop_map(output);
         let detail = build_device_detail("ABC", &map);
         assert_eq!(detail.serial, "ABC");
+        assert_eq!(detail.name.as_deref(), Some("panther"));
         assert_eq!(detail.brand.as_deref(), Some("google"));
         assert_eq!(detail.model.as_deref(), Some("Pixel 7"));
         assert_eq!(detail.api_level.as_deref(), Some("34"));
+        assert_eq!(detail.serial_number.as_deref(), Some("ABC123"));
+        assert_eq!(detail.processor.as_deref(), Some("Tensor G2"));
+    }
+
+    #[test]
+    fn parses_wm_size_physical_only() {
+        let output = "Physical size: 1080x2400\n";
+        assert_eq!(parse_wm_size(output).as_deref(), Some("1080x2400"));
+    }
+
+    #[test]
+    fn parses_wm_size_override_preferred() {
+        let output = "Physical size: 1080x2400\nOverride size: 720x1600\n";
+        assert_eq!(parse_wm_size(output).as_deref(), Some("720x1600"));
+    }
+
+    #[test]
+    fn parses_df_total_kb_standard() {
+        let output = "Filesystem     1K-blocks    Used Available Use% Mounted on\n/dev/block/dm-0  11634528  12345  11622183   1% /data\n";
+        assert_eq!(parse_df_total_kb(output).unwrap(), 11634528);
+    }
+
+    #[test]
+    fn parses_df_total_kb_with_1024_blocks() {
+        let output = "Filesystem 1024-blocks Used Available Use% Mounted on\n/dev/block/vdb   2048 0 2048 0% /data\n";
+        assert_eq!(parse_df_total_kb(output).unwrap(), 2048);
     }
 
     #[test]
@@ -332,10 +464,7 @@ mod tests {
     #[test]
     fn parses_bluetooth_manager_state() {
         let output = "state: ON\n";
-        assert_eq!(
-            parse_bluetooth_manager_state(output).as_deref(),
-            Some("ON")
-        );
+        assert_eq!(parse_bluetooth_manager_state(output).as_deref(), Some("ON"));
     }
 
     #[test]

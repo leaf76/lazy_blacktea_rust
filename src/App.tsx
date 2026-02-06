@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -18,6 +19,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   AdbInfo,
   AppConfig,
+  AppBasicInfo,
   AppInfo,
   BugreportLogFilters,
   BugreportLogRow,
@@ -27,6 +29,8 @@ import type {
   DeviceInfo,
   FilePreview,
   LogcatEvent,
+  PerfEvent,
+  PerfSnapshot,
   TerminalEvent,
   ScrcpyInfo,
 } from "./types";
@@ -40,6 +44,7 @@ import {
   checkScrcpy,
   clearAppData,
   clearLogcat,
+  getAppBasicInfo,
   exportLogcat,
   exportUiHierarchy,
   forceStopApp,
@@ -62,8 +67,10 @@ import {
   rebootDevices,
   resetConfig,
   runShell,
+  startPerfMonitor,
   startTerminalSession,
   stopTerminalSession,
+  stopPerfMonitor,
   writeTerminalSession,
   persistTerminalState,
   queryBugreportLogcat,
@@ -88,6 +95,7 @@ import {
   type LogcatLevelsState,
   type LogcatSourceMode,
 } from "./logcat";
+import { buildSparklinePoints, formatBps, formatBytes } from "./perf";
 import {
   initialPairingState,
   pairingReducer,
@@ -133,6 +141,12 @@ type FileTransferProgress = {
   trace_id: string;
 };
 type LogcatLineEntry = { id: number; text: string };
+type PerfMonitorState = {
+  running: boolean;
+  traceId: string | null;
+  samples: PerfSnapshot[];
+  lastError: string | null;
+};
 type TerminalDeviceState = {
   connected: boolean;
   sessionId: string | null;
@@ -146,17 +160,8 @@ type QuickActionId =
   | "record"
   | "logcat-clear"
   | "mirror";
-type ActionFormState = {
-  isOpen: boolean;
-  actionId: QuickActionId | null;
-  errors: string[];
-};
-
-const initialActionFormState: ActionFormState = {
-  isOpen: false,
-  actionId: null,
-  errors: [],
-};
+type RebootMode = "normal" | "recovery" | "bootloader";
+type DashboardActionId = QuickActionId | "apk-installer";
 
 const TERMINAL_MAX_LINES = 500;
 
@@ -262,7 +267,7 @@ const LogcatOutput = memo(function LogcatOutput({
   entries: LogcatLineEntry[];
   searchPattern: RegExp | null;
   autoScroll: boolean;
-  outputRef: RefObject<HTMLDivElement>;
+  outputRef: RefObject<HTMLDivElement | null>;
 }) {
   const rafRef = useRef<number | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -806,6 +811,8 @@ function App() {
   const [logcatActiveFilterSummary, setLogcatActiveFilterSummary] = useState("");
   const [logcatLastExport, setLogcatLastExport] = useState("");
   const [logcatAdvancedOpen, setLogcatAdvancedOpen] = useState(false);
+  const [perfBySerial, setPerfBySerial] = useState<Record<string, PerfMonitorState>>({});
+  const perfBySerialRef = useRef<Record<string, PerfMonitorState>>({});
   const [filesPath, setFilesPath] = useState("/sdcard");
   const [files, setFiles] = useState<DeviceFileEntry[]>([]);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
@@ -854,6 +861,9 @@ function App() {
   const [appsThirdPartyOnly, setAppsThirdPartyOnly] = useState(true);
   const [appsIncludeVersions, setAppsIncludeVersions] = useState(false);
   const [selectedApp, setSelectedApp] = useState<AppInfo | null>(null);
+  const [selectedAppDetails, setSelectedAppDetails] = useState<AppBasicInfo | null>(null);
+  const [appsDetailsBusy, setAppsDetailsBusy] = useState(false);
+  const [appsContextMenu, setAppsContextMenu] = useState<null | { x: number; y: number; app: AppInfo }>(null);
   const [bugreportProgress, setBugreportProgress] = useState<number | null>(null);
   const [bugreportResult, setBugreportResult] = useState<BugreportResult | null>(null);
   const [latestBugreportTaskId, setLatestBugreportTaskId] = useState<string | null>(null);
@@ -881,13 +891,11 @@ function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [pairingState, dispatchPairing] = useReducer(pairingReducer, initialPairingState);
-  const [actionForm, setActionForm] = useState<ActionFormState>(initialActionFormState);
+  const [rebootConfirmOpen, setRebootConfirmOpen] = useState(false);
+  const [rebootConfirmMode, setRebootConfirmMode] = useState<RebootMode>("normal");
   const [taskState, dispatchTasks] = useReducer(tasksReducer, undefined, () => createInitialTaskState(50));
-  const [actionOutputDir, setActionOutputDir] = useState("");
-  const [actionRebootMode, setActionRebootMode] = useState("normal");
-  const [actionDraftConfig, setActionDraftConfig] = useState<AppConfig | null>(null);
   const [logcatMatchIndex, setLogcatMatchIndex] = useState(0);
-  const logcatOutputRef = useRef<HTMLDivElement | null>(null);
+  const logcatOutputRef = useRef<HTMLDivElement>(null);
   const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
   const uiBoundsCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSelectedIndexRef = useRef<number | null>(null);
@@ -895,6 +903,7 @@ function App() {
   const devicePopoverTriggerRef = useRef<HTMLButtonElement | null>(null);
   const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
+  const appsDetailsSeqRef = useRef(0);
   const refreshSeqRef = useRef(0);
   const detailRefreshSeqRef = useRef(0);
   const detailRefreshTimerRef = useRef<number | null>(null);
@@ -909,6 +918,7 @@ function App() {
   const logcatPendingRef = useRef<Record<string, string[]>>({});
   const logcatNextIdRef = useRef<Record<string, number>>({});
   const logcatFlushTimerRef = useRef<number | null>(null);
+  const perfLastSerialRef = useRef<string | null>(null);
   const filesDragContextRef = useRef<{
     pathname: string;
     serial: string;
@@ -927,6 +937,7 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
+  const isPerformanceView = location.pathname === "/performance";
   const activeSerial = selectedSerials[0];
   const activeDevice = useMemo(
     () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
@@ -952,7 +963,7 @@ function App() {
   const primaryDeviceLabel =
     activeDevice?.detail?.model ?? activeDevice?.summary.model ?? activeSerial ?? "Select a device";
   const requiresSingleSelection = useMemo(
-    () => ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat"].includes(location.pathname),
+    () => ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat", "/performance"].includes(location.pathname),
     [location.pathname],
   );
   const singleSelectionWarning = requiresSingleSelection && selectedCount > 1;
@@ -990,6 +1001,34 @@ function App() {
     });
     return map;
   }, [devices]);
+
+  useEffect(() => {
+    const prevSerial = perfLastSerialRef.current;
+    const nextSerial = isPerformanceView ? activeSerial ?? null : null;
+    if (prevSerial && prevSerial !== nextSerial) {
+      const running = perfBySerialRef.current[prevSerial]?.running ?? false;
+      if (running) {
+        void stopPerfMonitor(prevSerial)
+          .then(() => {
+            setPerfBySerial((prev) => {
+              const existing = prev[prevSerial];
+              if (!existing) {
+                return prev;
+              }
+              return {
+                ...prev,
+                [prevSerial]: {
+                  ...existing,
+                  running: false,
+                },
+              };
+            });
+          })
+          .catch((error) => pushToast(formatError(error), "error"));
+      }
+    }
+    perfLastSerialRef.current = nextSerial;
+  }, [isPerformanceView, activeSerial]);
   const recentDeviceSerials = useMemo(() => {
     const serials: string[] = [];
     const tasks = [...taskState.items].sort((a, b) => b.started_at - a.started_at);
@@ -1472,17 +1511,37 @@ function App() {
     return activeSerial;
   };
 
+  useEffect(() => {
+    if (!appsContextMenu) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAppsContextMenu(null);
+      }
+    };
+    const handleScroll = () => setAppsContextMenu(null);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [appsContextMenu]);
+
   const openPairingModal = () => dispatchPairing({ type: "OPEN" });
   const closePairingModal = () => dispatchPairing({ type: "CLOSE" });
 
-  const openActionForm = (actionId: QuickActionId) => {
-    setActionForm({ isOpen: true, actionId, errors: [] });
-    setActionOutputDir(config?.output_path ?? "");
-    setActionRebootMode("normal");
-    setActionDraftConfig(config ? (JSON.parse(JSON.stringify(config)) as AppConfig) : null);
+  const requestRebootConfirm = () => {
+    if (!selectedSerials.length) {
+      pushToast("Select at least one device to reboot.", "error");
+      return;
+    }
+    setRebootConfirmMode("normal");
+    setRebootConfirmOpen(true);
   };
 
-  const closeActionForm = () => setActionForm(initialActionFormState);
+  const closeRebootConfirm = () => setRebootConfirmOpen(false);
 
   const validateHostPort = (value: string) => {
     const trimmed = value.trim();
@@ -1519,10 +1578,6 @@ function App() {
       return "Invalid package name format.";
     }
     return null;
-  };
-
-  const updateDraftConfig = (updater: (current: AppConfig) => AppConfig) => {
-    setActionDraftConfig((prev) => (prev ? updater(prev) : prev));
   };
 
   const pushToast = (message: string, tone: Toast["tone"]) => {
@@ -1591,7 +1646,8 @@ function App() {
       if (refreshId !== refreshSeqRef.current) {
         return;
       }
-      setDevices((prev) => mergeDeviceDetails(prev, response.data));
+      // listDevices(false) returns summaries only; keep the last known detail to avoid UI flicker.
+      setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
       setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
       void refreshDeviceDetails({ notifyOnError: false });
     } catch (error) {
@@ -1715,6 +1771,10 @@ function App() {
   }, [terminalBySerial]);
 
   useEffect(() => {
+    perfBySerialRef.current = perfBySerial;
+  }, [perfBySerial]);
+
+  useEffect(() => {
     const intervalMs = getAutoRefreshIntervalMs(config);
     if (!intervalMs) {
       return;
@@ -1772,7 +1832,8 @@ function App() {
         const statesChanged = Array.from(nextBySerial.entries()).some(([serial, state]) => prevBySerial.get(serial) !== state);
         const shouldRefreshDetail = serialsChanged || statesChanged;
 
-        setDevices((prev) => mergeDeviceDetails(prev, response.data));
+        // Auto-refresh uses listDevices(false) so preserve previously fetched detail fields.
+        setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
         setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
 
         if (shouldRefreshDetail) {
@@ -1953,6 +2014,41 @@ function App() {
       const bucket = (logcatPendingRef.current[payload.serial] ??= []);
       bucket.push(...lines);
       scheduleLogcatFlush();
+    });
+
+    const unlistenPerf = listen<PerfEvent>("perf-snapshot", (event) => {
+      const payload = event.payload;
+      if (payload.error) {
+        const prevError = perfBySerialRef.current[payload.serial]?.lastError ?? null;
+        if (payload.error !== prevError) {
+          pushToast(payload.error, "error");
+        }
+      }
+
+      setPerfBySerial((prev) => {
+        const existing =
+          prev[payload.serial] ??
+          ({
+            running: false,
+            traceId: null,
+            samples: [],
+            lastError: null,
+          } satisfies PerfMonitorState);
+
+        const nextSamples = payload.snapshot
+          ? [...existing.samples, payload.snapshot].slice(-60)
+          : existing.samples;
+
+        return {
+          ...prev,
+          [payload.serial]: {
+            ...existing,
+            traceId: payload.trace_id || existing.traceId,
+            samples: nextSamples,
+            lastError: payload.error ?? (payload.snapshot ? null : existing.lastError),
+          },
+        };
+      });
     });
 
     const flushTerminalPending = () => {
@@ -2178,6 +2274,7 @@ function App() {
         logcatFlushTimerRef.current = null;
       }
       logcatPendingRef.current = {};
+      void unlistenPerf.then((unlisten) => unlisten());
       void unlistenTerminal.then((unlisten) => unlisten());
       if (terminalFlushTimerRef.current != null) {
         window.clearTimeout(terminalFlushTimerRef.current);
@@ -3056,6 +3153,78 @@ function App() {
     setLogcatAdvancedOpen((prev) => !prev);
   };
 
+  const handlePerfStart = async () => {
+    const serial = ensureSingleSelection("performance");
+    if (!serial) {
+      return;
+    }
+    if (perfBySerialRef.current[serial]?.running) {
+      pushToast("Performance monitor already running.", "info");
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await startPerfMonitor(serial, 1000);
+      setPerfBySerial((prev) => {
+        const existing =
+          prev[serial] ??
+          ({
+            running: false,
+            traceId: null,
+            samples: [],
+            lastError: null,
+          } satisfies PerfMonitorState);
+        return {
+          ...prev,
+          [serial]: {
+            ...existing,
+            running: true,
+            traceId: response.trace_id,
+            lastError: null,
+          },
+        };
+      });
+      pushToast("Performance monitor started.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePerfStop = async () => {
+    const serial = ensureSingleSelection("performance");
+    if (!serial) {
+      return;
+    }
+    if (!perfBySerialRef.current[serial]?.running) {
+      pushToast("Performance monitor is not running.", "info");
+      return;
+    }
+    setBusy(true);
+    try {
+      await stopPerfMonitor(serial);
+      setPerfBySerial((prev) => {
+        const existing = prev[serial];
+        if (!existing) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [serial]: {
+            ...existing,
+            running: false,
+          },
+        };
+      });
+      pushToast("Performance monitor stopped.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const scrollToLogcatMatch = (index: number) => {
     const container = logcatOutputRef.current;
     if (!container) {
@@ -3795,10 +3964,91 @@ function App() {
       );
       setApps(response.data);
       setSelectedApp(null);
+      setSelectedAppDetails(null);
+      setAppsDetailsBusy(false);
+      setAppsContextMenu(null);
+      appsDetailsSeqRef.current += 1;
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleSelectAppRow = (app: AppInfo) => {
+    setSelectedApp(app);
+    setSelectedAppDetails(null);
+    setAppsContextMenu(null);
+
+    const serial = ensureSingleSelection("app details");
+    if (!serial) {
+      return;
+    }
+
+    const seq = (appsDetailsSeqRef.current += 1);
+    setAppsDetailsBusy(true);
+    void (async () => {
+      try {
+        const response = await getAppBasicInfo(serial, app.package_name);
+        if (appsDetailsSeqRef.current !== seq) {
+          return;
+        }
+        setSelectedAppDetails(response.data);
+      } catch (error) {
+        if (appsDetailsSeqRef.current !== seq) {
+          return;
+        }
+        pushToast(formatError(error), "error");
+      } finally {
+        if (appsDetailsSeqRef.current === seq) {
+          setAppsDetailsBusy(false);
+        }
+      }
+    })();
+  };
+
+  const handleAppDoubleClick = async (app: AppInfo) => {
+    const serial = ensureSingleSelection("app launch");
+    if (!serial) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await launchApp([serial], app.package_name);
+      const successCount = response.data.filter((item) => item.exit_code === 0).length;
+      if (successCount) {
+        pushToast(`Launch requested (${successCount}/${response.data.length}).`, "info");
+      } else {
+        const detail = (response.data[0]?.stderr || response.data[0]?.stdout || "Unknown error").trim();
+        pushToast(`Launch failed: ${detail.slice(0, 200)}`, "error");
+      }
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAppContextMenu = (event: ReactMouseEvent<HTMLButtonElement>, app: AppInfo) => {
+    event.preventDefault();
+    handleSelectAppRow(app);
+    setAppsContextMenu({ x: event.clientX, y: event.clientY, app });
+  };
+
+  const handleContextForceStop = async (app: AppInfo) => {
+    const serial = ensureSingleSelection("app management");
+    if (!serial) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await forceStopApp(serial, app.package_name);
+      pushToast("App action sent.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+      setAppsContextMenu(null);
     }
   };
 
@@ -3871,228 +4121,162 @@ function App() {
     }
   };
 
-  const resolveOutputDir = async (value: string) => {
-    let outputDir = value.trim();
-    if (!outputDir) {
-      outputDir = config?.output_path ?? "";
-    }
-    if (!outputDir) {
-      const selected = await openDialog({
-        title: "Select output folder",
-        directory: true,
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        return null;
-      }
-      outputDir = selected;
-    }
-    return outputDir;
-  };
-
-  const persistActionConfig = async () => {
-    if (!actionDraftConfig) {
+  const handleQuickScreenshot = async () => {
+    if (!selectedSerials.length) {
+      pushToast("Select at least one device.", "error");
       return;
     }
-    const updated = {
-      ...actionDraftConfig,
-      device_groups: expandGroups(groupMap),
-    };
-    const response = await saveConfig(updated);
-    setConfig(response.data);
-    setGroupMap(flattenGroups(response.data.device_groups));
-  };
-
-  const handleActionSubmit = async () => {
-    if (!actionForm.actionId) {
-      return;
-    }
-    const errors: string[] = [];
-    const requiresSelection = actionForm.actionId !== "reboot";
-    const requiresSingle =
-      actionForm.actionId === "record" || actionForm.actionId === "logcat-clear";
-    if (requiresSelection && !selectedSerials.length) {
-      errors.push("Select at least one device to run this action.");
-    }
-    if (requiresSingle && selectedSerials.length !== 1) {
-      errors.push("Select exactly one device to run this action.");
-    }
-    if (actionForm.actionId === "reboot" && !selectedSerials.length) {
-      errors.push("Select at least one device to reboot.");
-    }
-    if (actionForm.actionId === "screenshot" && !actionOutputDir.trim() && !config?.output_path) {
-      errors.push("Select an output folder for screenshots.");
-    }
-    if (actionForm.actionId === "record" && screenRecordRemote && !actionOutputDir.trim() && !config?.output_path) {
-      errors.push("Select an output folder for recordings.");
-    }
-    let scrcpyAvailability = scrcpyInfo;
-    if (actionForm.actionId === "mirror" && !scrcpyAvailability?.available) {
-      try {
-        const response = await checkScrcpy();
-        scrcpyAvailability = response.data;
-        setScrcpyInfo(response.data);
-      } catch (error) {
-        console.warn("Failed to refresh scrcpy availability.", error);
-      }
-    }
-    if (actionForm.actionId === "mirror" && !scrcpyAvailability?.available) {
-      errors.push("scrcpy is not available. Install it to enable live mirror.");
-    }
-    if (
-      (actionForm.actionId === "screenshot" ||
-        actionForm.actionId === "record" ||
-        actionForm.actionId === "mirror") &&
-      !actionDraftConfig
-    ) {
-      errors.push("Settings are still loading. Try again in a moment.");
-    }
-    if (errors.length) {
-      setActionForm((prev) => ({ ...prev, errors }));
+    const outputDir = (config?.output_path ?? "").trim();
+    if (!outputDir) {
+      pushToast("Set an output folder in Settings to save screenshots.", "error");
       return;
     }
 
     setBusy(true);
-    setActionForm((prev) => ({ ...prev, errors: [] }));
     try {
-      const singleSerial = selectedSerials.length === 1 ? selectedSerials[0] : null;
-      if (actionForm.actionId === "screenshot") {
-        await persistActionConfig();
-        const outputDir = await resolveOutputDir(actionOutputDir);
-        if (!outputDir) {
-          return;
-        }
-        const serials = Array.from(new Set(selectedSerials));
-        const taskId = beginTask({
-          kind: "screenshot",
-          title: `Screenshot (${serials.length})`,
-          serials,
-        });
-        let hasError = false;
-        let traceSet = false;
-        await Promise.all(
-          serials.map(async (serial) => {
-            try {
-              const response = await captureScreenshot(serial, outputDir);
-              if (!traceSet && response.trace_id) {
-                traceSet = true;
-                dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-              }
-              dispatchTasks({
-                type: "TASK_UPDATE_DEVICE",
-                id: taskId,
-                serial,
-                patch: { status: "success", output_path: response.data, message: `Saved to ${response.data}` },
-              });
-            } catch (error) {
-              hasError = true;
-              dispatchTasks({
-                type: "TASK_UPDATE_DEVICE",
-                id: taskId,
-                serial,
-                patch: { status: "error", message: formatError(error) },
-              });
+      const serials = Array.from(new Set(selectedSerials));
+      const taskId = beginTask({
+        kind: "screenshot",
+        title: `Screenshot (${serials.length})`,
+        serials,
+      });
+      let hasError = false;
+      let traceSet = false;
+      await Promise.all(
+        serials.map(async (serial) => {
+          try {
+            const response = await captureScreenshot(serial, outputDir);
+            if (!traceSet && response.trace_id) {
+              traceSet = true;
+              dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
             }
-          }),
-        );
-        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
-        pushToast(
-          hasError
-            ? "Screenshot completed with errors. Check Task Center."
-            : "Screenshot completed. Check Task Center.",
-          hasError ? "error" : "info",
-        );
-      } else if (actionForm.actionId === "reboot") {
-        await handleReboot(actionRebootMode === "normal" ? undefined : actionRebootMode);
-	      } else if (actionForm.actionId === "record") {
-	        await persistActionConfig();
-	        if (!singleSerial) {
-	          pushToast("Select exactly one device for screen recording.", "error");
-	          return;
-	        }
-	        if (screenRecordRemote) {
-	          const outputDir = await resolveOutputDir(actionOutputDir);
-	          if (!outputDir) {
-	            return;
-	          }
-	          const taskId = beginTask({
-	            kind: "screen_record_stop",
-	            title: `Screen Record Stop: ${singleSerial}`,
-	            serials: [singleSerial],
-	          });
-	          try {
-	            const response = await stopScreenRecord(singleSerial, outputDir);
-	            setScreenRecordRemote(null);
-	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-	            dispatchTasks({
-	              type: "TASK_UPDATE_DEVICE",
-	              id: taskId,
-	              serial: singleSerial,
-	              patch: {
-	                status: "success",
-	                output_path: response.data || null,
-	                message: response.data ? `Saved to ${response.data}` : "Stopped.",
-	              },
-	            });
-	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
-	            pushToast(response.data ? `Recording saved to ${response.data}` : "Screen recording stopped.", "info");
-	          } catch (error) {
-	            dispatchTasks({
-	              type: "TASK_UPDATE_DEVICE",
-	              id: taskId,
-	              serial: singleSerial,
-	              patch: { status: "error", message: formatError(error) },
-	            });
-	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-	            throw error;
-	          }
-	        } else {
-	          const taskId = beginTask({
-	            kind: "screen_record_start",
-	            title: `Screen Record Start: ${singleSerial}`,
-	            serials: [singleSerial],
-	          });
-	          try {
-	            const response = await startScreenRecord(singleSerial);
-	            setScreenRecordRemote(response.data);
-	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-	            dispatchTasks({
-	              type: "TASK_UPDATE_DEVICE",
-	              id: taskId,
-	              serial: singleSerial,
-	              patch: { status: "success", message: `Remote: ${response.data}` },
-	            });
-	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
-	            pushToast("Screen recording started.", "info");
-	          } catch (error) {
-	            dispatchTasks({
-	              type: "TASK_UPDATE_DEVICE",
-	              id: taskId,
-	              serial: singleSerial,
-	              patch: { status: "error", message: formatError(error) },
-	            });
-	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-	            throw error;
-	          }
-	        }
-      } else if (actionForm.actionId === "logcat-clear") {
-        if (!singleSerial) {
-          pushToast("Select exactly one device for logcat clear.", "error");
-          return;
-        }
-        await clearLogcat(singleSerial);
-        setLogcatLines((prev) => ({ ...prev, [singleSerial]: [] }));
-        pushToast("Logcat cleared.", "info");
-      } else if (actionForm.actionId === "mirror") {
-        await persistActionConfig();
-        await handleScrcpyLaunch();
-      }
-      closeActionForm();
+            dispatchTasks({
+              type: "TASK_UPDATE_DEVICE",
+              id: taskId,
+              serial,
+              patch: { status: "success", output_path: response.data, message: `Saved to ${response.data}` },
+            });
+          } catch (error) {
+            hasError = true;
+            dispatchTasks({
+              type: "TASK_UPDATE_DEVICE",
+              id: taskId,
+              serial,
+              patch: { status: "error", message: formatError(error) },
+            });
+          }
+        }),
+      );
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
+      pushToast(
+        hasError ? "Screenshot completed with errors. Check Task Center." : "Screenshot completed. Check Task Center.",
+        hasError ? "error" : "info",
+      );
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleQuickScreenRecord = async () => {
+    const singleSerial = ensureSingleSelection("screen recording");
+    if (!singleSerial) {
+      return;
+    }
+
+    setBusy(true);
+    try {
+      if (screenRecordRemote) {
+        const outputDir = (config?.output_path ?? "").trim() || undefined;
+        const taskId = beginTask({
+          kind: "screen_record_stop",
+          title: `Screen Record Stop: ${singleSerial}`,
+          serials: [singleSerial],
+        });
+        try {
+          const response = await stopScreenRecord(singleSerial, outputDir);
+          const savedPath = response.data?.trim();
+          setScreenRecordRemote(null);
+          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: singleSerial,
+            patch: {
+              status: "success",
+              output_path: savedPath || null,
+              message: savedPath ? `Saved to ${savedPath}` : "Stopped (no output folder configured).",
+            },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+          pushToast(savedPath ? `Recording saved to ${savedPath}` : "Screen recording stopped.", "info");
+        } catch (error) {
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: singleSerial,
+            patch: { status: "error", message: formatError(error) },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+          throw error;
+        }
+      } else {
+        const taskId = beginTask({
+          kind: "screen_record_start",
+          title: `Screen Record Start: ${singleSerial}`,
+          serials: [singleSerial],
+        });
+        try {
+          const response = await startScreenRecord(singleSerial);
+          setScreenRecordRemote(response.data);
+          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: singleSerial,
+            patch: { status: "success", message: `Remote: ${response.data}` },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+          pushToast("Screen recording started.", "info");
+        } catch (error) {
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial: singleSerial,
+            patch: { status: "error", message: formatError(error) },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+          throw error;
+        }
+      }
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleQuickLogcatClear = async () => {
+    const singleSerial = ensureSingleSelection("logcat clear");
+    if (!singleSerial) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await clearLogcat(singleSerial);
+      setLogcatLines((prev) => ({ ...prev, [singleSerial]: [] }));
+      pushToast("Logcat cleared.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirmReboot = async () => {
+    closeRebootConfirm();
+    await handleReboot(rebootConfirmMode === "normal" ? undefined : rebootConfirmMode);
   };
 
   const handleBluetoothMonitor = async (enable: boolean) => {
@@ -4375,14 +4559,22 @@ function App() {
     return apps.filter((app) => app.package_name.toLowerCase().includes(query));
   }, [apps, appsFilter]);
 
-  const dashboardActions = [
+  const dashboardActions: Array<{
+    id: DashboardActionId;
+    title: string;
+    description: string;
+    hint?: string;
+    tone?: "primary";
+    onClick: () => void;
+    disabled: boolean;
+  }> = [
     {
       id: "screenshot",
       title: "Screenshot",
       description: "Capture screenshots from selected devices.",
       hint: "Multi-device",
       tone: "primary",
-      onClick: () => openActionForm("screenshot"),
+      onClick: handleQuickScreenshot,
       disabled: busy || selectedSerials.length === 0,
     },
     {
@@ -4390,7 +4582,7 @@ function App() {
       title: "Reboot",
       description: "Restart selected devices.",
       hint: "Multi-device",
-      onClick: () => openActionForm("reboot"),
+      onClick: requestRebootConfirm,
       disabled: busy || selectedSerials.length === 0,
     },
     {
@@ -4401,7 +4593,7 @@ function App() {
         : "Record the device screen for a short clip.",
       hint: "Single device",
       tone: "primary",
-      onClick: () => openActionForm("record"),
+      onClick: handleQuickScreenRecord,
       disabled: busy || selectedSerials.length !== 1,
     },
     {
@@ -4409,7 +4601,7 @@ function App() {
       title: "Clear Logcat",
       description: "Clear the logcat buffer for the primary device.",
       hint: "Primary device",
-      onClick: () => openActionForm("logcat-clear"),
+      onClick: handleQuickLogcatClear,
       disabled: busy || selectedSerials.length !== 1,
     },
     {
@@ -4420,7 +4612,7 @@ function App() {
         : "Install scrcpy to enable live mirroring.",
       hint: "Multi-device",
       tone: "primary",
-      onClick: () => openActionForm("mirror"),
+      onClick: handleScrcpyLaunch,
       disabled: busy || selectedSerials.length === 0,
     },
     {
@@ -4610,12 +4802,56 @@ function App() {
             </div>
             <div className="summary-grid summary-grid-hero">
               <div>
+                <span className="muted">Name</span>
+                <strong>{detail?.name ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Brand</span>
+                <strong>{detail?.brand ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Model</span>
+                <strong>{detail?.model ?? activeDevice?.summary.model ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Serial</span>
+                <strong>{activeSerial ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Serial Number</span>
+                <strong>{detail?.serial_number ?? "--"}</strong>
+              </div>
+              <div>
                 <span className="muted">Android</span>
                 <strong>{detail?.android_version ?? "--"}</strong>
               </div>
               <div>
                 <span className="muted">API</span>
                 <strong>{detail?.api_level ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Processor</span>
+                <strong>{detail?.processor ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Resolution</span>
+                <strong>{detail?.resolution ?? "--"}</strong>
+              </div>
+              <div>
+                <span className="muted">Storage</span>
+                <strong>
+                  {detail?.storage_total_bytes != null
+                    ? formatBytes(detail.storage_total_bytes)
+                    : "--"}
+                </strong>
+              </div>
+              <div>
+                <span className="muted">Memory</span>
+                <strong>
+                  {detail?.memory_total_bytes != null
+                    ? formatBytes(detail.memory_total_bytes)
+                    : "--"}
+                </strong>
               </div>
               <div>
                 <span className="muted">Battery</span>
@@ -4640,12 +4876,18 @@ function App() {
             <div className="card-header">
               <div>
                 <h2>Quick Actions</h2>
-                <p className="muted">Grouped by intent for faster access.</p>
+                <p className="muted">One-click actions using saved Settings defaults. Reboot still asks for confirmation.</p>
               </div>
               <span className="badge">
                 {selectedSerials.length ? `${selectedSerials.length} devices` : "Select device"}
               </span>
             </div>
+            {selectedSerials.length === 0 && (
+              <div className="inline-alert info">
+                <strong>Select a device</strong>
+                <span className="muted">Use the device picker in the top bar to enable quick actions.</span>
+              </div>
+            )}
             <div className="quick-actions">
               {dashboardActionGroups.map((group) => (
                 <div key={group.id} className="quick-action-group">
@@ -4766,34 +5008,6 @@ function App() {
     );
   };
 
-  const actionTitleMap: Record<QuickActionId, string> = {
-    screenshot: "Screenshot",
-    reboot: "Reboot",
-    record: screenRecordRemote ? "Stop Recording" : "Start Recording",
-    "logcat-clear": "Clear Logcat",
-    mirror: "Live Mirror",
-  };
-  const scrcpyVersionLabel = scrcpyInfo?.version_output?.split("\n")[0] ?? "";
-  const scrcpyAudioHint =
-    scrcpyInfo?.major_version == null
-      ? ""
-      : scrcpyInfo.major_version >= 3
-        ? "Audio is enabled by default in scrcpy v3+. Disable it to mute."
-        : scrcpyInfo.major_version >= 2
-          ? "Audio toggle uses scrcpy v2 flags."
-          : "Audio capture is not supported in this scrcpy version.";
-
-  const actionNeedsConfig =
-    actionForm.actionId === "screenshot" ||
-    actionForm.actionId === "record" ||
-    actionForm.actionId === "mirror";
-  const actionRequiresSelection = actionForm.actionId != null;
-  const actionRequiresSingle =
-    actionForm.actionId === "record" || actionForm.actionId === "logcat-clear";
-  const actionSelectionInvalid =
-    (actionRequiresSelection && selectedSerials.length === 0) ||
-    (actionRequiresSingle && selectedSerials.length !== 1);
-
   const getPopoverFocusable = () => {
     const root = devicePopoverRef.current;
     if (!root) {
@@ -4912,6 +5126,187 @@ function App() {
     return () => window.cancelAnimationFrame(frame);
   }, [devicePopoverOpen]);
 
+  const renderPerfSparkline = (values: number[]) => {
+    const width = 220;
+    const height = 44;
+    const points = buildSparklinePoints(values, width, height);
+    return (
+      <svg className="sparkline" viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
+        <polyline points={points} fill="none" />
+      </svg>
+    );
+  };
+
+  const PerformanceView = () => {
+    if (!activeSerial) {
+      return (
+        <div className="page-section">
+          <div className="page-header">
+            <div>
+              <h1>Performance</h1>
+              <p className="muted">Real-time device performance snapshots.</p>
+            </div>
+          </div>
+          <section className="panel empty-state">
+            <div>
+              <h2>Select a device</h2>
+              <p className="muted">Choose a single online device to start monitoring.</p>
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+                Go to Device Manager
+              </button>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    const state =
+      perfBySerial[activeSerial] ??
+      ({
+        running: false,
+        traceId: null,
+        samples: [],
+        lastError: null,
+      } satisfies PerfMonitorState);
+    const latest: PerfSnapshot | null = state.samples[state.samples.length - 1] ?? null;
+
+    const cpuNow =
+      latest?.cpu_total_percent_x100 != null
+        ? `${(latest.cpu_total_percent_x100 / 100).toFixed(2)}%`
+        : "--";
+
+    const memNow =
+      latest?.mem_used_bytes != null && latest?.mem_total_bytes != null
+        ? `${formatBytes(latest.mem_used_bytes)} / ${formatBytes(latest.mem_total_bytes)}`
+        : "--";
+
+    const batteryTemp =
+      latest?.battery_temp_decic != null
+        ? `${(latest.battery_temp_decic / 10).toFixed(1)} C`
+        : "--";
+    const batteryLevel =
+      latest?.battery_level != null ? `${latest.battery_level}%` : "--";
+    const batteryNow =
+      batteryLevel === "--" && batteryTemp === "--" ? "--" : `${batteryLevel} • ${batteryTemp}`;
+
+    const netNow =
+      latest?.net_rx_bps != null || latest?.net_tx_bps != null
+        ? `Rx ${formatBps(latest?.net_rx_bps ?? null)} • Tx ${formatBps(latest?.net_tx_bps ?? null)}`
+        : "--";
+
+    const cpuValues = state.samples.map((sample) =>
+      sample.cpu_total_percent_x100 != null ? sample.cpu_total_percent_x100 / 100 : Number.NaN,
+    );
+    const memValues = state.samples.map((sample) =>
+      sample.mem_used_bytes != null ? sample.mem_used_bytes : Number.NaN,
+    );
+    const batteryValues = state.samples.map((sample) =>
+      sample.battery_level != null ? sample.battery_level : Number.NaN,
+    );
+    const rxValues = state.samples.map((sample) =>
+      sample.net_rx_bps != null ? sample.net_rx_bps : Number.NaN,
+    );
+
+    const canStart = !busy && selectedSerials.length === 1 && deviceStatus === "device" && !state.running;
+    const canStop = !busy && selectedSerials.length === 1 && state.running;
+
+    return (
+      <div className="page-section">
+        <div className="page-header">
+          <div>
+            <h1>Performance</h1>
+            <p className="muted">Real-time device performance snapshots.</p>
+          </div>
+          <div className="page-actions">
+            <span className={`status-pill ${state.running ? "busy" : "idle"}`}>
+              {state.running ? "Running" : "Stopped"}
+            </span>
+            <span className="badge">Interval 1s</span>
+          </div>
+        </div>
+
+        {state.traceId && (
+          <div className="inline-alert info">
+            <strong>Trace</strong>
+            <span className="muted">{state.traceId}</span>
+          </div>
+        )}
+
+        {state.lastError && (
+          <div className="inline-alert error">
+            <strong>Monitor error</strong>
+            <span className="muted">{state.lastError}</span>
+          </div>
+        )}
+
+        <section className="panel perf-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Live Monitor</h2>
+              <span>{selectedSummaryLabel}</span>
+            </div>
+            <div className="button-row">
+              <button onClick={handlePerfStart} disabled={!canStart}>
+                Start
+              </button>
+              <button onClick={handlePerfStop} disabled={!canStop}>
+                Stop
+              </button>
+            </div>
+          </div>
+
+          <div className="perf-grid">
+            <div className="panel card perf-card">
+              <div className="perf-card-header">
+                <div>
+                  <h3>CPU</h3>
+                  <p className="muted">Total usage</p>
+                </div>
+                <strong>{cpuNow}</strong>
+              </div>
+              {renderPerfSparkline(cpuValues)}
+            </div>
+
+            <div className="panel card perf-card">
+              <div className="perf-card-header">
+                <div>
+                  <h3>Memory</h3>
+                  <p className="muted">Used / total</p>
+                </div>
+                <strong>{memNow}</strong>
+              </div>
+              {renderPerfSparkline(memValues)}
+            </div>
+
+            <div className="panel card perf-card">
+              <div className="perf-card-header">
+                <div>
+                  <h3>Battery</h3>
+                  <p className="muted">Level and temperature</p>
+                </div>
+                <strong>{batteryNow}</strong>
+              </div>
+              {renderPerfSparkline(batteryValues)}
+            </div>
+
+            <div className="panel card perf-card">
+              <div className="perf-card-header">
+                <div>
+                  <h3>Network</h3>
+                  <p className="muted">Rx throughput</p>
+                </div>
+                <strong>{netNow}</strong>
+              </div>
+              {renderPerfSparkline(rxValues)}
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -4944,6 +5339,7 @@ function App() {
           </div>
           <div className="nav-group">
             <span className="nav-title">System</span>
+            <NavLink to="/performance">Performance</NavLink>
             <NavLink to="/tasks">Task Center</NavLink>
             <NavLink to="/settings">Settings</NavLink>
           </div>
@@ -5088,14 +5484,14 @@ function App() {
           <div className="top-actions">
             <button
               className="ghost"
-              onClick={() => openActionForm("screenshot")}
+              onClick={handleQuickScreenshot}
               disabled={busy || selectedSerials.length === 0}
             >
               Screenshot
             </button>
             <button
               className="ghost"
-              onClick={() => openActionForm("reboot")}
+              onClick={requestRebootConfirm}
               disabled={busy || selectedSerials.length === 0}
             >
               Reboot
@@ -5108,7 +5504,7 @@ function App() {
             </button>
             <button
               className="ghost"
-              onClick={() => openActionForm("mirror")}
+              onClick={handleScrcpyLaunch}
               disabled={busy || selectedSerials.length === 0}
             >
               Live Mirror
@@ -5120,6 +5516,7 @@ function App() {
         <main className={isBugreportLogViewer ? "page page-fixed" : "page"}>
           <Routes>
             <Route path="/" element={<DashboardView />} />
+            <Route path="/performance" element={<PerformanceView />} />
             <Route
               path="/tasks"
               element={
@@ -6638,7 +7035,10 @@ function App() {
                           <button
                             key={app.package_name}
                             className={`app-row ${selectedApp?.package_name === app.package_name ? "active" : ""}`}
-                            onClick={() => setSelectedApp(app)}
+                            type="button"
+                            onClick={() => handleSelectAppRow(app)}
+                            onDoubleClick={() => void handleAppDoubleClick(app)}
+                            onContextMenu={(event) => handleAppContextMenu(event, app)}
                           >
                             <strong>{app.package_name}</strong>
                             <span>{app.version_name ?? ""}</span>
@@ -6651,7 +7051,22 @@ function App() {
                         {selectedApp ? (
                           <div className="stack">
                             <p>{selectedApp.package_name}</p>
-                            <p className="muted">Version: {selectedApp.version_name ?? "--"}</p>
+                            {appsDetailsBusy && <p className="muted">Loading details...</p>}
+                            <p className="muted">
+                              Version: {selectedAppDetails?.version_name ?? selectedApp.version_name ?? "--"}
+                            </p>
+                            <p className="muted">
+                              First install: {selectedAppDetails?.first_install_time ?? "--"}
+                            </p>
+                            <p className="muted">
+                              Last update: {selectedAppDetails?.last_update_time ?? "--"}
+                            </p>
+                            <p className="muted">
+                              APK size:{" "}
+                              {selectedAppDetails?.apk_size_bytes_total != null
+                                ? formatBytes(selectedAppDetails.apk_size_bytes_total)
+                                : "--"}
+                            </p>
                             <div className="button-row">
                               <button onClick={() => handleAppAction("forceStop")} disabled={busy || selectedSerials.length !== 1}>
                                 Force Stop
@@ -6678,6 +7093,28 @@ function App() {
                         )}
                       </div>
                     </div>
+                    {appsContextMenu && (
+                      <>
+                        <div
+                          className="context-menu-backdrop"
+                          onMouseDown={() => setAppsContextMenu(null)}
+                        />
+                        <div
+                          className="context-menu"
+                          style={{ left: appsContextMenu.x, top: appsContextMenu.y }}
+                          onMouseDown={(event) => event.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => void handleContextForceStop(appsContextMenu.app)}
+                            disabled={busy || selectedSerials.length !== 1}
+                          >
+                            Force Stop
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </section>
                 </div>
               }
@@ -7249,6 +7686,44 @@ function App() {
                           </label>
                         </div>
                         <div className="settings-group">
+                          <h3>Screenshot</h3>
+                          <label>
+                            Display ID
+                            <input
+                              type="number"
+                              min={-1}
+                              value={config.screenshot.display_id}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screenshot: { ...prev.screenshot, display_id: Number(event.target.value) },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            Extra args
+                            <input
+                              value={config.screenshot.extra_args}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screenshot: { ...prev.screenshot, extra_args: event.target.value },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <p className="muted">Use -1 to capture the default display.</p>
+                        </div>
+                        <div className="settings-group">
                           <h3>Screenrecord</h3>
                           <label>
                             Bit rate
@@ -7267,6 +7742,52 @@ function App() {
                             />
                           </label>
                           <label>
+                            Time limit (sec)
+                            <input
+                              type="number"
+                              min={1}
+                              max={180}
+                              value={config.screen_record.time_limit_sec}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screen_record: {
+                                          ...prev.screen_record,
+                                          time_limit_sec: Math.min(
+                                            180,
+                                            Math.max(1, Number(event.target.value) || 1),
+                                          ),
+                                        },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            Display ID
+                            <input
+                              type="number"
+                              min={-1}
+                              value={config.screen_record.display_id}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screen_record: {
+                                          ...prev.screen_record,
+                                          display_id: Number(event.target.value),
+                                        },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
                             Size
                             <input
                               value={config.screen_record.size}
@@ -7274,6 +7795,22 @@ function App() {
                                 setConfig((prev) =>
                                   prev
                                     ? { ...prev, screen_record: { ...prev.screen_record, size: event.target.value } }
+                                    : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            Extra args
+                            <input
+                              value={config.screen_record.extra_args}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screen_record: { ...prev.screen_record, extra_args: event.target.value },
+                                      }
                                     : prev,
                                 )
                               }
@@ -7296,6 +7833,37 @@ function App() {
                             />
                             Use HEVC
                           </label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.screen_record.bugreport}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        screen_record: { ...prev.screen_record, bugreport: event.target.checked },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Bugreport overlay
+                          </label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.screen_record.verbose}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? { ...prev, screen_record: { ...prev.screen_record, verbose: event.target.checked } }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Verbose output
+                          </label>
                         </div>
                         <div className="settings-group">
                           <h3>scrcpy</h3>
@@ -7313,6 +7881,51 @@ function App() {
                             />
                             Stay awake
                           </label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.scrcpy.turn_screen_off}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? { ...prev, scrcpy: { ...prev.scrcpy, turn_screen_off: event.target.checked } }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Turn screen off
+                          </label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.scrcpy.disable_screensaver}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? { ...prev, scrcpy: { ...prev.scrcpy, disable_screensaver: event.target.checked } }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Disable screensaver
+                          </label>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={config.scrcpy.enable_audio_playback}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        scrcpy: { ...prev.scrcpy, enable_audio_playback: event.target.checked },
+                                      }
+                                    : prev,
+                                )
+                              }
+                            />
+                            Enable audio
+                          </label>
                           <label>
                             Bit rate
                             <input
@@ -7320,6 +7933,21 @@ function App() {
                               onChange={(event) =>
                                 setConfig((prev) =>
                                   prev ? { ...prev, scrcpy: { ...prev.scrcpy, bitrate: event.target.value } } : prev,
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            Max size
+                            <input
+                              type="number"
+                              min={0}
+                              value={config.scrcpy.max_size}
+                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? { ...prev, scrcpy: { ...prev.scrcpy, max_size: Math.max(0, Number(event.target.value)) } }
+                                    : prev,
                                 )
                               }
                             />
@@ -7370,431 +7998,50 @@ function App() {
         </main>
       </div>
 
-      {actionForm.isOpen && actionForm.actionId && (
-        <div className="modal-backdrop" onClick={closeActionForm}>
-          <div className="modal modal-wide action-modal" onClick={(event) => event.stopPropagation()}>
+      {rebootConfirmOpen && (
+        <div className="modal-backdrop" onClick={closeRebootConfirm}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <div>
-                <h3>{actionTitleMap[actionForm.actionId]}</h3>
-                <p className="muted">Configure parameters before running.</p>
+                <h3>Confirm Reboot</h3>
+                <p className="muted">Review reboot mode before sending the command.</p>
               </div>
-              <button className="ghost" onClick={closeActionForm}>
+              <button className="ghost" onClick={closeRebootConfirm} disabled={busy}>
                 Close
               </button>
             </div>
             <p className="muted action-targets">Targets: {selectedSummaryLabel}</p>
-            {actionForm.errors.length > 0 && (
+
+            <div className="stack">
               <div className="inline-alert error">
-                {actionForm.errors.map((error) => (
-                  <span key={error}>{error}</span>
-                ))}
+                <strong>Danger zone</strong>
+                <span className="muted">Reboot will interrupt ongoing work and may disconnect ADB temporarily.</span>
               </div>
-            )}
-
-            {actionForm.actionId === "screenshot" && (
-              <div className="stack">
-                <label>
-                  Output folder
-                  <div className="inline-row">
-                    <input
-                      value={actionOutputDir}
-                      onChange={(event) => setActionOutputDir(event.target.value)}
-                      placeholder={config?.output_path || "Select output folder"}
-                    />
-                    <button
-                      className="ghost"
-                      onClick={async () => {
-                        const selected = await openDialog({
-                          title: "Select output folder",
-                          directory: true,
-                          multiple: false,
-                        });
-                        if (selected && !Array.isArray(selected)) {
-                          setActionOutputDir(selected);
-                        }
-                      }}
-                      disabled={busy}
-                    >
-                      Browse
-                    </button>
-                  </div>
-                </label>
-                {actionDraftConfig ? (
-                  <div className="grid-two">
-                    <label>
-                      Display ID
-                      <input
-                        type="number"
-                        value={actionDraftConfig.screenshot.display_id}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screenshot: {
-                              ...current.screenshot,
-                              display_id: Number(event.target.value),
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      Extra args
-                      <input
-                        value={actionDraftConfig.screenshot.extra_args}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screenshot: {
-                              ...current.screenshot,
-                              extra_args: event.target.value,
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                  </div>
-                ) : (
-                  <p className="muted">Loading screenshot settings...</p>
-                )}
-              </div>
-            )}
-
-            {actionForm.actionId === "reboot" && (
-              <div className="stack">
-                <label>
-                  Reboot mode
-                  <select value={actionRebootMode} onChange={(event) => setActionRebootMode(event.target.value)}>
-                    <option value="normal">Normal</option>
-                    <option value="recovery">Recovery</option>
-                    <option value="bootloader">Bootloader</option>
-                  </select>
-                </label>
-                <p className="muted">Reboot will run on all selected devices.</p>
-              </div>
-            )}
-
-            {actionForm.actionId === "record" && (
-              <div className="stack">
-                <p className="muted">
-                  {screenRecordRemote
-                    ? "A recording is running. Configure output and stop it."
-                    : "Configure recording parameters before starting."}
-                </p>
-                {screenRecordRemote && (
-                  <label>
-                    Output folder
-                    <div className="inline-row">
-                      <input
-                        value={actionOutputDir}
-                        onChange={(event) => setActionOutputDir(event.target.value)}
-                        placeholder={config?.output_path || "Select output folder"}
-                      />
-                      <button
-                        className="ghost"
-                        onClick={async () => {
-                          const selected = await openDialog({
-                            title: "Select output folder",
-                            directory: true,
-                            multiple: false,
-                          });
-                          if (selected && !Array.isArray(selected)) {
-                            setActionOutputDir(selected);
-                          }
-                        }}
-                        disabled={busy}
-                      >
-                        Browse
-                      </button>
-                    </div>
-                  </label>
-                )}
-                {actionDraftConfig ? (
-                  <div className="grid-two">
-                    <label>
-                      Bit rate
-                      <input
-                        value={actionDraftConfig.screen_record.bit_rate}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screen_record: {
-                              ...current.screen_record,
-                              bit_rate: event.target.value,
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      Time limit (sec)
-                      <input
-                        type="number"
-                        value={actionDraftConfig.screen_record.time_limit_sec}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screen_record: {
-                              ...current.screen_record,
-                              time_limit_sec: Number(event.target.value),
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      Size
-                      <input
-                        value={actionDraftConfig.screen_record.size}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screen_record: {
-                              ...current.screen_record,
-                              size: event.target.value,
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      Display ID
-                      <input
-                        type="number"
-                        value={actionDraftConfig.screen_record.display_id}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screen_record: {
-                              ...current.screen_record,
-                              display_id: Number(event.target.value),
-                            },
-                          }))
-                        }
-                      />
-                    </label>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={actionDraftConfig.screen_record.use_hevc}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screen_record: {
-                              ...current.screen_record,
-                              use_hevc: event.target.checked,
-                            },
-                          }))
-                        }
-                      />
-                      Use HEVC
-                    </label>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={actionDraftConfig.screen_record.bugreport}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screen_record: {
-                              ...current.screen_record,
-                              bugreport: event.target.checked,
-                            },
-                          }))
-                        }
-                      />
-                      Bugreport overlay
-                    </label>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={actionDraftConfig.screen_record.verbose}
-                        onChange={(event) =>
-                          updateDraftConfig((current) => ({
-                            ...current,
-                            screen_record: {
-                              ...current.screen_record,
-                              verbose: event.target.checked,
-                            },
-                          }))
-                        }
-                      />
-                      Verbose output
-                    </label>
-                  </div>
-                ) : (
-                  <p className="muted">Loading screen record settings...</p>
-                )}
-              </div>
-            )}
-
-            {actionForm.actionId === "logcat-clear" && (
-              <div className="stack">
-                <p className="muted">This clears the logcat buffer for the primary device.</p>
-              </div>
-            )}
-
-            {actionForm.actionId === "mirror" && (
-              <div className="stack mirror-stack">
-                {!scrcpyInfo?.available && (
-                  <div className="inline-alert error">
-                    scrcpy is not available. Install it to enable live mirror.
-                  </div>
-                )}
-                {(scrcpyVersionLabel || scrcpyAudioHint) && (
-                  <div className="mirror-meta">
-                    {scrcpyVersionLabel && <span className="badge badge-accent">{scrcpyVersionLabel}</span>}
-                    {scrcpyAudioHint && <span className="muted">{scrcpyAudioHint}</span>}
-                  </div>
-                )}
-                {actionDraftConfig ? (
-                  <div className="mirror-grid">
-                    <section className="mirror-section">
-                      <div className="mirror-section-header">
-                        <h4>Quality & Limits</h4>
-                        <p className="muted">Tune resolution and bitrate for stability.</p>
-                      </div>
-                      <div className="grid-two">
-                        <label>
-                          Bit rate
-                          <input
-                            value={actionDraftConfig.scrcpy.bitrate}
-                            onChange={(event) =>
-                              updateDraftConfig((current) => ({
-                                ...current,
-                                scrcpy: {
-                                  ...current.scrcpy,
-                                  bitrate: event.target.value,
-                                },
-                              }))
-                            }
-                          />
-                        </label>
-                        <label>
-                          Max size
-                          <input
-                            type="number"
-                            value={actionDraftConfig.scrcpy.max_size}
-                            onChange={(event) =>
-                              updateDraftConfig((current) => ({
-                                ...current,
-                                scrcpy: {
-                                  ...current.scrcpy,
-                                  max_size: Number(event.target.value),
-                                },
-                              }))
-                            }
-                          />
-                        </label>
-                        <label className="full-span">
-                          Extra args
-                          <input
-                            value={actionDraftConfig.scrcpy.extra_args}
-                            onChange={(event) =>
-                              updateDraftConfig((current) => ({
-                                ...current,
-                                scrcpy: {
-                                  ...current.scrcpy,
-                                  extra_args: event.target.value,
-                                },
-                              }))
-                            }
-                          />
-                        </label>
-                      </div>
-                    </section>
-                    <section className="mirror-section">
-                      <div className="mirror-section-header">
-                        <h4>Behavior</h4>
-                        <p className="muted">Device power and display controls.</p>
-                      </div>
-                      <div className="toggle-grid">
-                        <label className="toggle">
-                          <input
-                            type="checkbox"
-                            checked={actionDraftConfig.scrcpy.stay_awake}
-                            onChange={(event) =>
-                              updateDraftConfig((current) => ({
-                                ...current,
-                                scrcpy: {
-                                  ...current.scrcpy,
-                                  stay_awake: event.target.checked,
-                                },
-                              }))
-                            }
-                          />
-                          Stay awake
-                        </label>
-                        <label className="toggle">
-                          <input
-                            type="checkbox"
-                            checked={actionDraftConfig.scrcpy.turn_screen_off}
-                            onChange={(event) =>
-                              updateDraftConfig((current) => ({
-                                ...current,
-                                scrcpy: {
-                                  ...current.scrcpy,
-                                  turn_screen_off: event.target.checked,
-                                },
-                              }))
-                            }
-                          />
-                          Turn screen off
-                        </label>
-                        <label className="toggle">
-                          <input
-                            type="checkbox"
-                            checked={actionDraftConfig.scrcpy.disable_screensaver}
-                            onChange={(event) =>
-                              updateDraftConfig((current) => ({
-                                ...current,
-                                scrcpy: {
-                                  ...current.scrcpy,
-                                  disable_screensaver: event.target.checked,
-                                },
-                              }))
-                            }
-                          />
-                          Disable screensaver
-                        </label>
-                        <label className="toggle">
-                          <input
-                            type="checkbox"
-                            checked={actionDraftConfig.scrcpy.enable_audio_playback}
-                            onChange={(event) =>
-                              updateDraftConfig((current) => ({
-                                ...current,
-                                scrcpy: {
-                                  ...current.scrcpy,
-                                  enable_audio_playback: event.target.checked,
-                                },
-                              }))
-                            }
-                          />
-                          Enable audio
-                        </label>
-                      </div>
-                    </section>
-                  </div>
-                ) : (
-                  <p className="muted">Loading scrcpy settings...</p>
-                )}
-              </div>
-            )}
+              <label>
+                Reboot mode
+                <select
+                  value={rebootConfirmMode}
+                  onChange={(event) => setRebootConfirmMode(event.target.value as RebootMode)}
+                >
+                  <option value="normal">Normal</option>
+                  <option value="recovery">Recovery</option>
+                  <option value="bootloader">Bootloader</option>
+                </select>
+              </label>
+            </div>
 
             <div className="button-row">
-              <button
-                onClick={handleActionSubmit}
-                disabled={busy || (actionNeedsConfig && !actionDraftConfig) || actionSelectionInvalid}
-              >
-                Run Action
+              <button className="danger" onClick={handleConfirmReboot} disabled={busy || selectedSerials.length === 0}>
+                Reboot
               </button>
-              <button className="ghost" onClick={closeActionForm}>
+              <button className="ghost" onClick={closeRebootConfirm} disabled={busy}>
                 Cancel
               </button>
             </div>
           </div>
         </div>
       )}
+
 
       {pairingState.isOpen && (
         <div className="modal-backdrop" onClick={closePairingModal}>

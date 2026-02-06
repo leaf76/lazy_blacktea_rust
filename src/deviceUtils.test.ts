@@ -94,8 +94,15 @@ describe("deviceUtils", () => {
       summary: { serial: "alpha", state: "device", model: "Pixel" },
       detail: {
         serial: "alpha",
+        name: "panther",
+        brand: "google",
+        serial_number: "ABC123",
         android_version: "15",
         api_level: "35",
+        processor: "Tensor",
+        resolution: "1080x2400",
+        storage_total_bytes: 137_438_953_472,
+        memory_total_bytes: 8 * 1024 * 1024 * 1024,
         wifi_is_on: true,
         bt_is_on: false,
         gms_version: "24.02",
@@ -106,6 +113,13 @@ describe("deviceUtils", () => {
     const markdown = formatDeviceInfoMarkdown(device);
 
     expect(markdown).toContain("- **Serial:** alpha");
+    expect(markdown).toContain("- **Name:** panther");
+    expect(markdown).toContain("- **Brand:** google");
+    expect(markdown).toContain("- **Serial Number:** ABC123");
+    expect(markdown).toContain("- **Processor:** Tensor");
+    expect(markdown).toContain("- **Resolution:** 1080x2400");
+    expect(markdown).toContain("- **Storage:** 128 GB");
+    expect(markdown).toContain("- **Memory:** 8.00 GB");
     expect(markdown).toContain("- **WiFi:** On");
     expect(markdown).toContain("- **Bluetooth:** Off");
   });

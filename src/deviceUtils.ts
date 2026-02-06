@@ -1,4 +1,5 @@
 import type { DeviceDetail, DeviceInfo } from "./types";
+import { formatBytes } from "./perf";
 
 type DeviceDetailPatch = Partial<Omit<DeviceDetail, "serial">>;
 type DeviceValue = string | number | boolean | null | undefined;
@@ -32,9 +33,20 @@ export const formatDeviceInfoMarkdown = (device: DeviceInfo): string => {
   const lines = [
     `- **Serial:** ${formatDeviceValue(device.summary.serial)}`,
     `- **State:** ${formatDeviceValue(device.summary.state)}`,
+    `- **Name:** ${formatDeviceValue(detail?.name)}`,
+    `- **Brand:** ${formatDeviceValue(detail?.brand)}`,
     `- **Model:** ${formatDeviceValue(detail?.model ?? device.summary.model)}`,
+    `- **Serial Number:** ${formatDeviceValue(detail?.serial_number)}`,
     `- **Android:** ${formatDeviceValue(detail?.android_version)}`,
     `- **API:** ${formatDeviceValue(detail?.api_level)}`,
+    `- **Processor:** ${formatDeviceValue(detail?.processor)}`,
+    `- **Resolution:** ${formatDeviceValue(detail?.resolution)}`,
+    `- **Storage:** ${
+      detail?.storage_total_bytes != null ? formatBytes(detail.storage_total_bytes) : "Unknown"
+    }`,
+    `- **Memory:** ${
+      detail?.memory_total_bytes != null ? formatBytes(detail.memory_total_bytes) : "Unknown"
+    }`,
     `- **WiFi:** ${formatDeviceValue(detail?.wifi_is_on)}`,
     `- **Bluetooth:** ${formatDeviceValue(detail?.bt_is_on)}`,
     `- **GMS:** ${formatDeviceValue(detail?.gms_version)}`,

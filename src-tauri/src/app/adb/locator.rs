@@ -75,4 +75,3 @@ mod tests {
         assert!(err.to_lowercase().contains("not found"));
     }
 }
-

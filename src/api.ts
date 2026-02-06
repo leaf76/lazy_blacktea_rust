@@ -3,6 +3,7 @@ import type {
   AdbInfo,
   ApkBatchInstallResult,
   AppConfig,
+  AppBasicInfo,
   AppInfo,
   BugreportLogFilters,
   BugreportLogPage,
@@ -376,6 +377,26 @@ export const exportUiHierarchy = async (serial: string, outputDir?: string) => {
   });
 };
 
+export const startPerfMonitor = async (serial: string, intervalMs?: number) => {
+  const traceId = createTraceId();
+  return invoke<CommandResponse<boolean>>("start_perf_monitor", {
+    serial,
+    interval_ms: intervalMs,
+    intervalMs,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const stopPerfMonitor = async (serial: string) => {
+  const traceId = createTraceId();
+  return invoke<CommandResponse<boolean>>("stop_perf_monitor", {
+    serial,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
 export const startLogcat = async (serial: string, filter?: string) => {
   const traceId = createTraceId();
   return invoke<CommandResponse<boolean>>("start_logcat", {
@@ -432,6 +453,17 @@ export const listApps = async (
     thirdPartyOnly,
     include_versions: includeVersions,
     includeVersions,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const getAppBasicInfo = async (serial: string, packageName: string) => {
+  const traceId = createTraceId();
+  return invoke<CommandResponse<AppBasicInfo>>("get_app_basic_info", {
+    serial,
+    package_name: packageName,
+    packageName,
     trace_id: traceId,
     traceId,
   });

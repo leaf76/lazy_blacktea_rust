@@ -148,4 +148,3 @@ mod tests {
         assert_eq!(max_running.load(Ordering::SeqCst), 1);
     }
 }
-

@@ -55,8 +55,8 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
-            window_width: 1200,
-            window_height: 800,
+            window_width: 1280,
+            window_height: 760,
             window_x: 100,
             window_y: 100,
             ui_scale: 1.0,
@@ -177,7 +177,7 @@ impl Default for ScrcpySettings {
             turn_screen_off: true,
             disable_screensaver: true,
             enable_audio_playback: true,
-            bitrate: String::new(),
+            bitrate: "8M".to_string(),
             max_size: 0,
             extra_args: String::new(),
         }
@@ -235,8 +235,10 @@ pub struct ScreenRecordSettings {
 impl Default for ScreenRecordSettings {
     fn default() -> Self {
         Self {
-            bit_rate: String::new(),
-            time_limit_sec: 0,
+            // Use explicit defaults so Settings/Quick Actions don't look "unset".
+            // Values match typical Android `screenrecord` defaults (bits per second, max 180s).
+            bit_rate: "4000000".to_string(),
+            time_limit_sec: 180,
             size: String::new(),
             extra_args: String::new(),
             use_hevc: false,
@@ -508,7 +510,33 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     if config.file_gen_output_path.trim().is_empty() {
         config.file_gen_output_path = config.output_path.clone();
     }
+    if config.scrcpy.bitrate.trim().is_empty() {
+        config.scrcpy.bitrate = ScrcpySettings::default().bitrate;
+    }
+    if config.scrcpy.max_size < 0 {
+        config.scrcpy.max_size = 0;
+    }
+    if config.screenshot.display_id < -1 {
+        config.screenshot.display_id = -1;
+    }
+    if config.screen_record.display_id < -1 {
+        config.screen_record.display_id = -1;
+    }
+    if config.screen_record.bit_rate.trim().is_empty() {
+        config.screen_record.bit_rate = ScreenRecordSettings::default().bit_rate;
+    }
+    // Android screenrecord allows 1..=180; keep it within that range.
+    if config.screen_record.time_limit_sec < 1 {
+        config.screen_record.time_limit_sec = ScreenRecordSettings::default().time_limit_sec;
+    }
+    if config.screen_record.time_limit_sec > 180 {
+        config.screen_record.time_limit_sec = 180;
+    }
     config
+}
+
+pub fn normalize_config_for_save(config: AppConfig) -> AppConfig {
+    validate_config(config)
 }
 
 #[cfg(test)]
@@ -550,6 +578,25 @@ mod tests {
         assert_eq!(validated.device.refresh_interval, 5);
         assert_eq!(validated.logcat.max_lines, 1000);
         assert_eq!(validated.command.max_history_size, 50);
+    }
+
+    #[test]
+    fn fills_action_defaults_when_empty_or_invalid() {
+        let mut config = AppConfig::default();
+        config.scrcpy.bitrate = String::new();
+        config.scrcpy.max_size = -10;
+        config.screenshot.display_id = -99;
+        config.screen_record.display_id = -99;
+        config.screen_record.bit_rate = String::new();
+        config.screen_record.time_limit_sec = 0;
+
+        let validated = validate_config(config);
+        assert_eq!(validated.scrcpy.bitrate, "8M");
+        assert_eq!(validated.scrcpy.max_size, 0);
+        assert_eq!(validated.screenshot.display_id, -1);
+        assert_eq!(validated.screen_record.display_id, -1);
+        assert_eq!(validated.screen_record.bit_rate, "4000000");
+        assert_eq!(validated.screen_record.time_limit_sec, 180);
     }
 
     #[test]

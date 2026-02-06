@@ -1,9 +1,9 @@
-pub mod parse;
-pub mod runner;
-pub mod locator;
 pub mod apk;
 pub mod apps;
 pub mod bugreport;
-pub mod scrcpy;
+pub mod locator;
+pub mod parse;
 pub mod paths;
+pub mod runner;
+pub mod scrcpy;
 pub mod transfer;

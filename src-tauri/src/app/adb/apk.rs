@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use zip::ZipArchive;
 
-use crate::app::models::{ApkInfo};
+use crate::app::models::ApkInfo;
 
 pub struct SplitApkBundle {
     pub apk_paths: Vec<String>,
@@ -25,7 +25,9 @@ pub fn extract_split_apks(path: &str) -> Result<SplitApkBundle, String> {
     let mut extracted = Vec::new();
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|err| format!("Failed to read bundle: {err}"))?;
+        let mut file = archive
+            .by_index(i)
+            .map_err(|err| format!("Failed to read bundle: {err}"))?;
         let name = file.name().to_string();
         if !name.to_lowercase().ends_with(".apk") {
             continue;
@@ -35,8 +37,8 @@ pub fn extract_split_apks(path: &str) -> Result<SplitApkBundle, String> {
             .map(|n| n.to_string_lossy().to_string())
             .ok_or_else(|| "Invalid apk name".to_string())?;
         let target = temp_dir.path().join(file_name);
-        let mut output = File::create(&target)
-            .map_err(|err| format!("Failed to extract apk: {err}"))?;
+        let mut output =
+            File::create(&target).map_err(|err| format!("Failed to extract apk: {err}"))?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)
             .map_err(|err| format!("Failed to read apk: {err}"))?;
@@ -127,9 +129,11 @@ mod tests {
         let bundle_path = tmp.path().join("bundle.apks");
         let file = File::create(&bundle_path).expect("bundle");
         let mut zip = zip::ZipWriter::new(file);
-        zip.start_file("base.apk", FileOptions::<()>::default()).unwrap();
+        zip.start_file("base.apk", FileOptions::<()>::default())
+            .unwrap();
         zip.write_all(b"base").unwrap();
-        zip.start_file("config.apk", FileOptions::<()>::default()).unwrap();
+        zip.start_file("config.apk", FileOptions::<()>::default())
+            .unwrap();
         zip.write_all(b"config").unwrap();
         zip.finish().unwrap();
 

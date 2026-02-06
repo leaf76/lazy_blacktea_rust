@@ -44,7 +44,10 @@ pub fn run_command_with_timeout(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(err) => {
-                return Err(AppError::system(format!("Failed to poll command: {err}"), trace_id));
+                return Err(AppError::system(
+                    format!("Failed to poll command: {err}"),
+                    trace_id,
+                ));
             }
         }
     }

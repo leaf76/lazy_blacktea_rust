@@ -80,7 +80,10 @@ mod tests {
 
     #[test]
     fn device_parent_dir_handles_common_cases() {
-        assert_eq!(device_parent_dir("/sdcard/Download/file.txt"), "/sdcard/Download");
+        assert_eq!(
+            device_parent_dir("/sdcard/Download/file.txt"),
+            "/sdcard/Download"
+        );
         assert_eq!(device_parent_dir("/sdcard/Download/"), "/sdcard");
         assert_eq!(device_parent_dir("/file.txt"), "/");
         assert_eq!(device_parent_dir("/"), "/");
@@ -89,8 +92,14 @@ mod tests {
 
     #[test]
     fn sanitize_filename_component_replaces_invalid_chars() {
-        assert_eq!(sanitize_filename_component("emulator-5554"), "emulator-5554");
-        assert_eq!(sanitize_filename_component("192.168.0.1:5555"), "192.168.0.1_5555");
+        assert_eq!(
+            sanitize_filename_component("emulator-5554"),
+            "emulator-5554"
+        );
+        assert_eq!(
+            sanitize_filename_component("192.168.0.1:5555"),
+            "192.168.0.1_5555"
+        );
         assert_eq!(sanitize_filename_component("pixel 7 pro"), "pixel_7_pro");
     }
 
