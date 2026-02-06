@@ -17,7 +17,7 @@
     "@tauri-apps/plugin-opener": "^2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-router-dom": "^6.23.1"
+    "react-router-dom": "^6.30.3"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
@@ -26,6 +26,6 @@
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "vitest": "^2.1.9"
+    "vitest": "^4.0.18"
   }
 }
