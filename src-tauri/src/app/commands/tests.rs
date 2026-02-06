@@ -256,3 +256,79 @@ fn install_apk_batch_inner_returns_invalid_apk_result_without_running_adb() {
 
     std::env::remove_var("LAZY_BLACKTEA_CONFIG_PATH");
 }
+
+#[test]
+fn load_device_detail_bails_early_when_getprop_fails() {
+    let trace_id = "trace-load-device-detail-1";
+    let serial = "SERIAL-1";
+    let mut called_steps: Vec<&'static str> = Vec::new();
+
+    let run = |_args: &[String],
+               _timeout: Duration,
+               step: &'static str|
+     -> Result<crate::app::adb::runner::CommandOutput, AppError> {
+        called_steps.push(step);
+        if step == "getprop" {
+            return Err(AppError::system("Command timed out".to_string(), trace_id));
+        }
+        panic!("expected load_device_detail to bail after getprop failure");
+    };
+
+    let detail = load_device_detail(serial, trace_id, false, 0, run);
+    assert!(detail.is_none());
+    assert_eq!(called_steps, vec!["getprop"]);
+}
+
+#[test]
+fn load_device_detail_continues_when_non_getprop_steps_fail() {
+    let trace_id = "trace-load-device-detail-2";
+    let serial = "SERIAL-2";
+    let mut called_steps: Vec<&'static str> = Vec::new();
+
+    let run = |_args: &[String],
+               _timeout: Duration,
+               step: &'static str|
+     -> Result<crate::app::adb::runner::CommandOutput, AppError> {
+        called_steps.push(step);
+
+        let ok = |stdout: &str| crate::app::adb::runner::CommandOutput {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        };
+
+        match step {
+            "getprop" => Ok(ok("")),
+            "battery" => Ok(ok("level: 50\n")),
+            "wifi" => Ok(ok("1\n")),
+            "bluetooth" => Ok(ok("0\n")),
+            "bluetooth_manager_state" => Ok(ok("state: ON\n")),
+            "audio" => Ok(ok("mode: NORMAL\n")),
+            "gms" => Err(AppError::dependency("gms fails".to_string(), trace_id)),
+            "wm_size" => Ok(ok("Physical size: 1080x2400\n")),
+            "df" => Ok(ok(
+                "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/dm-0 1000 0 0 0% /data\n",
+            )),
+            "meminfo" => Ok(ok("MemTotal: 2048 kB\n")),
+            other => panic!("unexpected step {other}"),
+        }
+    };
+
+    let detail = load_device_detail(serial, trace_id, false, 0, run);
+    assert!(detail.is_some());
+    assert_eq!(
+        called_steps,
+        vec![
+            "getprop",
+            "battery",
+            "wifi",
+            "bluetooth",
+            "bluetooth_manager_state",
+            "audio",
+            "gms",
+            "wm_size",
+            "df",
+            "meminfo"
+        ]
+    );
+}

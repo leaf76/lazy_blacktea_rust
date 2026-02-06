@@ -28,6 +28,18 @@ export const resolveSelectedSerials = (previous: string[], devices: DeviceInfo[]
   return preferred ? [preferred.summary.serial] : [];
 };
 
+export const reduceSelectionToOne = (previous: string[], devices: DeviceInfo[]): string[] => {
+  if (!devices.length) {
+    return [];
+  }
+  const primary = previous[0];
+  if (primary && devices.some((device) => device.summary.serial === primary)) {
+    return [primary];
+  }
+  const preferred = devices.find((device) => device.summary.state === "device") ?? devices[0];
+  return preferred ? [preferred.summary.serial] : [];
+};
+
 export const formatDeviceInfoMarkdown = (device: DeviceInfo): string => {
   const detail = device.detail;
   const lines = [
@@ -105,4 +117,28 @@ export const applyDeviceDetailPatch = (
       },
     };
   });
+};
+
+export const filterDevicesBySearch = (devices: DeviceInfo[], searchText: string): DeviceInfo[] => {
+  const search = searchText.trim().toLowerCase();
+  if (!search) {
+    return devices;
+  }
+  return devices.filter((device) => {
+    const serial = device.summary.serial;
+    const model = device.detail?.model ?? device.summary.model ?? "";
+    return serial.toLowerCase().includes(search) || model.toLowerCase().includes(search);
+  });
+};
+
+export const selectSerialsForGroup = (
+  devices: DeviceInfo[],
+  groupMap: Record<string, string>,
+  group: string,
+): string[] => {
+  const serials = devices.map((device) => device.summary.serial);
+  if (group === "__all_devices__") {
+    return serials;
+  }
+  return serials.filter((serial) => groupMap[serial] === group);
 };

@@ -1091,6 +1091,23 @@ textarea {
   align-items: center;
 }
 
+.device-group-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.device-group-controls input {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
+.device-group-controls select,
+.device-group-controls button {
+  flex: 0 0 auto;
+}
+
 .form-row {
   display: flex;
   align-items: center;
@@ -1762,6 +1779,13 @@ textarea {
   font-size: 12px;
   background: var(--color-bg-panel);
   color: var(--color-text);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .output-block {

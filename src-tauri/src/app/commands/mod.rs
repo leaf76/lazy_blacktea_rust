@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -43,9 +43,9 @@ use crate::app::error::AppError;
 use crate::app::models::{
     AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo, AppInfo,
     BugreportLogFilters, BugreportLogPage, BugreportLogSummary, BugreportResult, CommandResponse,
-    CommandResult, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LogcatExportResult,
-    PerfSnapshot, ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
-    UiHierarchyExportResult,
+    CommandResult, DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult,
+    LogcatExportResult, PerfSnapshot, ScrcpyInfo, TerminalEvent, TerminalSessionInfo,
+    UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
 use crate::app::perf::parse::{
     build_perf_script, compute_cpu_percent_x100, parse_battery_totals, parse_cpu_freq_khz,
@@ -728,17 +728,349 @@ pub fn export_diagnostics_bundle(
     })
 }
 
+fn load_device_detail(
+    serial: &str,
+    trace_id: &str,
+    profile_devices: bool,
+    profile_slow_ms: u64,
+    mut run: impl FnMut(
+        &[String],
+        Duration,
+        &'static str,
+    ) -> Result<crate::app::adb::runner::CommandOutput, AppError>,
+) -> Option<DeviceDetail> {
+    let detail_started = Instant::now();
+    let serial_arg = serial.to_string();
+
+    let should_log = |elapsed_ms: u64| -> bool {
+        if !profile_devices {
+            return false;
+        }
+        profile_slow_ms == 0 || elapsed_ms >= profile_slow_ms
+    };
+
+    let mut run_timed = |step: &'static str,
+                         args: Vec<String>,
+                         timeout: Duration|
+     -> (
+        u64,
+        Result<crate::app::adb::runner::CommandOutput, AppError>,
+    ) {
+        let started = Instant::now();
+        let result = run(&args, timeout, step);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        if should_log(elapsed_ms) {
+            match &result {
+                Ok(output) => {
+                    info!(
+                        trace_id = %trace_id,
+                        serial = %serial,
+                        step,
+                        elapsed_ms,
+                        exit_code = ?output.exit_code,
+                        "adb device command timing"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        serial = %serial,
+                        step,
+                        elapsed_ms,
+                        error = %err,
+                        "adb device command failed (timing)"
+                    );
+                }
+            }
+        }
+
+        (elapsed_ms, result)
+    };
+
+    // getprop is required to build base detail. If it fails, bail early to avoid spending up to
+    // 5s * N subcommands per device.
+    let getprop_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "getprop".to_string(),
+    ];
+    let (getprop_elapsed_ms, getprop) = run_timed("getprop", getprop_args, Duration::from_secs(5));
+
+    let output = match getprop {
+        Ok(output) => output,
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                serial = %serial,
+                step = "getprop",
+                elapsed_ms = getprop_elapsed_ms,
+                error = %err,
+                "failed to load device detail"
+            );
+            let detail_elapsed_ms = detail_started.elapsed().as_millis() as u64;
+            if should_log(detail_elapsed_ms) {
+                info!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    step = "device_detail_total",
+                    elapsed_ms = detail_elapsed_ms,
+                    "device detail timing"
+                );
+            }
+            return None;
+        }
+    };
+
+    let mut detail = build_device_detail(serial, &parse_getprop_map(&output.stdout));
+
+    let battery_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "dumpsys".to_string(),
+        "battery".to_string(),
+    ];
+    let (_battery_elapsed_ms, battery) = run_timed("battery", battery_args, Duration::from_secs(5));
+    if let Ok(battery_output) = battery {
+        detail.battery_level = parse_battery_level(&battery_output.stdout);
+    }
+
+    let wifi_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "settings".to_string(),
+        "get".to_string(),
+        "global".to_string(),
+        "wifi_on".to_string(),
+    ];
+    let (_wifi_elapsed_ms, wifi_output) = run_timed("wifi", wifi_args, Duration::from_secs(5));
+    if let Ok(wifi_output) = wifi_output {
+        detail.wifi_is_on = parse_settings_bool(&wifi_output.stdout);
+    }
+
+    let bt_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "settings".to_string(),
+        "get".to_string(),
+        "global".to_string(),
+        "bluetooth_on".to_string(),
+    ];
+    let (_bt_elapsed_ms, bt_output) = run_timed("bluetooth", bt_args, Duration::from_secs(5));
+    if let Ok(bt_output) = bt_output {
+        detail.bt_is_on = parse_settings_bool(&bt_output.stdout);
+    }
+
+    let bt_state_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "cmd".to_string(),
+        "bluetooth_manager".to_string(),
+        "get-state".to_string(),
+    ];
+    let (_bt_state_elapsed_ms, bt_state_output) = run_timed(
+        "bluetooth_manager_state",
+        bt_state_args,
+        Duration::from_secs(5),
+    );
+    let bt_state = bt_state_output
+        .ok()
+        .and_then(|output| parse_bluetooth_manager_state(&output.stdout));
+    if detail.bt_is_on.is_none() {
+        if let Some(state) = bt_state.as_deref() {
+            detail.bt_is_on = Some(state.contains("ON"));
+        }
+    }
+    detail.bluetooth_manager_state = bt_state;
+
+    let audio_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "dumpsys".to_string(),
+        "audio".to_string(),
+    ];
+    let (_audio_elapsed_ms, audio_output) = run_timed("audio", audio_args, Duration::from_secs(5));
+    if let Ok(audio_output) = audio_output {
+        detail.audio_state = parse_audio_summary(&audio_output.stdout);
+    }
+
+    let gms_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "dumpsys".to_string(),
+        "package".to_string(),
+        "com.google.android.gms".to_string(),
+    ];
+    let (_gms_elapsed_ms, gms_output) = run_timed("gms", gms_args, Duration::from_secs(5));
+    if let Ok(gms_output) = gms_output {
+        detail.gms_version = parse_gms_version_name(&gms_output.stdout);
+    }
+
+    let wm_size_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "wm".to_string(),
+        "size".to_string(),
+    ];
+    let (wm_size_elapsed_ms, wm_size_output) =
+        run_timed("wm_size", wm_size_args, Duration::from_secs(5));
+    match wm_size_output {
+        Ok(out) => {
+            let parsed = parse_wm_size(&out.stdout);
+            if parsed.is_none() && !out.stdout.trim().is_empty() {
+                warn!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    step = "wm_size",
+                    elapsed_ms = wm_size_elapsed_ms,
+                    output = %out.stdout.trim(),
+                    "failed to parse wm size"
+                );
+            }
+            detail.resolution = parsed;
+        }
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                serial = %serial,
+                step = "wm_size",
+                elapsed_ms = wm_size_elapsed_ms,
+                error = %err,
+                "failed to load wm size"
+            );
+        }
+    }
+
+    let df_args = vec![
+        "-s".to_string(),
+        serial_arg.clone(),
+        "shell".to_string(),
+        "df".to_string(),
+        "-k".to_string(),
+        "/data".to_string(),
+    ];
+    let (df_elapsed_ms, df_output) = run_timed("df", df_args, Duration::from_secs(5));
+    match df_output {
+        Ok(out) => match parse_df_total_kb(&out.stdout) {
+            Ok(total_kb) => {
+                detail.storage_total_bytes = Some(total_kb.saturating_mul(1024));
+            }
+            Err(err) => {
+                warn!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    step = "df",
+                    elapsed_ms = df_elapsed_ms,
+                    error = %err,
+                    "failed to parse df output"
+                );
+            }
+        },
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                serial = %serial,
+                step = "df",
+                elapsed_ms = df_elapsed_ms,
+                error = %err,
+                "failed to load df output"
+            );
+        }
+    }
+
+    let meminfo_args = vec![
+        "-s".to_string(),
+        serial_arg,
+        "shell".to_string(),
+        "cat".to_string(),
+        "/proc/meminfo".to_string(),
+    ];
+    let (meminfo_elapsed_ms, meminfo_output) =
+        run_timed("meminfo", meminfo_args, Duration::from_secs(5));
+    match meminfo_output {
+        Ok(out) => match parse_mem_totals(&out.stdout) {
+            Ok(mem) => {
+                detail.memory_total_bytes = Some(mem.total_bytes);
+            }
+            Err(err) => {
+                warn!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    step = "meminfo",
+                    elapsed_ms = meminfo_elapsed_ms,
+                    error = %err,
+                    "failed to parse /proc/meminfo"
+                );
+            }
+        },
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                serial = %serial,
+                step = "meminfo",
+                elapsed_ms = meminfo_elapsed_ms,
+                error = %err,
+                "failed to load /proc/meminfo"
+            );
+        }
+    }
+
+    let detail_elapsed_ms = detail_started.elapsed().as_millis() as u64;
+    if should_log(detail_elapsed_ms) {
+        info!(
+            trace_id = %trace_id,
+            serial = %serial,
+            step = "device_detail_total",
+            elapsed_ms = detail_elapsed_ms,
+            "device detail timing"
+        );
+    }
+
+    Some(detail)
+}
+
 #[tauri::command(async)]
 pub fn list_devices(
     detailed: Option<bool>,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<Vec<DeviceInfo>>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     info!(trace_id = %trace_id, "list_devices");
 
+    // When troubleshooting device refresh performance, enable:
+    //   LAZY_BLACKTEA_PROFILE_DEVICES=1
+    // Optionally adjust the slow threshold:
+    //   LAZY_BLACKTEA_PROFILE_DEVICES_SLOW_MS=500
+    let profile_devices = std::env::var_os("LAZY_BLACKTEA_PROFILE_DEVICES").is_some();
+    let profile_slow_ms = std::env::var("LAZY_BLACKTEA_PROFILE_DEVICES_SLOW_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(500);
+    let list_started = Instant::now();
+
     let adb_program = get_adb_program(&trace_id)?;
     let args = vec!["devices".to_string(), "-l".to_string()];
+    let devices_cmd_started = Instant::now();
     let output = run_adb(&adb_program, &args, &trace_id)?;
+    let devices_cmd_elapsed_ms = devices_cmd_started.elapsed().as_millis() as u64;
+    if profile_devices && (profile_slow_ms == 0 || devices_cmd_elapsed_ms >= profile_slow_ms) {
+        info!(
+            trace_id = %trace_id,
+            step = "devices",
+            elapsed_ms = devices_cmd_elapsed_ms,
+            exit_code = ?output.exit_code,
+            "adb host command timing"
+        );
+    }
     if output.exit_code.unwrap_or_default() != 0 {
         return Err(AppError::dependency(
             format!("adb devices failed: {}", output.stderr),
@@ -746,221 +1078,89 @@ pub fn list_devices(
         ));
     }
     let summaries = parse_adb_devices(&output.stdout);
+    let need_detail = detailed.unwrap_or(true);
     let mut devices = Vec::with_capacity(summaries.len());
 
-    let need_detail = detailed.unwrap_or(true);
-    for summary in summaries {
-        let detail = if need_detail && summary.state == "device" {
-            let getprop_args = vec![
-                "-s".to_string(),
-                summary.serial.clone(),
-                "shell".to_string(),
-                "getprop".to_string(),
-            ];
-            let getprop = run_command_with_timeout(
-                &adb_program,
-                &getprop_args,
-                Duration::from_secs(5),
-                &trace_id,
-            );
-            let battery_args = vec![
-                "-s".to_string(),
-                summary.serial.clone(),
-                "shell".to_string(),
-                "dumpsys".to_string(),
-                "battery".to_string(),
-            ];
-            let battery = run_command_with_timeout(
-                &adb_program,
-                &battery_args,
-                Duration::from_secs(5),
-                &trace_id,
-            );
-            let wifi_args = vec![
-                "-s".to_string(),
-                summary.serial.clone(),
-                "shell".to_string(),
-                "settings".to_string(),
-                "get".to_string(),
-                "global".to_string(),
-                "wifi_on".to_string(),
-            ];
-            let wifi_output = run_command_with_timeout(
-                &adb_program,
-                &wifi_args,
-                Duration::from_secs(5),
-                &trace_id,
-            );
-            let bt_args = vec![
-                "-s".to_string(),
-                summary.serial.clone(),
-                "shell".to_string(),
-                "settings".to_string(),
-                "get".to_string(),
-                "global".to_string(),
-                "bluetooth_on".to_string(),
-            ];
-            let bt_output =
-                run_command_with_timeout(&adb_program, &bt_args, Duration::from_secs(5), &trace_id);
-            let bt_state_args = vec![
-                "-s".to_string(),
-                summary.serial.clone(),
-                "shell".to_string(),
-                "cmd".to_string(),
-                "bluetooth_manager".to_string(),
-                "get-state".to_string(),
-            ];
-            let bt_state_output = run_command_with_timeout(
-                &adb_program,
-                &bt_state_args,
-                Duration::from_secs(5),
-                &trace_id,
-            );
-            let audio_args = vec![
-                "-s".to_string(),
-                summary.serial.clone(),
-                "shell".to_string(),
-                "dumpsys".to_string(),
-                "audio".to_string(),
-            ];
-            let audio_output = run_command_with_timeout(
-                &adb_program,
-                &audio_args,
-                Duration::from_secs(5),
-                &trace_id,
-            );
-            let gms_args = vec![
-                "-s".to_string(),
-                summary.serial.clone(),
-                "shell".to_string(),
-                "dumpsys".to_string(),
-                "package".to_string(),
-                "com.google.android.gms".to_string(),
-            ];
-            let gms_output = run_command_with_timeout(
-                &adb_program,
-                &gms_args,
-                Duration::from_secs(5),
-                &trace_id,
-            );
+    if need_detail && summaries.iter().any(|summary| summary.state == "device") {
+        let scheduler = Arc::clone(&state.scheduler);
+        let detail_slots: Arc<Vec<OnceLock<Option<DeviceDetail>>>> = Arc::new(
+            (0..summaries.len())
+                .map(|_| OnceLock::new())
+                .collect::<Vec<_>>(),
+        );
 
-            match getprop {
-                Ok(output) => {
-                    let mut detail =
-                        build_device_detail(&summary.serial, &parse_getprop_map(&output.stdout));
-                    if let Ok(battery_output) = battery {
-                        detail.battery_level = parse_battery_level(&battery_output.stdout);
-                    }
-                    if let Ok(wifi_output) = wifi_output {
-                        detail.wifi_is_on = parse_settings_bool(&wifi_output.stdout);
-                    }
-                    if let Ok(bt_output) = bt_output {
-                        detail.bt_is_on = parse_settings_bool(&bt_output.stdout);
-                    }
-                    let bt_state = bt_state_output
-                        .ok()
-                        .and_then(|output| parse_bluetooth_manager_state(&output.stdout));
-                    if detail.bt_is_on.is_none() {
-                        if let Some(state) = bt_state.as_deref() {
-                            detail.bt_is_on = Some(state.contains("ON"));
-                        }
-                    }
-                    detail.bluetooth_manager_state = bt_state;
-                    if let Ok(audio_output) = audio_output {
-                        detail.audio_state = parse_audio_summary(&audio_output.stdout);
-                    }
-                    if let Ok(gms_output) = gms_output {
-                        detail.gms_version = parse_gms_version_name(&gms_output.stdout);
-                    }
-
-                    let wm_size_args = vec![
-                        "-s".to_string(),
-                        summary.serial.clone(),
-                        "shell".to_string(),
-                        "wm".to_string(),
-                        "size".to_string(),
-                    ];
-                    match run_command_with_timeout(
-                        &adb_program,
-                        &wm_size_args,
-                        Duration::from_secs(5),
-                        &trace_id,
-                    ) {
-                        Ok(out) => {
-                            let parsed = parse_wm_size(&out.stdout);
-                            if parsed.is_none() && !out.stdout.trim().is_empty() {
-                                warn!(trace_id = %trace_id, output = %out.stdout.trim(), "failed to parse wm size");
-                            }
-                            detail.resolution = parsed;
-                        }
-                        Err(err) => {
-                            warn!(trace_id = %trace_id, error = %err, "failed to load wm size");
-                        }
-                    }
-
-                    let df_args = vec![
-                        "-s".to_string(),
-                        summary.serial.clone(),
-                        "shell".to_string(),
-                        "df".to_string(),
-                        "-k".to_string(),
-                        "/data".to_string(),
-                    ];
-                    match run_command_with_timeout(
-                        &adb_program,
-                        &df_args,
-                        Duration::from_secs(5),
-                        &trace_id,
-                    ) {
-                        Ok(out) => match parse_df_total_kb(&out.stdout) {
-                            Ok(total_kb) => {
-                                detail.storage_total_bytes = Some(total_kb.saturating_mul(1024));
-                            }
-                            Err(err) => {
-                                warn!(trace_id = %trace_id, error = %err, "failed to parse df output");
-                            }
-                        },
-                        Err(err) => {
-                            warn!(trace_id = %trace_id, error = %err, "failed to load df output");
-                        }
-                    }
-
-                    let meminfo_args = vec![
-                        "-s".to_string(),
-                        summary.serial.clone(),
-                        "shell".to_string(),
-                        "cat".to_string(),
-                        "/proc/meminfo".to_string(),
-                    ];
-                    match run_command_with_timeout(
-                        &adb_program,
-                        &meminfo_args,
-                        Duration::from_secs(5),
-                        &trace_id,
-                    ) {
-                        Ok(out) => match parse_mem_totals(&out.stdout) {
-                            Ok(mem) => {
-                                detail.memory_total_bytes = Some(mem.total_bytes);
-                            }
-                            Err(err) => {
-                                warn!(trace_id = %trace_id, error = %err, "failed to parse /proc/meminfo");
-                            }
-                        },
-                        Err(err) => {
-                            warn!(trace_id = %trace_id, error = %err, "failed to load /proc/meminfo");
-                        }
-                    }
-                    Some(detail)
-                }
-                Err(err) => {
-                    warn!(trace_id = %trace_id, error = %err, "failed to load device detail");
-                    None
-                }
+        let mut handles = Vec::new();
+        for (index, summary) in summaries.iter().enumerate() {
+            if summary.state != "device" {
+                continue;
             }
-        } else {
-            None
-        };
-        devices.push(DeviceInfo { summary, detail });
+
+            let serial = summary.serial.clone();
+            let adb_program_spawn = adb_program.clone();
+            let trace_spawn = trace_id.clone();
+            let scheduler_spawn = Arc::clone(&scheduler);
+            let detail_slots = Arc::clone(&detail_slots);
+
+            handles.push(std::thread::spawn(move || {
+                let run_scheduled = |args: &[String],
+                                     timeout: Duration,
+                                     _step: &'static str|
+                 -> Result<
+                    crate::app::adb::runner::CommandOutput,
+                    AppError,
+                > {
+                    let _permit = scheduler_spawn.acquire_global();
+                    let device_lock = scheduler_spawn.device_lock(&serial);
+                    let _device_guard = device_lock
+                        .lock()
+                        .map_err(|_| AppError::system("Device lock poisoned", &trace_spawn))?;
+                    run_command_with_timeout(&adb_program_spawn, args, timeout, &trace_spawn)
+                };
+
+                let detail = load_device_detail(
+                    &serial,
+                    &trace_spawn,
+                    profile_devices,
+                    profile_slow_ms,
+                    run_scheduled,
+                );
+
+                let _ = detail_slots[index].set(detail);
+            }));
+        }
+
+        for handle in handles {
+            if handle.join().is_err() {
+                warn!(
+                    trace_id = %trace_id,
+                    "device detail thread panicked"
+                );
+            }
+        }
+
+        for (index, summary) in summaries.into_iter().enumerate() {
+            let detail = detail_slots[index].get().cloned().unwrap_or(None);
+            devices.push(DeviceInfo { summary, detail });
+        }
+    } else {
+        for summary in summaries {
+            devices.push(DeviceInfo {
+                summary,
+                detail: None,
+            });
+        }
+    }
+
+    let list_elapsed_ms = list_started.elapsed().as_millis() as u64;
+    if profile_devices && (profile_slow_ms == 0 || list_elapsed_ms >= profile_slow_ms) {
+        info!(
+            trace_id = %trace_id,
+            step = "list_devices_total",
+            elapsed_ms = list_elapsed_ms,
+            detailed = need_detail,
+            device_count = devices.len(),
+            "list_devices timing"
+        );
     }
 
     Ok(CommandResponse {

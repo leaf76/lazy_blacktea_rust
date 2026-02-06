@@ -122,9 +122,12 @@ import {
 } from "./tasks";
 import {
   applyDeviceDetailPatch,
+  filterDevicesBySearch,
   formatDeviceInfoMarkdown,
   mergeDeviceDetails,
+  reduceSelectionToOne,
   resolveSelectedSerials,
+  selectSerialsForGroup,
 } from "./deviceUtils";
 import { getAutoRefreshIntervalMs } from "./deviceAutoRefresh";
 import {
@@ -2390,26 +2393,36 @@ function App() {
     [groupMap],
   );
 
+  useEffect(() => {
+    if (groupFilter !== "all" && !groupOptions.includes(groupFilter)) {
+      setGroupFilter("all");
+    }
+  }, [groupFilter, groupOptions]);
+
   const visibleDevices = useMemo(() => {
-    const search = searchText.trim().toLowerCase();
-    return devices.filter((device) => {
-      const serial = device.summary.serial;
-      const model = device.detail?.model ?? device.summary.model ?? "";
-      const matchesSearch = !search || serial.toLowerCase().includes(search) || model.toLowerCase().includes(search);
-      if (!matchesSearch) {
-        return false;
-      }
-      if (groupFilter === "all") {
-        return true;
-      }
-      return groupMap[serial] === groupFilter;
-    });
+    const bySearch = filterDevicesBySearch(devices, searchText);
+    if (groupFilter === "all") {
+      return bySearch;
+    }
+    return bySearch.filter((device) => groupMap[device.summary.serial] === groupFilter);
   }, [devices, groupFilter, groupMap, searchText]);
 
+  const applyGroupSelectionPreset = (group: string) => {
+    const next = selectSerialsForGroup(devices, groupMap, group);
+    setSelectedSerials(deviceSelectionMode === "single" ? (next.length ? [next[0]] : []) : next);
+    lastSelectedIndexRef.current = null;
+  };
+
   const toggleDevice = (serial: string) => {
-    setSelectedSerials((prev) =>
-      prev.includes(serial) ? prev.filter((item) => item !== serial) : [...prev, serial],
-    );
+    setSelectedSerials((prev) => {
+      if (!prev.includes(serial)) {
+        return [...prev, serial];
+      }
+      if (prev.length === 1) {
+        return prev;
+      }
+      return prev.filter((item) => item !== serial);
+    });
   };
 
   const toggleDeviceInContextPopover = (serial: string) => {
@@ -2417,7 +2430,7 @@ function App() {
       toggleDevice(serial);
       return;
     }
-    setSelectedSerials((prev) => (prev.includes(serial) ? [] : [serial]));
+    setSelectedSerials((prev) => (prev.length === 1 && prev[0] === serial ? prev : [serial]));
   };
 
   const handleDeviceRowSelect = (
@@ -2429,37 +2442,69 @@ function App() {
     const isMeta = event.metaKey || event.ctrlKey;
     const isShift = event.shiftKey;
 
-    if (isShift && lastSelectedIndexRef.current != null) {
-      const start = Math.min(lastSelectedIndexRef.current, index);
-      const end = Math.max(lastSelectedIndexRef.current, index);
-      const rangeSerials = visibleDevices.slice(start, end + 1).map((device) => device.summary.serial);
-      setSelectedSerials((prev) => Array.from(new Set([...prev, ...rangeSerials])));
-    } else if (isMeta) {
-      toggleDevice(serial);
+    if (deviceSelectionMode === "multi") {
+      if (isShift && lastSelectedIndexRef.current != null) {
+        const start = Math.min(lastSelectedIndexRef.current, index);
+        const end = Math.max(lastSelectedIndexRef.current, index);
+        const rangeSerials = visibleDevices.slice(start, end + 1).map((device) => device.summary.serial);
+        setSelectedSerials((prev) => Array.from(new Set([...prev, ...rangeSerials])));
+      } else if (isMeta) {
+        toggleDevice(serial);
+        lastSelectedIndexRef.current = index;
+        return;
+      } else {
+        // Default click toggles selection; when selecting, also move it to the front to make it primary.
+        setSelectedSerials((prev) => {
+          if (prev.includes(serial)) {
+            if (prev.length === 1) {
+              return prev;
+            }
+            return prev.filter((item) => item !== serial);
+          }
+          const rest = prev.filter((item) => item !== serial);
+          return [serial, ...rest];
+        });
+      }
+
       lastSelectedIndexRef.current = index;
       return;
-    } else {
-      setSelectedSerials((prev) => {
-        if (prev.length === 1 && prev[0] === serial) {
-          return prev;
-        }
-        return [serial];
-      });
     }
+
+    if (isMeta) {
+      setSelectedSerials((prev) => (prev.length === 1 && prev[0] === serial ? prev : [serial]));
+      lastSelectedIndexRef.current = index;
+      return;
+    }
+
+    setSelectedSerials((prev) => {
+      if (prev.length === 1 && prev[0] === serial) {
+        return prev;
+      }
+      return [serial];
+    });
 
     lastSelectedIndexRef.current = index;
   };
 
   const selectAllVisible = () => {
+    if (deviceSelectionMode === "single") {
+      setSelectedSerials(visibleDevices.length ? [visibleDevices[0].summary.serial] : []);
+      return;
+    }
     setSelectedSerials(visibleDevices.map((device) => device.summary.serial));
   };
 
   const selectAllDevices = () => {
+    if (deviceSelectionMode === "single") {
+      setSelectedSerials(devices.length ? [devices[0].summary.serial] : []);
+      return;
+    }
     setSelectedSerials(devices.map((device) => device.summary.serial));
   };
 
   const clearSelection = () => {
-    setSelectedSerials([]);
+    setSelectedSerials((prev) => reduceSelectionToOne(prev, devices));
+    lastSelectedIndexRef.current = null;
   };
 
   const handleAssignGroup = () => {
@@ -5378,27 +5423,34 @@ function App() {
     const canStart = !busy && selectedSerials.length === 1 && deviceStatus === "device" && !state.running;
     const canStop = !busy && selectedSerials.length === 1 && state.running;
 
-    return (
-      <div className="page-section">
-        <div className="page-header">
-          <div>
-            <h1>Performance</h1>
-            <p className="muted">Real-time device performance snapshots.</p>
-          </div>
-          <div className="page-actions">
-            <span className={`status-pill ${state.running ? "busy" : "idle"}`}>
-              {state.running ? "Running" : "Stopped"}
-            </span>
-            <span className="badge">Interval 1s</span>
-          </div>
-        </div>
+	    return (
+	      <div className="page-section">
+	        <div className="page-header">
+	          <div>
+	            <h1>Performance</h1>
+	            <p className="muted">Real-time device performance snapshots.</p>
+	          </div>
+	          <div className="page-actions">
+	            <span className={`status-pill ${state.running ? "busy" : "idle"}`}>
+	              {state.running ? "Running" : "Stopped"}
+	            </span>
+	            <span className="badge">Interval 1s</span>
+	          </div>
+	        </div>
 
-        {state.traceId && (
-          <div className="inline-alert info">
-            <strong>Trace</strong>
-            <span className="muted">{state.traceId}</span>
-          </div>
-        )}
+	        {singleSelectionWarning && (
+	          <div className="inline-alert info">
+	            <strong>Single device required</strong>
+	            <span>Keep only one device selected (Device Context: Single) to start or stop monitoring.</span>
+	          </div>
+	        )}
+
+	        {state.traceId && (
+	          <div className="inline-alert info">
+	            <strong>Trace</strong>
+	            <span className="muted">{state.traceId}</span>
+	          </div>
+	        )}
 
         {state.lastError && (
           <div className="inline-alert error">
@@ -5620,13 +5672,14 @@ function App() {
 	                          Select all
 	                        </button>
 	                      )}
-	                      <button
-	                        className="ghost"
-	                        onClick={clearSelection}
-	                        disabled={busy || selectedCount === 0}
-	                      >
-	                        Clear
-	                      </button>
+		                      <button
+		                        className="ghost"
+		                        onClick={clearSelection}
+		                        disabled={busy || devices.length === 0}
+		                        title={devices.length === 0 ? "No devices detected." : "Keep one device selected."}
+		                      >
+		                        Keep one
+		                      </button>
 	                    </div>
 	                  </div>
 
@@ -5863,27 +5916,54 @@ function App() {
                     </div>
                     <div className="device-filter-bar">
                       <div className="device-filter-main">
-                        <input
-                          value={searchText}
-                          onChange={(event) => setSearchText(event.target.value)}
-                          placeholder="Search by serial or model"
-                        />
-                        <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}>
-                          <option value="all">All groups</option>
-                          {groupOptions.map((group) => (
-                            <option key={group} value={group}>
-                              {group}
+	                        <input
+	                          value={searchText}
+	                          onChange={(event) => setSearchText(event.target.value)}
+	                          placeholder="Search by serial or model"
+	                        />
+	                        <select
+	                          value={groupFilter}
+	                          onChange={(event) => setGroupFilter(event.target.value)}
+	                        >
+	                          <option value="all">All groups</option>
+	                          {groupOptions.map((group) => (
+	                            <option key={group} value={group}>
+	                              {group}
                             </option>
                           ))}
                         </select>
                       </div>
-                      <div className="device-filter-actions">
-                        <button onClick={selectAllVisible} disabled={busy}>
-                          Select Visible
-                        </button>
-                        <button onClick={clearSelection} disabled={busy}>
-                          Clear Selection
-                        </button>
+	                      <div className="device-filter-actions">
+	                        <div className="toggle-group" role="group" aria-label="Selection mode">
+	                          <button
+	                            type="button"
+	                            className={`toggle${deviceSelectionMode === "single" ? " active" : ""}`}
+	                            onClick={() => handleSetDeviceSelectionMode("single")}
+	                            disabled={busy}
+	                            title="Single device selection"
+	                          >
+	                            Single
+	                          </button>
+	                          <button
+	                            type="button"
+	                            className={`toggle${deviceSelectionMode === "multi" ? " active" : ""}`}
+	                            onClick={() => handleSetDeviceSelectionMode("multi")}
+	                            disabled={busy}
+	                            title="Multi-device selection"
+	                          >
+	                            Multi
+	                          </button>
+	                        </div>
+	                        <button onClick={selectAllVisible} disabled={busy}>
+	                          Select Visible
+	                        </button>
+	                        <button
+	                          onClick={clearSelection}
+	                          disabled={busy || devices.length === 0}
+	                          title={devices.length === 0 ? "No devices detected." : "Keep one device selected."}
+	                        >
+	                          Keep One
+	                        </button>
                         <span className="muted">{selectedCount} selected</span>
                       </div>
                     </div>
@@ -5914,19 +5994,26 @@ function App() {
                           <div
                             key={serial}
                             className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
-                            onClick={(event) => handleDeviceRowSelect(event, serial, index)}
-                          >
-                            <label className="device-check">
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleDeviceRowSelect(event, serial, index);
-                                }}
-                                onChange={() => {}}
-                              />
-                            </label>
+	                            onClick={(event) => handleDeviceRowSelect(event, serial, index)}
+	                          >
+	                            <label className="device-check" onClick={(event) => event.stopPropagation()}>
+	                              <input
+	                                type="checkbox"
+	                                checked={isSelected}
+	                                onClick={(event) => {
+	                                  event.stopPropagation();
+		                                  if (deviceSelectionMode === "multi") {
+		                                    toggleDevice(serial);
+		                                  } else {
+		                                    setSelectedSerials((prev) =>
+		                                      prev.length === 1 && prev[0] === serial ? prev : [serial],
+		                                    );
+		                                  }
+		                                  lastSelectedIndexRef.current = index;
+		                                }}
+		                                onChange={() => {}}
+		                              />
+	                            </label>
                             <div className="device-cell device-info">
                               <div className="device-info-main">
                                 <strong>{detail?.model ?? device.summary.model ?? serial}</strong>
@@ -5967,20 +6054,69 @@ function App() {
                         );
                       })}
                     </div>
-                    <div className="device-command-bar">
-                      <div className="device-command-group">
-                        <label>Group</label>
-                        <div className="inline-row">
-                          <input
-                            value={groupName}
-                            onChange={(event) => setGroupName(event.target.value)}
-                            placeholder="Group name"
-                          />
-                          <button onClick={handleAssignGroup} disabled={busy || selectedCount === 0}>
-                            Assign
-                          </button>
-                        </div>
-                        <span className="muted">{selectedCount} selected</span>
+	                    <div className="device-command-bar">
+	                      <div className="device-command-group">
+	                        <label>Group</label>
+	                        <div className="device-group-controls">
+	                          <select
+	                            defaultValue=""
+	                            onChange={(event) => {
+	                              const preset = event.target.value;
+	                              if (!preset) {
+	                                return;
+	                              }
+	                              applyGroupSelectionPreset(preset);
+	                              event.currentTarget.value = "";
+	                            }}
+	                            disabled={busy || devices.length === 0}
+	                            aria-label="Select devices by group"
+	                            title="Select devices by group"
+	                          >
+	                            <option value="">Select devices...</option>
+	                            <option value="__all_devices__">All devices</option>
+	                            {groupOptions.map((group) => (
+	                              <option key={group} value={group}>
+	                                {group}
+	                              </option>
+	                            ))}
+	                          </select>
+	                          <input
+	                            value={groupName}
+	                            onChange={(event) => setGroupName(event.target.value)}
+	                            placeholder="Group name"
+	                          />
+		                          <select
+		                            defaultValue=""
+		                            onChange={(event) => {
+		                              const picked = event.target.value;
+		                              if (!picked) {
+		                                return;
+		                              }
+		                              setGroupName(picked);
+		                              event.currentTarget.value = "";
+		                            }}
+		                            disabled={busy || groupOptions.length === 0}
+		                            aria-label="Use existing group name"
+		                            title={
+		                              groupOptions.length === 0
+		                                ? "No groups yet. Assign a group to a device first."
+		                                : "Use existing group name"
+		                            }
+		                          >
+		                            <option value="">
+		                              {groupOptions.length === 0 ? "No groups yet" : "Use existing..."}
+		                            </option>
+		                            {groupOptions.map((group) => (
+		                              <option key={group} value={group}>
+		                                {group}
+		                              </option>
+		                            ))}
+	                          </select>
+	                          <button onClick={handleAssignGroup} disabled={busy || selectedCount === 0}>
+	                            Assign
+	                          </button>
+	                        </div>
+	                        <span className="muted">{selectedCount} selected</span>
                       </div>
                       <div className="button-row compact">
                         <button onClick={() => handleReboot()} disabled={busy || selectedCount === 0}>
@@ -6459,16 +6595,22 @@ function App() {
                       <p className="muted">Browse device storage, download files, and upload files.</p>
                     </div>
                   </div>
-                  <section className="panel">
-                    <div className="panel-header">
-                      <h2>Device Files</h2>
-                      <span>{selectedSummaryLabel}</span>
-                    </div>
-                    <div className="form-row">
-                      <label>Device path</label>
-                      <input
-                        value={filesPath}
-                        onChange={(event) => setFilesPath(event.target.value)}
+	                  <section className="panel">
+	                    <div className="panel-header">
+	                      <h2>Device Files</h2>
+	                      <span>{selectedSummaryLabel}</span>
+	                    </div>
+	                    {singleSelectionWarning && (
+	                      <div className="inline-alert info">
+	                        <strong>Single device required</strong>
+	                        <span>Keep only one device selected (Device Context: Single) to use this page.</span>
+	                      </div>
+	                    )}
+	                    <div className="form-row">
+	                      <label>Device path</label>
+	                      <input
+	                        value={filesPath}
+	                        onChange={(event) => setFilesPath(event.target.value)}
                         placeholder="/sdcard"
                       />
                       <button className="ghost" onClick={handleFilesGoUp} disabled={busy || selectedSerials.length !== 1}>
@@ -6647,17 +6789,23 @@ function App() {
                       <p className="muted">Filters, presets, and search for streaming logs.</p>
                     </div>
                   </div>
-                  <section className="panel">
-                    <div className="panel-header">
-                      <div>
-                        <h2>Logcat Stream</h2>
-                        <span>{selectedSummaryLabel}</span>
-                      </div>
-                    </div>
-                    <div className="logcat-toolbar">
-                      <div className="logcat-toolbar-row">
-                        <div className="logcat-toolbar-cluster">
-                          <div className="logcat-button-group">
+	                  <section className="panel">
+	                    <div className="panel-header">
+	                      <div>
+	                        <h2>Logcat Stream</h2>
+	                        <span>{selectedSummaryLabel}</span>
+	                      </div>
+	                    </div>
+	                    {singleSelectionWarning && (
+	                      <div className="inline-alert info">
+	                        <strong>Single device required</strong>
+	                        <span>Keep only one device selected (Device Context: Single) to start streaming logs.</span>
+	                      </div>
+	                    )}
+	                    <div className="logcat-toolbar">
+	                      <div className="logcat-toolbar-row">
+	                        <div className="logcat-toolbar-cluster">
+	                          <div className="logcat-button-group">
                             <button onClick={handleLogcatStart} disabled={busy || selectedSerials.length !== 1}>
                               Start
                             </button>
@@ -6968,33 +7116,39 @@ function App() {
                       <p className="muted">Capture hierarchy, inspect XML, and export assets.</p>
                     </div>
                   </div>
-                  <section className="panel">
-                    <div className="panel-header">
-                      <div>
-                        <h2>Inspector Workspace</h2>
-                        <span>{selectedSummaryLabel}</span>
-                      </div>
-                      <div className="button-row compact">
-                        <button onClick={handleUiInspect} disabled={busy || selectedSerials.length !== 1}>
-                          Refresh
-                        </button>
-                        <button className="ghost" onClick={handleUiExport} disabled={busy || selectedSerials.length !== 1}>
-                          Export
-                        </button>
-                        <button
-                          className="ghost"
-                          onClick={handleScrcpyLaunch}
-                          disabled={busy || !scrcpyInfo?.available || selectedSerials.length !== 1}
-                        >
-                          Live Mirror
-                        </button>
-                      </div>
-                    </div>
-                    {!scrcpyInfo?.available && (
-                      <p className="muted">Live mirror requires scrcpy. Install it and try again.</p>
-                    )}
-                    {uiExportResult && (
-                      <div className="inline-alert info">
+	                  <section className="panel">
+	                    <div className="panel-header">
+	                      <div>
+	                        <h2>Inspector Workspace</h2>
+	                        <span>{selectedSummaryLabel}</span>
+	                      </div>
+	                      <div className="button-row compact">
+	                        <button onClick={handleUiInspect} disabled={busy || selectedSerials.length !== 1}>
+	                          Refresh
+	                        </button>
+	                        <button className="ghost" onClick={handleUiExport} disabled={busy || selectedSerials.length !== 1}>
+	                          Export
+	                        </button>
+	                        <button
+	                          className="ghost"
+	                          onClick={handleScrcpyLaunch}
+	                          disabled={busy || !scrcpyInfo?.available || selectedSerials.length !== 1}
+	                        >
+	                          Live Mirror
+	                        </button>
+	                      </div>
+	                    </div>
+	                    {singleSelectionWarning && (
+	                      <div className="inline-alert info">
+	                        <strong>Single device required</strong>
+	                        <span>Keep only one device selected (Device Context: Single) to use Refresh, Export, and Live Mirror.</span>
+	                      </div>
+	                    )}
+	                    {!scrcpyInfo?.available && (
+	                      <p className="muted">Live mirror requires scrcpy. Install it and try again.</p>
+	                    )}
+	                    {uiExportResult && (
+	                      <div className="inline-alert info">
                         <strong>Exported</strong>
                         <span>{uiExportResult}</span>
                       </div>
@@ -7221,15 +7375,21 @@ function App() {
                       <p className="muted">Search packages and execute common actions.</p>
                     </div>
                   </div>
-                  <section className="panel">
-                    <div className="panel-header">
-                      <h2>App Management</h2>
-                      <span>{selectedSummaryLabel}</span>
-                    </div>
-                    <div className="toolbar">
-                      <input
-                        value={appsFilter}
-                        onChange={(event) => setAppsFilter(event.target.value)}
+	                  <section className="panel">
+	                    <div className="panel-header">
+	                      <h2>App Management</h2>
+	                      <span>{selectedSummaryLabel}</span>
+	                    </div>
+	                    {singleSelectionWarning && (
+	                      <div className="inline-alert info">
+	                        <strong>Single device required</strong>
+	                        <span>Keep only one device selected (Device Context: Single) to load and manage apps.</span>
+	                      </div>
+	                    )}
+	                    <div className="toolbar">
+	                      <input
+	                        value={appsFilter}
+	                        onChange={(event) => setAppsFilter(event.target.value)}
                         placeholder="Search package"
                       />
                       <label className="toggle">
@@ -7725,15 +7885,21 @@ function App() {
                       <p className="muted">Track Bluetooth state changes.</p>
                     </div>
                   </div>
-                  <section className="panel">
-                    <div className="panel-header">
-                      <h2>Bluetooth Monitor</h2>
-                      <span>{selectedSummaryLabel}</span>
-                    </div>
-                    <div className="button-row">
-                      <button onClick={() => handleBluetoothMonitor(true)} disabled={busy || selectedSerials.length !== 1}>
-                        Start Monitor
-                      </button>
+	                  <section className="panel">
+	                    <div className="panel-header">
+	                      <h2>Bluetooth Monitor</h2>
+	                      <span>{selectedSummaryLabel}</span>
+	                    </div>
+	                    {singleSelectionWarning && (
+	                      <div className="inline-alert info">
+	                        <strong>Single device required</strong>
+	                        <span>Keep only one device selected (Device Context: Single) to start the monitor.</span>
+	                      </div>
+	                    )}
+	                    <div className="button-row">
+	                      <button onClick={() => handleBluetoothMonitor(true)} disabled={busy || selectedSerials.length !== 1}>
+	                        Start Monitor
+	                      </button>
                       <button onClick={() => handleBluetoothMonitor(false)} disabled={busy || selectedSerials.length !== 1}>
                         Stop Monitor
                       </button>
