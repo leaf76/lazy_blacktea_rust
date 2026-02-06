@@ -136,6 +136,11 @@ import {
 } from "./bugreportLogTextFilters";
 import { bugreportLogLineMatches, buildBugreportLogFindPattern } from "./bugreportLogFind";
 import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
+import {
+  applyDroppedPaths,
+  sanitizeMultiPathsForStorage,
+  sanitizeStoredState,
+} from "./apkInstallerState";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
@@ -171,6 +176,7 @@ type RebootMode = "normal" | "recovery" | "bootloader";
 type DashboardActionId = QuickActionId | "apk-installer";
 
 const TERMINAL_MAX_LINES = 500;
+const APK_INSTALLER_STORAGE_KEY = "lazy_blacktea_apk_installer_v1";
 
 const appendTerminalBuffer = (
   lines: string[],
@@ -827,6 +833,7 @@ function App() {
   const [filesSearchQuery, setFilesSearchQuery] = useState("");
   const [filesOverwriteEnabled, setFilesOverwriteEnabled] = useState(true);
   const [filesDropActive, setFilesDropActive] = useState(false);
+  const [apkDropActive, setApkDropActive] = useState(false);
   const [filesModal, setFilesModal] = useState<
     | null
     | { type: "mkdir"; name: string }
@@ -934,6 +941,10 @@ function App() {
     existingNames: string[];
     selection_count: number;
   }>({ pathname: "/", serial: "", path: "/sdcard", overwrite: true, existingNames: [], selection_count: 0 });
+  const apkDragContextRef = useRef<{ pathname: string; mode: "single" | "multiple" | "bundle" }>({
+    pathname: "/",
+    mode: "single",
+  });
   const bugreportBatchRef = useRef<
     Record<string, { total: number; done: number; hasError: boolean; hasCancelled: boolean }>
   >({});
@@ -1185,6 +1196,13 @@ function App() {
   }, [activeSerial, files, filesOverwriteEnabled, filesPath, location.pathname, selectedSerials]);
 
   useEffect(() => {
+    apkDragContextRef.current = {
+      pathname: location.pathname,
+      mode: apkInstallMode,
+    };
+  }, [apkInstallMode, location.pathname]);
+
+  useEffect(() => {
     if (!devicePopoverOpen) {
       return;
     }
@@ -1249,6 +1267,11 @@ function App() {
   }, [location.pathname]);
 
   useEffect(() => {
+    setFilesDropActive(false);
+    setApkDropActive(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
     return () => {
       if (detailRefreshTimerRef.current != null) {
         window.clearTimeout(detailRefreshTimerRef.current);
@@ -1283,6 +1306,37 @@ function App() {
     return () => window.clearTimeout(handle);
   }, []);
 
+  useEffect(() => {
+    const key = APK_INSTALLER_STORAGE_KEY;
+    const load = () => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) {
+          return;
+        }
+        if (raw.length > 200_000) {
+          console.warn("APK installer storage is too large; skipping load.");
+          localStorage.removeItem(key);
+          return;
+        }
+        const parsed = JSON.parse(raw) as unknown;
+        const stored = sanitizeStoredState(parsed);
+        if (!stored) {
+          localStorage.removeItem(key);
+          return;
+        }
+        setApkInstallMode(stored.mode);
+        setApkPath(stored.single_path);
+        setApkBundlePath(stored.bundle_path);
+        setApkPaths(stored.multi_paths);
+      } catch (error) {
+        console.warn("Failed to load APK installer state from storage.", error);
+      }
+    };
+    const handle = window.setTimeout(load, 0);
+    return () => window.clearTimeout(handle);
+  }, []);
+
   const taskPersistTimerRef = useRef<number | null>(null);
   useEffect(() => {
     const key = "lazy_blacktea_tasks_v1";
@@ -1303,6 +1357,37 @@ function App() {
       }
     };
   }, [taskState]);
+
+  const apkInstallerPersistTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    const key = APK_INSTALLER_STORAGE_KEY;
+    if (apkInstallerPersistTimerRef.current != null) {
+      window.clearTimeout(apkInstallerPersistTimerRef.current);
+    }
+    apkInstallerPersistTimerRef.current = window.setTimeout(() => {
+      try {
+        const candidate = {
+          mode: apkInstallMode,
+          single_path: apkPath,
+          bundle_path: apkBundlePath,
+          multi_paths: sanitizeMultiPathsForStorage(apkPaths),
+        };
+        const sanitized = sanitizeStoredState(candidate);
+        if (!sanitized) {
+          localStorage.removeItem(key);
+          return;
+        }
+        localStorage.setItem(key, JSON.stringify(sanitized));
+      } catch (error) {
+        console.warn("Failed to persist APK installer state to storage.", error);
+      }
+    }, 300);
+    return () => {
+      if (apkInstallerPersistTimerRef.current != null) {
+        window.clearTimeout(apkInstallerPersistTimerRef.current);
+      }
+    };
+  }, [apkBundlePath, apkInstallMode, apkPath, apkPaths]);
 
   const rawLogcatLines = useMemo<LogcatLineEntry[]>(
     () => (activeSerial ? logcatLines[activeSerial] ?? [] : []),
@@ -3771,78 +3856,117 @@ function App() {
 
   useEffect(() => {
     const unlistenPromise = getCurrentWindow().onDragDropEvent((event) => {
-      const ctx = filesDragContextRef.current;
+      const filesCtx = filesDragContextRef.current;
+      const apkCtx = apkDragContextRef.current;
       const payload = event.payload;
-      if (ctx.pathname !== "/files") {
+      const isFilesRoute = filesCtx.pathname === "/files";
+      const isApkInstallerRoute = apkCtx.pathname === "/apk-installer";
+      if (!isFilesRoute && !isApkInstallerRoute) {
         return;
       }
       if (payload.type === "enter" || payload.type === "over") {
-        setFilesDropActive(true);
+        if (isFilesRoute) {
+          setApkDropActive(false);
+          setFilesDropActive(true);
+        } else {
+          setFilesDropActive(false);
+          setApkDropActive(true);
+        }
         return;
       }
       if (payload.type === "leave") {
-        setFilesDropActive(false);
+        if (isFilesRoute) {
+          setFilesDropActive(false);
+        } else {
+          setApkDropActive(false);
+        }
         return;
       }
       if (payload.type !== "drop") {
         return;
       }
-      setFilesDropActive(false);
+
+      if (isFilesRoute) {
+        setFilesDropActive(false);
+        if (!payload.paths.length) {
+          return;
+        }
+        if (filesCtx.selection_count !== 1 || !filesCtx.serial) {
+          pushToast("Select one device for file upload.", "error");
+          return;
+        }
+        const existing = new Set(filesCtx.existingNames);
+        const uploadDroppedFiles = async () => {
+          setBusy(true);
+          try {
+            for (const path of payload.paths) {
+              const filename = basenameFromHostPath(path);
+              if (!filesCtx.overwrite && existing.has(filename)) {
+                pushToast(`Upload blocked: ${filename} already exists.`, "error");
+                continue;
+              }
+              const remotePath = deviceJoin(filesCtx.path, filename);
+              const taskId = beginTask({
+                kind: "file_push",
+                title: `Upload File: ${filename}`,
+                serials: [filesCtx.serial],
+              });
+              const traceId = crypto.randomUUID();
+              dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
+              fileTransferTaskByTraceIdRef.current[traceId] = taskId;
+              try {
+                const response = await pushDeviceFile(filesCtx.serial, path, remotePath, traceId);
+                dispatchTasks({
+                  type: "TASK_UPDATE_DEVICE",
+                  id: taskId,
+                  serial: filesCtx.serial,
+                  patch: { status: "success", progress: 100, message: `Uploaded to ${response.data}` },
+                });
+                dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+                existing.add(filename);
+              } catch (error) {
+                dispatchTasks({
+                  type: "TASK_UPDATE_DEVICE",
+                  id: taskId,
+                  serial: filesCtx.serial,
+                  patch: { status: "error", message: formatError(error), progress: null },
+                });
+                dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+                pushToast(`Upload failed: ${filename} (${formatError(error)})`, "error");
+              } finally {
+                delete fileTransferTaskByTraceIdRef.current[traceId];
+              }
+            }
+            await refreshFilesList(filesCtx.path);
+          } finally {
+            setBusy(false);
+          }
+        };
+        void uploadDroppedFiles();
+        return;
+      }
+
+      setApkDropActive(false);
       if (!payload.paths.length) {
         return;
       }
-      if (ctx.selection_count !== 1 || !ctx.serial) {
-        pushToast("Select one device for file upload.", "error");
+      const result = applyDroppedPaths(apkCtx.mode, payload.paths);
+      if (!result.ok) {
+        pushToast(result.message, "error");
         return;
       }
-      const existing = new Set(ctx.existingNames);
-      const uploadDroppedFiles = async () => {
-        setBusy(true);
-        try {
-          for (const path of payload.paths) {
-            const filename = basenameFromHostPath(path);
-            if (!ctx.overwrite && existing.has(filename)) {
-              pushToast(`Upload blocked: ${filename} already exists.`, "error");
-              continue;
-            }
-	            const remotePath = deviceJoin(ctx.path, filename);
-	            const taskId = beginTask({
-	              kind: "file_push",
-	              title: `Upload File: ${filename}`,
-	              serials: [ctx.serial],
-	            });
-	            const traceId = crypto.randomUUID();
-	            dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
-	            fileTransferTaskByTraceIdRef.current[traceId] = taskId;
-	            try {
-	              const response = await pushDeviceFile(ctx.serial, path, remotePath, traceId);
-	              dispatchTasks({
-	                type: "TASK_UPDATE_DEVICE",
-	                id: taskId,
-	                serial: ctx.serial,
-	                patch: { status: "success", progress: 100, message: `Uploaded to ${response.data}` },
-	              });
-	              dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
-	              existing.add(filename);
-	            } catch (error) {
-	              dispatchTasks({
-	                type: "TASK_UPDATE_DEVICE",
-	                id: taskId,
-	                serial: ctx.serial,
-	                patch: { status: "error", message: formatError(error), progress: null },
-	              });
-	              dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-	              pushToast(`Upload failed: ${filename} (${formatError(error)})`, "error");
-	            } finally {
-	              delete fileTransferTaskByTraceIdRef.current[traceId];
-	            }
-	          }
-	          await refreshFilesList(ctx.path);
-	        } finally {
-          setBusy(false);
+      if (apkCtx.mode === "single") {
+        setApkPath(result.selected[0] ?? "");
+        if (result.usedFirstOnly) {
+          pushToast("Multiple files dropped; using the first one.", "info");
         }
-      };
-      void uploadDroppedFiles();
+        return;
+      }
+      if (apkCtx.mode === "bundle") {
+        setApkBundlePath(result.selected[0] ?? "");
+        return;
+      }
+      setApkPaths(result.selected);
     });
 
     return () => {
@@ -6040,6 +6164,21 @@ function App() {
               path="/apk-installer"
               element={
                 <div className="page-section">
+                  {apkDropActive && (
+                    <div className="file-drop-overlay">
+                      <div className="file-drop-overlay-inner">
+                        <strong>Drop APK files to select</strong>
+                        <span className="muted">
+                          Mode:{" "}
+                          {apkInstallMode === "single"
+                            ? "Single APK"
+                            : apkInstallMode === "multiple"
+                              ? "Multiple APKs"
+                              : "Split Bundle"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                   <div className="page-header">
                     <div>
                       <h1>APK Installer</h1>
