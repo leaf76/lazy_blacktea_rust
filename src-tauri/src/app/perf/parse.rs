@@ -27,6 +27,7 @@ pub struct BatteryTotals {
 pub const MARK_PROC_STAT: &str = "__LBT_PERF_PROC_STAT__";
 pub const MARK_MEMINFO: &str = "__LBT_PERF_MEMINFO__";
 pub const MARK_NETDEV: &str = "__LBT_PERF_NETDEV__";
+pub const MARK_CPUFREQ: &str = "__LBT_PERF_CPUFREQ__";
 pub const MARK_BATTERY: &str = "__LBT_PERF_BATTERY__";
 
 pub fn build_perf_script() -> String {
@@ -37,6 +38,8 @@ pub fn build_perf_script() -> String {
         "cat /proc/meminfo".to_string(),
         format!("echo {MARK_NETDEV}"),
         "cat /proc/net/dev".to_string(),
+        format!("echo {MARK_CPUFREQ}"),
+        r#"for cpu in /sys/devices/system/cpu/cpu[0-9]*; do idx=${cpu##*/cpu}; freq=""; if [ -r "$cpu/cpufreq/scaling_cur_freq" ]; then freq=$(cat "$cpu/cpufreq/scaling_cur_freq" 2>/dev/null); fi; if [ -z "$freq" ] && [ -r "$cpu/cpufreq/cpuinfo_cur_freq" ]; then freq=$(cat "$cpu/cpufreq/cpuinfo_cur_freq" 2>/dev/null); fi; echo "cpu${idx}:${freq}"; done"#.to_string(),
         format!("echo {MARK_BATTERY}"),
         "dumpsys battery".to_string(),
     ]
@@ -52,6 +55,7 @@ pub fn split_marked_sections(output: &str) -> Result<HashMap<&'static str, Strin
             MARK_PROC_STAT => Some(MARK_PROC_STAT),
             MARK_MEMINFO => Some(MARK_MEMINFO),
             MARK_NETDEV => Some(MARK_NETDEV),
+            MARK_CPUFREQ => Some(MARK_CPUFREQ),
             MARK_BATTERY => Some(MARK_BATTERY),
             _ => None,
         };
@@ -124,6 +128,89 @@ pub fn parse_cpu_totals(proc_stat: &str) -> Result<CpuTotals, String> {
         total,
         idle: idle_all,
     })
+}
+
+pub fn parse_per_core_cpu_totals(proc_stat: &str) -> Result<Vec<CpuTotals>, String> {
+    let mut by_index: HashMap<usize, CpuTotals> = HashMap::new();
+
+    for line in proc_stat.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("cpu") {
+            continue;
+        }
+        if trimmed.starts_with("cpu ") {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let label = parts.next().unwrap_or_default();
+        let index_str = label.strip_prefix("cpu").unwrap_or_default();
+        if index_str.is_empty() || !index_str.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let index: usize = match index_str.parse() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        let mut values: Vec<u64> = Vec::new();
+        for part in parts {
+            if let Ok(value) = part.parse::<u64>() {
+                values.push(value);
+            } else {
+                return Err("Invalid cpu counter".to_string());
+            }
+        }
+        if values.len() < 4 {
+            continue;
+        }
+
+        let user = values.first().copied().unwrap_or(0);
+        let nice = values.get(1).copied().unwrap_or(0);
+        let system = values.get(2).copied().unwrap_or(0);
+        let idle = values.get(3).copied().unwrap_or(0);
+        let iowait = values.get(4).copied().unwrap_or(0);
+        let irq = values.get(5).copied().unwrap_or(0);
+        let softirq = values.get(6).copied().unwrap_or(0);
+        let steal = values.get(7).copied().unwrap_or(0);
+        let guest = values.get(8).copied().unwrap_or(0);
+        let guest_nice = values.get(9).copied().unwrap_or(0);
+
+        let idle_all = idle.saturating_add(iowait);
+        let non_idle = user
+            .saturating_add(nice)
+            .saturating_add(system)
+            .saturating_add(irq)
+            .saturating_add(softirq)
+            .saturating_add(steal);
+        let total = idle_all
+            .saturating_add(non_idle)
+            .saturating_add(guest)
+            .saturating_add(guest_nice);
+
+        by_index.insert(
+            index,
+            CpuTotals {
+                total,
+                idle: idle_all,
+            },
+        );
+    }
+
+    if by_index.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_index = by_index.keys().copied().max().unwrap_or(0);
+    let mut cores: Vec<CpuTotals> = Vec::with_capacity(max_index + 1);
+    for idx in 0..=max_index {
+        if let Some(value) = by_index.get(&idx) {
+            cores.push(*value);
+        } else {
+            cores.push(CpuTotals { total: 0, idle: 0 });
+        }
+    }
+    Ok(cores)
 }
 
 pub fn compute_cpu_percent_x100(prev: CpuTotals, curr: CpuTotals) -> Option<u16> {
@@ -242,6 +329,41 @@ pub fn parse_battery_totals(battery: &str) -> Result<BatteryTotals, String> {
     })
 }
 
+pub fn parse_cpu_freq_khz(section: &str) -> HashMap<usize, u32> {
+    let mut map: HashMap<usize, u32> = HashMap::new();
+    for raw in section.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (label, value) = match line.split_once(':') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let index_str = label.trim().strip_prefix("cpu").unwrap_or_default();
+        if index_str.is_empty() || !index_str.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let index: usize = match index_str.parse() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let freq: u32 = match value.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if freq < 10_000 {
+            continue;
+        }
+        map.insert(index, freq);
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +379,44 @@ mod tests {
                 idle: 200
             }
         );
+    }
+
+    #[test]
+    fn parse_per_core_cpu_totals_extracts_and_orders_cores() {
+        let input = "cpu  1 0 0 1\ncpu0 10 0 0 20\ncpu2 30 0 0 40\ncpu1 50 0 0 60\n";
+        let cores = parse_per_core_cpu_totals(input).expect("cores");
+        assert_eq!(cores.len(), 3);
+        assert_eq!(
+            cores[0],
+            CpuTotals {
+                total: 30,
+                idle: 20
+            }
+        );
+        assert_eq!(
+            cores[1],
+            CpuTotals {
+                total: 110,
+                idle: 60
+            }
+        );
+        assert_eq!(
+            cores[2],
+            CpuTotals {
+                total: 70,
+                idle: 40
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cpu_freq_khz_ignores_missing_and_invalid_values() {
+        let input = "cpu0:1800000\ncpu1:\ncpu2:abc\ncpu3:2\n";
+        let map = parse_cpu_freq_khz(input);
+        assert_eq!(map.get(&0).copied(), Some(1_800_000));
+        assert!(map.get(&1).is_none());
+        assert!(map.get(&2).is_none());
+        assert!(map.get(&3).is_none());
     }
 
     #[test]
@@ -321,12 +481,13 @@ Inter-|   Receive                                                |  Transmit
     #[test]
     fn split_marked_sections_collects_sections() {
         let output = format!(
-            "{MARK_PROC_STAT}\ncpu 1 2 3 4\n{MARK_MEMINFO}\nMemTotal: 1 kB\n{MARK_NETDEV}\nlo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n{MARK_BATTERY}\nlevel: 1\n"
+            "{MARK_PROC_STAT}\ncpu 1 2 3 4\n{MARK_MEMINFO}\nMemTotal: 1 kB\n{MARK_NETDEV}\nlo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n{MARK_CPUFREQ}\ncpu0:1800000\n{MARK_BATTERY}\nlevel: 1\n"
         );
         let sections = split_marked_sections(&output).expect("sections");
         assert!(sections.get(MARK_PROC_STAT).unwrap().contains("cpu "));
         assert!(sections.get(MARK_MEMINFO).unwrap().contains("MemTotal"));
         assert!(sections.get(MARK_NETDEV).unwrap().contains("lo:"));
+        assert!(sections.get(MARK_CPUFREQ).unwrap().contains("cpu0:"));
         assert!(sections.get(MARK_BATTERY).unwrap().contains("level:"));
     }
 }

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildSparklinePoints, formatBps, formatBytes } from "./perf";
+import {
+  buildSparklinePoints,
+  formatBps,
+  formatBytes,
+  formatHzX100,
+  formatKhz,
+  formatPerSecX100,
+} from "./perf";
 
 describe("perf helpers", () => {
   it("formatBytes returns -- for null", () => {
@@ -12,6 +19,18 @@ describe("perf helpers", () => {
 
   it("formatBps appends /s", () => {
     expect(formatBps(2048)).toBe("2.00 KB/s");
+  });
+
+  it("formatKhz returns GHz for large frequencies", () => {
+    expect(formatKhz(1_800_000)).toBe("1.80 GHz");
+  });
+
+  it("formatHzX100 formats Hz", () => {
+    expect(formatHzX100(6000)).toBe("60.00 Hz");
+  });
+
+  it("formatPerSecX100 formats per-second values", () => {
+    expect(formatPerSecX100(123)).toBe("1.23 /s");
   });
 
   it("buildSparklinePoints returns empty for <2 values", () => {
@@ -28,4 +47,3 @@ describe("perf helpers", () => {
     expect(points).toBe("0.0,15.0 45.0,15.0 90.0,15.0");
   });
 });
-

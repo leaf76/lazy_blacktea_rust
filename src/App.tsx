@@ -95,7 +95,14 @@ import {
   type LogcatLevelsState,
   type LogcatSourceMode,
 } from "./logcat";
-import { buildSparklinePoints, formatBps, formatBytes } from "./perf";
+import {
+  buildSparklinePoints,
+  formatBps,
+  formatBytes,
+  formatHzX100,
+  formatKhz,
+  formatPerSecX100,
+} from "./perf";
 import {
   initialPairingState,
   pairingReducer,
@@ -5177,6 +5184,20 @@ function App() {
         ? `${(latest.cpu_total_percent_x100 / 100).toFixed(2)}%`
         : "--";
 
+    const corePercents = latest?.cpu_cores_percent_x100 ?? [];
+    const coreFreqs = latest?.cpu_cores_freq_khz ?? [];
+    const coreCount = Math.max(corePercents.length, coreFreqs.length);
+    const coresLabel =
+      coreCount === 0
+        ? []
+        : Array.from({ length: coreCount }, (_, index) => {
+            const usageX100 = corePercents[index] ?? null;
+            const freqKhz = coreFreqs[index] ?? null;
+            const usage = usageX100 == null ? "--" : `${(usageX100 / 100).toFixed(2)}%`;
+            const freq = formatKhz(freqKhz);
+            return `C${index} ${usage} ${freq}`;
+          });
+
     const memNow =
       latest?.mem_used_bytes != null && latest?.mem_total_bytes != null
         ? `${formatBytes(latest.mem_used_bytes)} / ${formatBytes(latest.mem_total_bytes)}`
@@ -5196,6 +5217,9 @@ function App() {
         ? `Rx ${formatBps(latest?.net_rx_bps ?? null)} • Tx ${formatBps(latest?.net_tx_bps ?? null)}`
         : "--";
 
+    const displayRefreshNow = formatHzX100(latest?.display_refresh_hz_x100 ?? null);
+    const missedNow = formatPerSecX100(latest?.missed_frames_per_sec_x100 ?? null);
+
     const cpuValues = state.samples.map((sample) =>
       sample.cpu_total_percent_x100 != null ? sample.cpu_total_percent_x100 / 100 : Number.NaN,
     );
@@ -5207,6 +5231,11 @@ function App() {
     );
     const rxValues = state.samples.map((sample) =>
       sample.net_rx_bps != null ? sample.net_rx_bps : Number.NaN,
+    );
+    const missedValues = state.samples.map((sample) =>
+      sample.missed_frames_per_sec_x100 != null
+        ? sample.missed_frames_per_sec_x100 / 100
+        : Number.NaN,
     );
 
     const canStart = !busy && selectedSerials.length === 1 && deviceStatus === "device" && !state.running;
@@ -5266,6 +5295,15 @@ function App() {
                 </div>
                 <strong>{cpuNow}</strong>
               </div>
+              {coresLabel.length > 0 && (
+                <div className="perf-cores">
+                  {coresLabel.map((label) => (
+                    <span key={label} className="badge perf-core">
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              )}
               {renderPerfSparkline(cpuValues)}
             </div>
 
@@ -5300,6 +5338,21 @@ function App() {
                 <strong>{netNow}</strong>
               </div>
               {renderPerfSparkline(rxValues)}
+            </div>
+
+            <div className="panel card perf-card">
+              <div className="perf-card-header">
+                <div>
+                  <h3>Display</h3>
+                  <p className="muted">Refresh and missed frames</p>
+                </div>
+                <strong>{displayRefreshNow}</strong>
+              </div>
+              <div className="perf-display-row">
+                <span className="muted">Missed</span>
+                <strong>{missedNow}</strong>
+              </div>
+              {renderPerfSparkline(missedValues)}
             </div>
           </div>
         </section>

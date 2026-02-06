@@ -23,6 +23,38 @@ export const formatBps = (bytesPerSecond?: number | null) => {
   return `${formatBytes(value)}/s`;
 };
 
+export const formatKhz = (khz?: number | null) => {
+  const value = khz ?? null;
+  if (value == null || !Number.isFinite(value)) {
+    return "--";
+  }
+  if (value < 10_000) {
+    return "--";
+  }
+  const mhz = value / 1000;
+  if (mhz >= 1000) {
+    const ghz = mhz / 1000;
+    return `${ghz.toFixed(2)} GHz`;
+  }
+  return `${mhz.toFixed(1)} MHz`;
+};
+
+export const formatHzX100 = (hzX100?: number | null) => {
+  const value = hzX100 ?? null;
+  if (value == null || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${(value / 100).toFixed(2)} Hz`;
+};
+
+export const formatPerSecX100 = (valueX100?: number | null) => {
+  const value = valueX100 ?? null;
+  if (value == null || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${(value / 100).toFixed(2)} /s`;
+};
+
 export const buildSparklinePoints = (
   values: number[],
   width: number,
@@ -48,4 +80,3 @@ export const buildSparklinePoints = (
     })
     .join(" ");
 };
-

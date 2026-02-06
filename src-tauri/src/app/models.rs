@@ -99,12 +99,18 @@ pub struct LogcatExportResult {
 pub struct PerfSnapshot {
     pub ts_ms: i64,
     pub cpu_total_percent_x100: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_cores_percent_x100: Vec<Option<u16>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_cores_freq_khz: Vec<Option<u32>>,
     pub mem_total_bytes: Option<u64>,
     pub mem_used_bytes: Option<u64>,
     pub net_rx_bps: Option<u64>,
     pub net_tx_bps: Option<u64>,
     pub battery_level: Option<u8>,
     pub battery_temp_decic: Option<i32>,
+    pub display_refresh_hz_x100: Option<u16>,
+    pub missed_frames_per_sec_x100: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

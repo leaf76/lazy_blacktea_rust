@@ -97,12 +97,16 @@ export type LogcatEvent = {
 export type PerfSnapshot = {
   ts_ms: number;
   cpu_total_percent_x100?: number | null;
+  cpu_cores_percent_x100?: (number | null)[] | null;
+  cpu_cores_freq_khz?: (number | null)[] | null;
   mem_total_bytes?: number | null;
   mem_used_bytes?: number | null;
   net_rx_bps?: number | null;
   net_tx_bps?: number | null;
   battery_level?: number | null;
   battery_temp_decic?: number | null;
+  display_refresh_hz_x100?: number | null;
+  missed_frames_per_sec_x100?: number | null;
 };
 
 export type PerfEvent = {

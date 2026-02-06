@@ -48,9 +48,10 @@ use crate::app::models::{
     UiHierarchyExportResult,
 };
 use crate::app::perf::parse::{
-    build_perf_script, compute_cpu_percent_x100, parse_battery_totals, parse_cpu_totals,
-    parse_mem_totals, parse_net_totals, split_marked_sections, BatteryTotals, CpuTotals, MemTotals,
-    NetTotals, MARK_BATTERY, MARK_MEMINFO, MARK_NETDEV, MARK_PROC_STAT,
+    build_perf_script, compute_cpu_percent_x100, parse_battery_totals, parse_cpu_freq_khz,
+    parse_cpu_totals, parse_mem_totals, parse_net_totals, parse_per_core_cpu_totals,
+    split_marked_sections, BatteryTotals, CpuTotals, MemTotals, NetTotals, MARK_BATTERY,
+    MARK_CPUFREQ, MARK_MEMINFO, MARK_NETDEV, MARK_PROC_STAT,
 };
 use crate::app::state::{
     AppState, BugreportHandle, LogcatHandle, PerfMonitorHandle, RecordingHandle,
@@ -276,11 +277,15 @@ struct PerfSnapshotInput {
     ts_ms: i64,
     cpu_prev: Option<CpuTotals>,
     cpu_curr: CpuTotals,
+    core_percents_x100: Vec<Option<u16>>,
+    core_freq_khz: Vec<Option<u32>>,
     mem: MemTotals,
     net_prev: Option<NetTotals>,
     net_curr: NetTotals,
     dt_ms: Option<u128>,
     battery: BatteryTotals,
+    display_refresh_hz_x100: Option<u16>,
+    missed_frames_per_sec_x100: Option<u16>,
 }
 
 fn build_perf_snapshot(input: PerfSnapshotInput) -> PerfSnapshot {
@@ -288,11 +293,15 @@ fn build_perf_snapshot(input: PerfSnapshotInput) -> PerfSnapshot {
         ts_ms,
         cpu_prev,
         cpu_curr,
+        core_percents_x100,
+        core_freq_khz,
         mem,
         net_prev,
         net_curr,
         dt_ms,
         battery,
+        display_refresh_hz_x100,
+        missed_frames_per_sec_x100,
     } = input;
     let cpu_total_percent_x100 = cpu_prev.and_then(|prev| compute_cpu_percent_x100(prev, cpu_curr));
 
@@ -313,12 +322,16 @@ fn build_perf_snapshot(input: PerfSnapshotInput) -> PerfSnapshot {
     PerfSnapshot {
         ts_ms,
         cpu_total_percent_x100,
+        cpu_cores_percent_x100: core_percents_x100,
+        cpu_cores_freq_khz: core_freq_khz,
         mem_total_bytes,
         mem_used_bytes,
         net_rx_bps,
         net_tx_bps,
         battery_level: battery.level,
         battery_temp_decic: battery.temperature_decic,
+        display_refresh_hz_x100,
+        missed_frames_per_sec_x100,
     }
 }
 
@@ -3436,8 +3449,35 @@ pub fn start_perf_monitor(
     start_perf_monitor_inner(serial, &state.perf_monitors, &trace_id, move |stop_flag| {
         std::thread::spawn(move || {
             let mut cpu_prev: Option<CpuTotals> = None;
+            let mut cores_prev: Option<Vec<CpuTotals>> = None;
             let mut net_prev: Option<NetTotals> = None;
             let mut net_prev_instant: Option<Instant> = None;
+            let mut display_refresh_hz_x100: Option<u16> = None;
+            let mut missed_frames_total_prev: Option<u64> = None;
+            let mut missed_frames_instant_prev: Option<Instant> = None;
+            let mut missed_frames_per_sec_x100: Option<u16> = None;
+            let mut last_missed_check = Instant::now();
+
+            {
+                let args = vec![
+                    "-s".to_string(),
+                    serial_spawn.clone(),
+                    "shell".to_string(),
+                    r#"dumpsys SurfaceFlinger --latency | sed -n "1p""#.to_string(),
+                ];
+                if let Ok(output) = run_command_with_timeout(
+                    &adb_program_spawn,
+                    &args,
+                    Duration::from_secs(3),
+                    &trace_spawn,
+                ) {
+                    if output.exit_code.unwrap_or_default() == 0 {
+                        if let Some(period_ns) = parse_surfaceflinger_latency_ns(&output.stdout) {
+                            display_refresh_hz_x100 = compute_refresh_hz_x100(period_ns);
+                        }
+                    }
+                }
+            }
 
             loop {
                 if stop_flag.load(Ordering::Relaxed) {
@@ -3551,6 +3591,10 @@ pub fn start_perf_monitor(
                     .get(MARK_NETDEV)
                     .map(|value| value.as_str())
                     .unwrap_or("");
+                let cpufreq_section = sections
+                    .get(MARK_CPUFREQ)
+                    .map(|value| value.as_str())
+                    .unwrap_or("");
                 let battery = sections
                     .get(MARK_BATTERY)
                     .map(|value| value.as_str())
@@ -3573,6 +3617,23 @@ pub fn start_perf_monitor(
                         continue;
                     }
                 };
+
+                let cores_curr = parse_per_core_cpu_totals(proc_stat).unwrap_or_default();
+                let core_count = cores_curr.len();
+                let core_percents_x100 = match cores_prev.as_ref() {
+                    Some(prev) if prev.len() == core_count && core_count > 0 => prev
+                        .iter()
+                        .zip(cores_curr.iter())
+                        .map(|(a, b)| compute_cpu_percent_x100(*a, *b))
+                        .collect(),
+                    _ => vec![None; core_count],
+                };
+                cores_prev = Some(cores_curr);
+
+                let freq_map = parse_cpu_freq_khz(cpufreq_section);
+                let core_freq_khz: Vec<Option<u32>> = (0..core_count)
+                    .map(|idx| freq_map.get(&idx).copied())
+                    .collect();
 
                 let mem = match parse_mem_totals(meminfo) {
                     Ok(value) => value,
@@ -3626,15 +3687,59 @@ pub fn start_perf_monitor(
                     net_prev_instant.map(|prev| sample_instant.duration_since(prev).as_millis());
                 let ts_ms = Utc::now().timestamp_millis();
 
+                if missed_frames_total_prev.is_none()
+                    || missed_frames_instant_prev.is_none()
+                    || last_missed_check.elapsed() >= Duration::from_secs(10)
+                {
+                    last_missed_check = Instant::now();
+                    let args = vec![
+                        "-s".to_string(),
+                        serial_spawn.clone(),
+                        "shell".to_string(),
+                        r#"dumpsys SurfaceFlinger | sed -n "s/.*Total missed frame count: *\([0-9][0-9]*\).*/\1/p" | sed -n "1p""#.to_string(),
+                    ];
+                    if let Ok(output) = run_command_with_timeout(
+                        &adb_program_spawn,
+                        &args,
+                        Duration::from_secs(3),
+                        &trace_spawn,
+                    ) {
+                        if output.exit_code.unwrap_or_default() == 0 {
+                            let digits = output.stdout.trim();
+                            if let Ok(total) = digits.parse::<u64>() {
+                                let now = Instant::now();
+                                if let (Some(prev_total), Some(prev_instant)) =
+                                    (missed_frames_total_prev, missed_frames_instant_prev)
+                                {
+                                    let delta = total.saturating_sub(prev_total) as u128;
+                                    let dt_ms = now.duration_since(prev_instant).as_millis();
+                                    if dt_ms > 0 {
+                                        let per_sec_x100 = ((delta * 100_000u128) / dt_ms)
+                                            .min(u16::MAX as u128)
+                                            as u16;
+                                        missed_frames_per_sec_x100 = Some(per_sec_x100);
+                                    }
+                                }
+                                missed_frames_total_prev = Some(total);
+                                missed_frames_instant_prev = Some(now);
+                            }
+                        }
+                    }
+                }
+
                 let snapshot = build_perf_snapshot(PerfSnapshotInput {
                     ts_ms,
                     cpu_prev,
                     cpu_curr,
+                    core_percents_x100,
+                    core_freq_khz,
                     mem,
                     net_prev,
                     net_curr,
                     dt_ms,
                     battery: battery_totals,
+                    display_refresh_hz_x100,
+                    missed_frames_per_sec_x100,
                 });
 
                 cpu_prev = Some(cpu_curr);
@@ -3677,6 +3782,29 @@ fn sleep_with_stop(duration: Duration, stop_flag: &Arc<AtomicBool>) {
         remaining = remaining.saturating_sub(step);
     }
 }
+
+fn parse_surfaceflinger_latency_ns(output: &str) -> Option<u64> {
+    output
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .and_then(|line| line.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn compute_refresh_hz_x100(period_ns: u64) -> Option<u16> {
+    if period_ns == 0 {
+        return None;
+    }
+    let hz_x100 = (100_000_000_000u128 / (period_ns as u128)).min(u16::MAX as u128) as u16;
+    if hz_x100 == 0 {
+        return None;
+    }
+    Some(hz_x100)
+}
+
+// SurfaceFlinger output parsing is intentionally done via shell pipelines for missed frame totals.
 
 #[tauri::command(async)]
 pub fn stop_perf_monitor(
