@@ -16,13 +16,13 @@ use zip::ZipArchive;
 
 use crate::app::adb::apk::{extract_split_apks, get_apk_info, is_split_bundle, normalize_apk_path};
 use crate::app::adb::apps::{
-    package_entry_to_app_info, parse_dumpsys_first_install_time, parse_dumpsys_last_update_time,
-    parse_dumpsys_components_summary, parse_dumpsys_data_dir, parse_dumpsys_granted_permissions,
-    parse_dumpsys_initiating_package_name, parse_dumpsys_installing_package_name,
-    parse_dumpsys_installer_package_name, parse_dumpsys_originating_package_name,
-    parse_dumpsys_requested_permissions, parse_dumpsys_target_sdk, parse_dumpsys_user_id,
-    parse_dumpsys_version_code, parse_dumpsys_version_name,
-    parse_pm_list_packages_output, parse_pm_path_output,
+    package_entry_to_app_info, parse_dumpsys_components_summary, parse_dumpsys_data_dir,
+    parse_dumpsys_first_install_time, parse_dumpsys_granted_permissions,
+    parse_dumpsys_initiating_package_name, parse_dumpsys_installer_package_name,
+    parse_dumpsys_installing_package_name, parse_dumpsys_last_update_time,
+    parse_dumpsys_originating_package_name, parse_dumpsys_requested_permissions,
+    parse_dumpsys_target_sdk, parse_dumpsys_user_id, parse_dumpsys_version_code,
+    parse_dumpsys_version_name, parse_pm_list_packages_output, parse_pm_path_output,
 };
 use crate::app::adb::bugreport::{parse_bugreportz_line, BugreportzPayload};
 use crate::app::adb::locator::{normalize_command_path, resolve_adb_program, validate_adb_program};
@@ -47,11 +47,11 @@ use crate::app::diagnostics;
 use crate::app::error::AppError;
 use crate::app::models::{
     AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo,
-    AppComponentsSummary, AppIcon, AppInfo,
-    BugreportLogFilters, BugreportLogPage, BugreportLogSummary, BugreportResult, CommandResponse,
-    CommandResult, DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult,
-    LogcatExportResult, PerfSnapshot, ScrcpyInfo, TerminalEvent, TerminalSessionInfo,
-    UiHierarchyCaptureResult, UiHierarchyExportResult,
+    AppComponentsSummary, AppIcon, AppInfo, BugreportLogFilters, BugreportLogPage,
+    BugreportLogSummary, BugreportResult, CommandResponse, CommandResult, DeviceDetail,
+    DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LogcatExportResult, PerfSnapshot,
+    ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
+    UiHierarchyExportResult,
 };
 use crate::app::perf::parse::{
     build_perf_script, compute_cpu_percent_x100, parse_battery_totals, parse_cpu_freq_khz,
@@ -3391,7 +3391,8 @@ pub fn get_app_icon(
         resolved_apk_path.clone(),
         local_apk_string.clone(),
     ];
-    let pull_output = run_command_with_timeout(&adb_program, &pull_args, Duration::from_secs(60), &trace_id)?;
+    let pull_output =
+        run_command_with_timeout(&adb_program, &pull_args, Duration::from_secs(60), &trace_id)?;
     if pull_output.exit_code.unwrap_or_default() != 0 {
         return Err(AppError::dependency(
             format!("Pull APK failed: {}", pull_output.stderr.trim()),
@@ -3399,23 +3400,35 @@ pub fn get_app_icon(
         ));
     }
 
-    let Some((entry_name, icon_bytes)) = extract_best_icon_from_apk(&local_apk_path, &trace_id)? else {
-        return Err(AppError::dependency("Failed to locate icon in APK", &trace_id));
+    let Some((entry_name, icon_bytes)) = extract_best_icon_from_apk(&local_apk_path, &trace_id)?
+    else {
+        return Err(AppError::dependency(
+            "Failed to locate icon in APK",
+            &trace_id,
+        ));
     };
 
     const MAX_ICON_BYTES: usize = 1_000_000;
     if icon_bytes.len() > MAX_ICON_BYTES {
-        return Err(AppError::dependency("Icon file too large to preview", &trace_id));
+        return Err(AppError::dependency(
+            "Icon file too large to preview",
+            &trace_id,
+        ));
     }
 
     let mime_type = MimeGuess::from_path(&entry_name)
         .first_or_octet_stream()
         .essence_str()
         .to_string();
-    let ext = if mime_type == "image/webp" { "webp" } else { "png" };
+    let ext = if mime_type == "image/webp" {
+        "webp"
+    } else {
+        "png"
+    };
     let cache_path = cache_dir.join(format!("{safe_pkg}.{ext}"));
-    fs::write(&cache_path, &icon_bytes)
-        .map_err(|err| AppError::system(format!("Failed to write cached icon: {err}"), &trace_id))?;
+    fs::write(&cache_path, &icon_bytes).map_err(|err| {
+        AppError::system(format!("Failed to write cached icon: {err}"), &trace_id)
+    })?;
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&icon_bytes);
     Ok(CommandResponse {
@@ -3471,7 +3484,8 @@ pub fn get_app_basic_info(
     let target_sdk = parse_dumpsys_target_sdk(&output.stdout);
     let requested_permissions = parse_dumpsys_requested_permissions(&output.stdout);
     let granted_permissions = parse_dumpsys_granted_permissions(&output.stdout);
-    let (activities, services, receivers, providers) = parse_dumpsys_components_summary(&output.stdout);
+    let (activities, services, receivers, providers) =
+        parse_dumpsys_components_summary(&output.stdout);
     let components_summary = if activities + services + receivers + providers > 0 {
         Some(AppComponentsSummary {
             activities,
@@ -5151,12 +5165,19 @@ pub async fn query_bugreport_logcat(
     })
     .await
     .map_err(|_| AppError::system("Bugreport log query thread failed", &trace_id))?
-    .map_err(|err| AppError::system(err, &trace_id))?;
+    .map_err(|err| map_bugreport_log_query_error(err, &trace_id))?;
 
     Ok(CommandResponse {
         trace_id,
         data: result,
     })
+}
+
+fn map_bugreport_log_query_error(err: String, trace_id: &str) -> AppError {
+    if let Some(message) = err.strip_prefix("VALIDATION:") {
+        return AppError::validation(message.trim(), trace_id);
+    }
+    AppError::system(err, trace_id)
 }
 
 fn run_bugreport_streaming(

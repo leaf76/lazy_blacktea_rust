@@ -102,7 +102,9 @@ pub fn build_scrcpy_command(
         AudioFlagMode::Unsupported => {}
     }
     if !settings.bitrate.trim().is_empty() {
-        args.push("--bit-rate".to_string());
+        // scrcpy removed the long flag `--bit-rate` in favor of `--video-bit-rate`/`--audio-bit-rate`.
+        // Use the stable short option to remain compatible across versions.
+        args.push("-b".to_string());
         args.push(settings.bitrate.trim().to_string());
     }
     if settings.max_size > 0 {
@@ -187,6 +189,11 @@ mod tests {
         args.iter().any(|item| item == flag)
     }
 
+    fn has_flag_with_value(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
     #[test]
     fn build_scrcpy_command_audio_major3_enabled_has_no_audio_flag() {
         let settings = base_settings();
@@ -225,5 +232,14 @@ mod tests {
         let args = build_scrcpy_command("device", &settings, 1);
         assert!(!has_flag(&args, "--audio"));
         assert!(!has_flag(&args, "--no-audio"));
+    }
+
+    #[test]
+    fn build_scrcpy_command_bitrate_uses_short_b_flag() {
+        let mut settings = base_settings();
+        settings.bitrate = "16M".to_string();
+        let args = build_scrcpy_command("device", &settings, 3);
+        assert!(has_flag_with_value(&args, "-b", "16M"));
+        assert!(!has_flag(&args, "--bit-rate"));
     }
 }

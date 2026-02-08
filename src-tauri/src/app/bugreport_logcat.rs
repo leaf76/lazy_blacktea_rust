@@ -2,7 +2,8 @@ use crate::app::models::{
     BugreportLogFilters, BugreportLogPage, BugreportLogRow, BugreportLogSummary,
 };
 use dirs::home_dir;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +21,8 @@ const BATCH_COMMIT_SIZE: usize = 50_000;
 const READ_BUFFER_SIZE: usize = 64 * 1024;
 const DEFAULT_QUERY_LIMIT: usize = 200;
 const MAX_QUERY_LIMIT: usize = 500;
+const MAX_REGEX_FILTERS: usize = 20;
+const MAX_REGEX_PATTERN_LEN: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LogcatCacheMeta {
@@ -140,7 +143,9 @@ pub fn query_bugreport_logcat(
     let connection =
         Connection::open(db_path).map_err(|err| format!("Failed to open logcat index: {err}"))?;
 
-    let (sql, params) = build_query_sql(filters, offset, limit);
+    let (has_regex_include, has_regex_exclude) = attach_regex_filters(&connection, &filters)?;
+    let (sql, params) =
+        build_query_sql(filters, offset, limit, has_regex_include, has_regex_exclude);
     let mut stmt = connection
         .prepare(&sql)
         .map_err(|err| format!("Failed to prepare logcat query: {err}"))?;
@@ -188,6 +193,8 @@ fn build_query_sql(
     filters: BugreportLogFilters,
     offset: usize,
     limit: usize,
+    has_regex_include: bool,
+    has_regex_exclude: bool,
 ) -> (String, Vec<rusqlite::types::Value>) {
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     let mut clauses: Vec<String> = Vec::new();
@@ -257,6 +264,13 @@ fn build_query_sql(
         params.push(exclude_expr.into());
     }
 
+    if has_regex_include {
+        clauses.push(format!("re_any({LOGCAT_TABLE}.raw_line) = 1"));
+    }
+    if has_regex_exclude {
+        clauses.push(format!("re_none({LOGCAT_TABLE}.raw_line) = 1"));
+    }
+
     let mut sql = format!(
         "SELECT {LOGCAT_TABLE}.id, {LOGCAT_TABLE}.ts_raw, {LOGCAT_TABLE}.level, {LOGCAT_TABLE}.tag, {LOGCAT_TABLE}.pid, {LOGCAT_TABLE}.tid, {LOGCAT_TABLE}.msg, {LOGCAT_TABLE}.raw_line FROM {from}"
     );
@@ -283,6 +297,91 @@ fn build_query_sql(
     params.push(rusqlite::types::Value::Integer(offset as i64));
 
     (sql, params)
+}
+
+fn attach_regex_filters(
+    connection: &Connection,
+    filters: &BugreportLogFilters,
+) -> Result<(bool, bool), String> {
+    let include_patterns = normalize_regex_list(filters.regex_terms.clone());
+    let exclude_patterns = normalize_regex_list(filters.regex_excludes.clone());
+
+    if include_patterns.len() > MAX_REGEX_FILTERS || exclude_patterns.len() > MAX_REGEX_FILTERS {
+        return Err(validation_error(format!(
+            "Too many regex filters (max {MAX_REGEX_FILTERS})"
+        )));
+    }
+
+    for pattern in include_patterns.iter().chain(exclude_patterns.iter()) {
+        if pattern.len() > MAX_REGEX_PATTERN_LEN {
+            return Err(validation_error(format!(
+                "Regex pattern too long (max {MAX_REGEX_PATTERN_LEN} chars)"
+            )));
+        }
+    }
+
+    let has_include = !include_patterns.is_empty();
+    let has_exclude = !exclude_patterns.is_empty();
+
+    if has_include {
+        let regexes = compile_regex_patterns(&include_patterns)?;
+        connection
+            .create_scalar_function(
+                "re_any",
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                move |ctx| {
+                    let text: String = ctx.get(0)?;
+                    Ok(if regexes.iter().any(|re| re.is_match(&text)) {
+                        1_i64
+                    } else {
+                        0_i64
+                    })
+                },
+            )
+            .map_err(|err| format!("Failed to attach regex include filter: {err}"))?;
+    }
+
+    if has_exclude {
+        let regexes = compile_regex_patterns(&exclude_patterns)?;
+        connection
+            .create_scalar_function(
+                "re_none",
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                move |ctx| {
+                    let text: String = ctx.get(0)?;
+                    Ok(if regexes.iter().all(|re| !re.is_match(&text)) {
+                        1_i64
+                    } else {
+                        0_i64
+                    })
+                },
+            )
+            .map_err(|err| format!("Failed to attach regex exclude filter: {err}"))?;
+    }
+
+    Ok((has_include, has_exclude))
+}
+
+fn validation_error(message: impl AsRef<str>) -> String {
+    format!("VALIDATION: {}", message.as_ref())
+}
+
+fn normalize_regex_list(values: Vec<String>) -> Vec<String> {
+    values.into_iter().filter_map(normalize_text).collect()
+}
+
+fn compile_regex_patterns(patterns: &[String]) -> Result<Vec<Regex>, String> {
+    let mut out: Vec<Regex> = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let regex = RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .map_err(|err| validation_error(format!("Invalid regex pattern: {err}")))?;
+        out.push(regex);
+    }
+    Ok(out)
 }
 
 fn normalize_text(value: String) -> Option<String> {
@@ -727,10 +826,12 @@ mod tests {
             text: Some("Bluetooth".to_string()),
             text_terms: Vec::new(),
             text_excludes: Vec::new(),
+            regex_terms: Vec::new(),
+            regex_excludes: Vec::new(),
             start_ts: None,
             end_ts: None,
         };
-        let (sql, _params) = build_query_sql(filters, 0, 200);
+        let (sql, _params) = build_query_sql(filters, 0, 200, false, false);
         assert!(sql.contains("FROM logcat JOIN logcat_fts"));
         assert!(sql.contains("logcat.tag = ?"));
         assert!(sql.contains("SELECT logcat.id, logcat.ts_raw"));
@@ -746,10 +847,12 @@ mod tests {
             text: None,
             text_terms: vec!["Bluetooth".to_string(), "wifi".to_string()],
             text_excludes: Vec::new(),
+            regex_terms: Vec::new(),
+            regex_excludes: Vec::new(),
             start_ts: None,
             end_ts: None,
         };
-        let (sql, params) = build_query_sql(filters, 0, 200);
+        let (sql, params) = build_query_sql(filters, 0, 200, false, false);
         assert!(sql.contains("FROM logcat JOIN logcat_fts"));
         assert!(sql.contains("logcat_fts MATCH ?"));
         let fts_param = params
@@ -771,13 +874,33 @@ mod tests {
             text: None,
             text_terms: Vec::new(),
             text_excludes: vec!["Bluetooth".to_string()],
+            regex_terms: Vec::new(),
+            regex_excludes: Vec::new(),
             start_ts: None,
             end_ts: None,
         };
-        let (sql, _params) = build_query_sql(filters, 0, 200);
+        let (sql, _params) = build_query_sql(filters, 0, 200, false, false);
         assert!(!sql.contains("JOIN logcat_fts ON"));
         assert!(sql.contains("logcat.id NOT IN (SELECT rowid FROM logcat_fts"));
         assert!(sql.contains("WHERE logcat_fts MATCH ?"));
+    }
+
+    #[test]
+    fn query_sql_includes_regex_clauses_when_enabled() {
+        let filters = BugreportLogFilters {
+            levels: vec![],
+            tag: None,
+            pid: None,
+            text: None,
+            text_terms: Vec::new(),
+            text_excludes: Vec::new(),
+            regex_terms: vec!["AndroidRuntime".to_string()],
+            regex_excludes: Vec::new(),
+            start_ts: None,
+            end_ts: None,
+        };
+        let (sql, _params) = build_query_sql(filters, 0, 200, true, false);
+        assert!(sql.contains("re_any(logcat.raw_line) = 1"));
     }
 
     #[test]

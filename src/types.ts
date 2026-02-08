@@ -352,6 +352,8 @@ export type BugreportLogFilters = {
   text_terms?: string[];
   text_excludes?: string[];
   text?: string | null;
+  regex_terms?: string[];
+  regex_excludes?: string[];
   start_ts?: string | null;
   end_ts?: string | null;
 };

@@ -217,6 +217,10 @@ pub struct BugreportLogFilters {
     pub text_terms: Vec<String>,
     #[serde(default)]
     pub text_excludes: Vec<String>,
+    #[serde(default)]
+    pub regex_terms: Vec<String>,
+    #[serde(default)]
+    pub regex_excludes: Vec<String>,
     pub start_ts: Option<String>,
     pub end_ts: Option<String>,
 }

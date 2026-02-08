@@ -1607,9 +1607,12 @@ button.ghost.icon-only {
 
 .bugreport-log-toolbar-row {
   display: grid;
-  /* Fixed 5-field layout: give Text filters more room to avoid cramped input. */
-  grid-template-columns: minmax(320px, 2fr) repeat(4, minmax(160px, 1fr));
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
   gap: 8px;
+}
+
+.bugreport-log-filter-grid {
+  margin-top: 0;
 }
 
 .bugreport-log-filter-field {
@@ -2689,6 +2692,10 @@ button.danger:hover:not(:disabled) {
   flex: 1;
 }
 
+.button-row.compact select {
+  flex: 1;
+}
+
 button {
   border: none;
   border-radius: 10px;
@@ -2708,6 +2715,12 @@ button.ghost {
   background: transparent;
   color: var(--color-text);
   border: 1px solid var(--color-border);
+}
+
+button.ghost.active {
+  background: var(--toggle-active-bg);
+  border-color: var(--toggle-active-border);
+  color: var(--toggle-active-text);
 }
 
 button:focus-visible,
@@ -3160,9 +3173,16 @@ textarea:disabled {
 
 .logcat-filter-grid {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-columns: 1fr;
   gap: 6px;
   margin-top: 6px;
+}
+
+.logcat-filter-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
 }
 
 .logcat-filter-combined {
@@ -3188,6 +3208,12 @@ textarea:disabled {
   gap: 6px;
 }
 
+.logcat-filter-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .logcat-filter-grid .panel-sub {
   padding: 4px 6px;
   gap: 4px;
@@ -3197,14 +3223,23 @@ textarea:disabled {
   font-size: 10.5px;
 }
 
-.logcat-filter-grid .panel-sub p.muted {
+.logcat-filter-grid .panel-sub p.muted,
+.logcat-filter-grid .panel-sub span.muted {
   margin: 0;
   font-size: 9.5px;
 }
 
+.logcat-filter-inline-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
 .logcat-filter-combined .form-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   gap: 4px;
   align-items: center;
 }
@@ -3212,6 +3247,12 @@ textarea:disabled {
 .logcat-filter-combined .form-row label {
   margin-bottom: 0;
   font-size: 10px;
+}
+
+.logcat-filter-combined .form-row select {
+  height: 28px;
+  font-size: 10.5px;
+  min-width: 0;
 }
 
 .logcat-filter-combined .form-row input {
@@ -3270,7 +3311,7 @@ textarea:disabled {
 }
 
 @media (max-width: 1000px) {
-  .logcat-filter-grid {
+  .logcat-filter-bar {
     grid-template-columns: 1fr;
   }
 
@@ -3497,6 +3538,10 @@ textarea:disabled {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
+.inspector-preview {
+  max-height: min(70vh, 720px);
+}
+
 .inspector-preview img {
   max-width: 100%;
   height: auto;
@@ -3567,7 +3612,8 @@ textarea:disabled {
 
 .ui-frame {
   border: none;
-  min-height: 360px;
+  min-height: 520px;
+  height: min(70vh, 720px);
   width: 100%;
   border-radius: 12px;
   background: var(--color-bg-panel);

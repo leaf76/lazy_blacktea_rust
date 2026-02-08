@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "sdcard");
         assert_eq!(parsed[0].path, "/sdcard");
-        assert_eq!(parsed[0].is_dir, false);
+        assert!(!parsed[0].is_dir);
     }
 
     #[test]

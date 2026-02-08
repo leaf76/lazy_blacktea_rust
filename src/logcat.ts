@@ -6,6 +6,7 @@ export type LogcatLevelsState = Record<LogcatLevel, boolean>;
 export type LogcatFilterState = {
   levels: LogcatLevelsState;
   activePatterns: string[];
+  excludePatterns?: string[];
   livePattern?: string;
   searchTerm?: string;
   searchCaseSensitive?: boolean;
@@ -102,11 +103,22 @@ export const buildSearchRegex = (
   }
 };
 
+export const escapeRegexLiteral = (term: string): string => {
+  return term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
 const matchesAnyPattern = (line: string, patterns: RegExp[]) => {
   if (patterns.length === 0) {
     return true;
   }
   return patterns.some((pattern) => pattern.test(line));
+};
+
+const matchesNoExcludePattern = (line: string, excludePatterns: RegExp[]) => {
+  if (excludePatterns.length === 0) {
+    return true;
+  }
+  return !excludePatterns.some((pattern) => pattern.test(line));
 };
 
 export const filterLogcatLines = (
@@ -133,9 +145,21 @@ export const filterLogcatLines = (
     })
     .filter((pattern): pattern is RegExp => Boolean(pattern));
 
-  const filteredByPatterns = filteredByLevel.filter((line) =>
-    matchesAnyPattern(line, patterns),
-  );
+  const excludePatterns = (state.excludePatterns ?? [])
+    .map((pattern) => pattern.trim())
+    .filter(Boolean)
+    .map((pattern) => {
+      try {
+        return new RegExp(pattern, "i");
+      } catch {
+        return null;
+      }
+    })
+    .filter((pattern): pattern is RegExp => Boolean(pattern));
+
+  const filteredByPatterns = filteredByLevel
+    .filter((line) => matchesAnyPattern(line, patterns))
+    .filter((line) => matchesNoExcludePattern(line, excludePatterns));
 
   const searchRegex = buildSearchRegex(state.searchTerm ?? "", {
     caseSensitive: state.searchCaseSensitive,
@@ -182,9 +206,21 @@ export const filterLogcatEntries = (
     })
     .filter((pattern): pattern is RegExp => Boolean(pattern));
 
-  const filteredByPatterns = filteredByLevel.filter((entry) =>
-    matchesAnyPattern(entry.text, patterns),
-  );
+  const excludePatterns = (state.excludePatterns ?? [])
+    .map((pattern) => pattern.trim())
+    .filter(Boolean)
+    .map((pattern) => {
+      try {
+        return new RegExp(pattern, "i");
+      } catch {
+        return null;
+      }
+    })
+    .filter((pattern): pattern is RegExp => Boolean(pattern));
+
+  const filteredByPatterns = filteredByLevel
+    .filter((entry) => matchesAnyPattern(entry.text, patterns))
+    .filter((entry) => matchesNoExcludePattern(entry.text, excludePatterns));
 
   const searchRegex = buildSearchRegex(state.searchTerm ?? "", {
     caseSensitive: state.searchCaseSensitive,

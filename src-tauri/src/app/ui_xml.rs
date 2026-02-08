@@ -1,47 +1,112 @@
-const CSS_SNIPPET: &str = "\
+use std::fmt::Write;
+
+const HTML_PREFIX: &str = "\
+<!doctype html>\n\
+<html>\n\
+<head>\n\
+<meta charset=\"utf-8\" />\n\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n\
 <style>\n\
+:root{\n\
+  --ui-bg: #f7f7fb;\n\
+  --ui-panel: #ffffff;\n\
+  --ui-border: #d3d7e0;\n\
+  --ui-text: #0f172a;\n\
+  --ui-muted: #475569;\n\
+  --ui-accent: #1d4ed8;\n\
+  --ui-ok: #166534;\n\
+  --ui-selected-bg: rgba(239, 68, 68, 0.12);\n\
+  --ui-selected-border: rgba(239, 68, 68, 0.55);\n\
+}\n\
+html, body { height: 100%; }\n\
 body{\n\
-  font-family: Arial, sans-serif;\n\
-  line-height: 1.6;\n\
-  color: #1f2a37;\n\
-  background-color: #f7f7fb;\n\
-  padding: 20px;\n\
+  margin: 0;\n\
+  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Helvetica, Arial, sans-serif;\n\
+  font-size: 12px;\n\
+  line-height: 1.35;\n\
+  color: var(--ui-text);\n\
+  background: var(--ui-bg);\n\
+  padding: 10px;\n\
 }\n\
 ul {\n\
   list-style-type: none;\n\
-  padding-left:0;\n\
+  padding-left: 0;\n\
+  margin: 0;\n\
 }\n\
-ul li {\n\
-  margin: 5px 0;\n\
+li {\n\
+  margin: 3px 0;\n\
   position: relative;\n\
-  padding: 6px 8px 6px 14px;\n\
-  border: 1px solid #d3d7e0;\n\
-  background-color:#ffffff;\n\
+}\n\
+li > .ui-row {\n\
+  display: flex;\n\
+  align-items: baseline;\n\
+  gap: 8px;\n\
+  padding: 4px 8px 4px 14px;\n\
+  border: 1px solid var(--ui-border);\n\
+  background: var(--ui-panel);\n\
   border-radius: 8px;\n\
 }\n\
-ul li ul {\n\
-  margin-left: 20px;\n\
-  padding-left: 20px;\n\
-  border-left:1px dashed #8892a6;\n\
+li > ul {\n\
+  margin-left: 14px;\n\
+  padding-left: 14px;\n\
+  border-left: 1px dashed rgba(136, 146, 166, 0.85);\n\
 }\n\
-ul li:before{\n\
+li:before{\n\
   content: '\\2192';\n\
   position: absolute;\n\
-  left:-10px;\n\
-  color: #8892a6;\n\
+  left: 0;\n\
+  top: 5px;\n\
+  color: rgba(136, 146, 166, 0.95);\n\
+  font-size: 11px;\n\
 }\n\
-.attributes {\n\
-  color: #1d4ed8;\n\
+.ui-tag {\n\
+  font-weight: 700;\n\
+}\n\
+.ui-class {\n\
+  font-weight: 600;\n\
+}\n\
+.ui-id {\n\
+  color: var(--ui-accent);\n\
+}\n\
+.ui-text {\n\
+  color: var(--ui-ok);\n\
+}\n\
+.ui-desc {\n\
+  color: var(--ui-muted);\n\
+}\n\
+.ui-bounds {\n\
+  color: var(--ui-muted);\n\
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;\n\
+  font-size: 11px;\n\
+}\n\
+.ui-attrs {\n\
+  color: var(--ui-accent);\n\
   font-style: italic;\n\
 }\n\
-.text {\n\
-  color: #166534;\n\
+li.is-selected:before {\n\
+  color: rgba(239, 68, 68, 0.95);\n\
 }\n\
-</style>\n";
+li.is-selected > .ui-row {\n\
+  border-color: var(--ui-selected-border);\n\
+  background: var(--ui-selected-bg);\n\
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.2) inset;\n\
+}\n\
+</style>\n\
+</head>\n\
+<body>\n";
+
+const HTML_SUFFIX: &str = "\n</body>\n</html>\n";
 
 #[derive(Default)]
 struct FrameState {
     has_children: bool,
+}
+
+fn find_attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    attrs
+        .iter()
+        .find(|(attr_name, _)| attr_name == name)
+        .map(|(_, value)| value.as_str())
 }
 
 fn escape_html(input: &str) -> String {
@@ -61,12 +126,13 @@ fn escape_html(input: &str) -> String {
 
 pub fn render_device_ui_html(xml: &str) -> Result<String, String> {
     let mut output = String::with_capacity(xml.len().saturating_mul(2));
-    output.push_str(CSS_SNIPPET);
+    output.push_str(HTML_PREFIX);
     output.push_str("<ul>");
 
     let bytes = xml.as_bytes();
     let mut index: usize = 0;
     let mut stack: Vec<FrameState> = Vec::new();
+    let mut node_index: usize = 0;
 
     while index < bytes.len() {
         match bytes[index] {
@@ -204,15 +270,72 @@ pub fn render_device_ui_html(xml: &str) -> Result<String, String> {
                                 output.push_str("<ul>");
                             }
                         }
-                        output.push_str("<li>");
-                        output.push_str("<strong>");
-                        output.push_str(&escape_html(tag_name));
-                        output.push_str("</strong>");
+                        let mapped_node_index =
+                            if tag_name == "node" && find_attr(&attrs, "bounds").is_some() {
+                                let current = node_index;
+                                node_index += 1;
+                                Some(current)
+                            } else {
+                                None
+                            };
 
-                        if !attrs.is_empty() {
-                            output.push_str(" <span class=\"attributes\">[");
-                            for (index, (name, value)) in attrs.iter().enumerate() {
-                                if index > 0 {
+                        output.push_str("<li");
+                        if let Some(ui_index) = mapped_node_index {
+                            let _ = write!(
+                                output,
+                                " id=\"ui-node-{ui_index}\" data-ui-node-index=\"{ui_index}\""
+                            );
+                        }
+                        output.push('>');
+                        output.push_str("<div class=\"ui-row\">");
+                        output.push_str("<span class=\"ui-tag\">");
+                        output.push_str(&escape_html(tag_name));
+                        output.push_str("</span>");
+
+                        if tag_name == "node" {
+                            if let Some(class_name) = find_attr(&attrs, "class") {
+                                if !class_name.is_empty() {
+                                    output.push_str(" <span class=\"ui-class\">");
+                                    output.push_str(&escape_html(class_name));
+                                    output.push_str("</span>");
+                                }
+                            }
+
+                            if let Some(resource_id) = find_attr(&attrs, "resource-id") {
+                                if !resource_id.is_empty() {
+                                    output.push_str(" <span class=\"ui-id\">#");
+                                    output.push_str(&escape_html(resource_id));
+                                    output.push_str("</span>");
+                                }
+                            }
+
+                            if let Some(text) = find_attr(&attrs, "text") {
+                                if !text.is_empty() {
+                                    output.push_str(" <span class=\"ui-text\">\"");
+                                    output.push_str(&escape_html(text));
+                                    output.push_str("\"</span>");
+                                }
+                            }
+
+                            if let Some(content_desc) = find_attr(&attrs, "content-desc") {
+                                if !content_desc.is_empty() {
+                                    output.push_str(" <span class=\"ui-desc\">@");
+                                    output.push_str(&escape_html(content_desc));
+                                    output.push_str("</span>");
+                                }
+                            }
+
+                            if let Some(bounds) = find_attr(&attrs, "bounds") {
+                                if !bounds.is_empty() {
+                                    output.push_str(" <span class=\"ui-bounds\">");
+                                    output.push_str(&escape_html(bounds));
+                                    output.push_str("</span>");
+                                }
+                            }
+                        } else if !attrs.is_empty() {
+                            output.push_str(" <span class=\"ui-attrs\">[");
+                            for (attr_index, (name, value)) in attrs.iter().enumerate() {
+                                if attr_index > 0 {
                                     output.push_str(", ");
                                 }
                                 output.push_str(&escape_html(name));
@@ -222,6 +345,8 @@ pub fn render_device_ui_html(xml: &str) -> Result<String, String> {
                             }
                             output.push_str("]</span>");
                         }
+
+                        output.push_str("</div>");
 
                         if self_closing {
                             output.push_str("</li>");
@@ -245,6 +370,7 @@ pub fn render_device_ui_html(xml: &str) -> Result<String, String> {
     }
 
     output.push_str("</ul>");
+    output.push_str(HTML_SUFFIX);
     Ok(output)
 }
 

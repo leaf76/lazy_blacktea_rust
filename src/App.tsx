@@ -99,6 +99,14 @@ import {
   type LogcatLevelsState,
   type LogcatSourceMode,
 } from "./logcat";
+import { LOG_LEVELS } from "./logLevels";
+import {
+  addLogTextChip,
+  buildLogTextFilters,
+  removeLogTextChip,
+  type LogTextChip,
+  type LogTextChipKind,
+} from "./logTextFilters";
 import {
   buildSparklinePoints,
   formatBps,
@@ -134,13 +142,6 @@ import {
   selectSerialsForGroup,
 } from "./deviceUtils";
 import { getAutoRefreshIntervalMs } from "./deviceAutoRefresh";
-import {
-  addBugreportLogTextChip,
-  buildBugreportLogTextFilters,
-  removeBugreportLogTextChip,
-  type BugreportLogTextChip,
-  type BugreportLogTextChipKind,
-} from "./bugreportLogTextFilters";
 import { bugreportLogLineMatches, buildBugreportLogFindPattern } from "./bugreportLogFind";
 import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
 import {
@@ -184,6 +185,54 @@ type DashboardActionId = QuickActionId | "apk-installer";
 
 const TERMINAL_MAX_LINES = 500;
 const APK_INSTALLER_STORAGE_KEY = "lazy_blacktea_apk_installer_v1";
+const SHARED_LOG_FILTERS_STORAGE_KEY = "lazy_blacktea_shared_log_filters_v1";
+
+type StoredSharedLogFiltersV1 = {
+  levels?: Record<string, unknown>;
+  text_chips?: unknown;
+};
+
+function loadSharedLogFiltersFromStorage(): { levels: LogcatLevelsState; textChips: LogTextChip[] } {
+  const fallback = { levels: { ...defaultLogcatLevels }, textChips: [] };
+  try {
+    const raw = localStorage.getItem(SHARED_LOG_FILTERS_STORAGE_KEY);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = JSON.parse(raw) as StoredSharedLogFiltersV1;
+    if (!parsed || typeof parsed !== "object") {
+      return fallback;
+    }
+    const levels: LogcatLevelsState = { ...defaultLogcatLevels };
+    if (parsed.levels && typeof parsed.levels === "object") {
+      for (const level of LOG_LEVELS) {
+        const value = parsed.levels[level];
+        if (typeof value === "boolean") {
+          levels[level] = value;
+        }
+      }
+    }
+
+    let textChips: LogTextChip[] = [];
+    if (Array.isArray(parsed.text_chips)) {
+      for (const item of parsed.text_chips.slice(0, 50)) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        const kind = (item as { kind?: unknown }).kind;
+        const value = (item as { value?: unknown }).value;
+        if ((kind === "include" || kind === "exclude") && typeof value === "string") {
+          textChips = addLogTextChip(textChips, kind, value);
+        }
+      }
+    }
+
+    return { levels, textChips };
+  } catch (error) {
+    console.warn("Failed to load shared log filters from storage.", error);
+    return fallback;
+  }
+}
 
 const appendTerminalBuffer = (
   lines: string[],
@@ -796,6 +845,13 @@ const DeviceTerminalPanel = memo(function DeviceTerminalPanel({
 });
 
 function App() {
+  type LogcatFilterPreset = {
+    name: string;
+    include: string[];
+    exclude: string[];
+    levels?: LogcatLevelsState;
+  };
+
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
   type DeviceSelectionMode = "single" | "multi";
@@ -826,11 +882,10 @@ function App() {
   const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
   const [logcatSourceValue, setLogcatSourceValue] = useState("");
-  const [logcatLevels, setLogcatLevels] = useState<LogcatLevelsState>(defaultLogcatLevels);
+  const [logLevels, setLogLevels] = useState<LogcatLevelsState>(() => loadSharedLogFiltersFromStorage().levels);
   const [logcatLiveFilter, setLogcatLiveFilter] = useState("");
-  const [logcatActiveFilters, setLogcatActiveFilters] = useState<string[]>([]);
   const [logcatPresetName, setLogcatPresetName] = useState("");
-  const [logcatPresets, setLogcatPresets] = useState<{ name: string; patterns: string[] }[]>([]);
+  const [logcatPresets, setLogcatPresets] = useState<LogcatFilterPreset[]>([]);
   const [logcatPresetSelected, setLogcatPresetSelected] = useState("");
   const [logcatFiltersExpanded, setLogcatFiltersExpanded] = useState(false);
   const [logcatSearchTerm, setLogcatSearchTerm] = useState("");
@@ -842,6 +897,10 @@ function App() {
   const [logcatActiveFilterSummary, setLogcatActiveFilterSummary] = useState("");
   const [logcatLastExport, setLogcatLastExport] = useState("");
   const [logcatAdvancedOpen, setLogcatAdvancedOpen] = useState(false);
+  const [logcatTextKind, setLogcatTextKind] = useState<LogTextChipKind>("include");
+  const [sharedLogTextChips, setSharedLogTextChips] = useState<LogTextChip[]>(
+    () => loadSharedLogFiltersFromStorage().textChips,
+  );
   const [perfBySerial, setPerfBySerial] = useState<Record<string, PerfMonitorState>>({});
   const perfBySerialRef = useRef<Record<string, PerfMonitorState>>({});
   const [filesViewMode, setFilesViewMode] = useState<"list" | "grid">(() => {
@@ -856,6 +915,26 @@ function App() {
   useEffect(() => {
     localStorage.setItem("lazy_blacktea_files_view_mode_v1", filesViewMode);
   }, [filesViewMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SHARED_LOG_FILTERS_STORAGE_KEY,
+        JSON.stringify({
+          levels: LOG_LEVELS.reduce<Record<string, boolean>>((acc, level) => {
+            acc[level] = logLevels[level];
+            return acc;
+          }, {}),
+          text_chips: sharedLogTextChips.slice(0, 50).map((chip) => ({
+            kind: chip.kind,
+            value: chip.value,
+          })),
+        }),
+      );
+    } catch (error) {
+      console.warn("Failed to persist shared log filters to storage.", error);
+    }
+  }, [logLevels, sharedLogTextChips]);
 
   const [filesPath, setFilesPath] = useState("/sdcard");
   const [files, setFiles] = useState<DeviceFileEntry[]>([]);
@@ -887,8 +966,29 @@ function App() {
   const [uiInspectorSearch, setUiInspectorSearch] = useState("");
   const [filteredUiXml, setFilteredUiXml] = useState("");
   const [uiExportResult, setUiExportResult] = useState("");
-  const [uiZoom, setUiZoom] = useState(1);
+  const [uiZoom, setUiZoom] = useState(() => {
+    try {
+      const raw = localStorage.getItem("lazy_blacktea_ui_inspector_zoom_v2");
+      const parsed = raw ? Number(raw) : Number.NaN;
+      if (Number.isFinite(parsed)) {
+        return Math.max(0.5, Math.min(2, parsed));
+      }
+    } catch {
+      // Fall back to default zoom.
+    }
+    return 0.5;
+  });
+  const [uiHierarchyFrameToken, setUiHierarchyFrameToken] = useState(0);
   const [uiBoundsEnabled, setUiBoundsEnabled] = useState(true);
+  const [uiAutoSyncEnabled, setUiAutoSyncEnabled] = useState(false);
+  const [uiAutoSyncIntervalMs, setUiAutoSyncIntervalMs] = useState(1000);
+  const [uiAutoSyncError, setUiAutoSyncError] = useState("");
+  const [uiAutoSyncLastAt, setUiAutoSyncLastAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem("lazy_blacktea_ui_inspector_zoom_v2", String(uiZoom));
+  }, [uiZoom]);
+
   const [uiScreenshotSize, setUiScreenshotSize] = useState({ width: 0, height: 0 });
   const [toasts, setToasts] = useState<Toast[]>([]);
   const tauriUnavailableToastShownRef = useRef(false);
@@ -950,12 +1050,11 @@ function App() {
   const [bugreportLogBusy, setBugreportLogBusy] = useState(false);
   const [bugreportLogError, setBugreportLogError] = useState<string | null>(null);
   const [bugreportLogLoadAllRunning, setBugreportLogLoadAllRunning] = useState(false);
-  const [bugreportLogLevels, setBugreportLogLevels] = useState<string[]>(["V", "D", "I", "W", "E", "F"]);
   const [bugreportLogTag, setBugreportLogTag] = useState("");
   const [bugreportLogPid, setBugreportLogPid] = useState("");
-  const [bugreportLogTextDraft, setBugreportLogTextDraft] = useState("");
-  const [bugreportLogTextKind, setBugreportLogTextKind] = useState<BugreportLogTextChipKind>("include");
-  const [bugreportLogTextChips, setBugreportLogTextChips] = useState<BugreportLogTextChip[]>([]);
+  const [bugreportLogLiveFilter, setBugreportLogLiveFilter] = useState("");
+  const [bugreportLogFilterKind, setBugreportLogFilterKind] = useState<LogTextChipKind>("include");
+  const [bugreportLogFiltersExpanded, setBugreportLogFiltersExpanded] = useState(false);
   const [bugreportLogStart, setBugreportLogStart] = useState("");
   const [bugreportLogEnd, setBugreportLogEnd] = useState("");
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
@@ -972,6 +1071,8 @@ function App() {
   const logcatOutputRef = useRef<HTMLDivElement>(null);
   const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
   const uiBoundsCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const uiHierarchyFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const uiHierarchySelectedIndexRef = useRef<number | null>(null);
   const lastSelectedIndexRef = useRef<number | null>(null);
   const devicePopoverRef = useRef<HTMLDivElement | null>(null);
   const devicePopoverTriggerRef = useRef<HTMLDivElement | null>(null);
@@ -1017,6 +1118,7 @@ function App() {
   const navigate = useNavigate();
   const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
   const isPerformanceView = location.pathname === "/performance";
+  const isUiInspectorView = location.pathname === "/ui-inspector";
   const activeSerial = selectedSerials[0];
   const activeDevice = useMemo(
     () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
@@ -1137,31 +1239,76 @@ function App() {
   }, [latestBugreportEntries, bugreportResult, activeSerial]);
   const bugreportLogFilters = useMemo<BugreportLogFilters>(() => {
     const pidValue = Number.parseInt(bugreportLogPid.trim(), 10);
-    const textFilters = buildBugreportLogTextFilters(bugreportLogTextChips);
+    const enabledLevels = LOG_LEVELS.filter((level) => logLevels[level]);
+    const sharedFilters = buildLogTextFilters(sharedLogTextChips);
+    const liveInclude = bugreportLogFilterKind === "include" ? bugreportLogLiveFilter : "";
+    const liveExclude = bugreportLogFilterKind === "exclude" ? bugreportLogLiveFilter : "";
+
+    const normalizeRegexPatterns = (patterns: string[]) =>
+      patterns
+        .map((pattern) => pattern.trim())
+        .filter(Boolean)
+        .filter((pattern) => {
+          try {
+            // Bugreport backend regex filtering should match Logcat's default case-insensitive behavior.
+            // eslint-disable-next-line no-new
+            new RegExp(pattern, "i");
+            return true;
+          } catch {
+            return false;
+          }
+        });
+
+    const regex_terms = normalizeRegexPatterns([...sharedFilters.text_terms, liveInclude]);
+    const regex_excludes = normalizeRegexPatterns([...sharedFilters.text_excludes, liveExclude]);
     return {
-      levels: bugreportLogLevels,
+      levels: enabledLevels,
       tag: bugreportLogTag.trim() || null,
       pid: Number.isNaN(pidValue) ? null : pidValue,
-      text_terms: textFilters.text_terms,
-      text_excludes: textFilters.text_excludes,
+      text_terms: [],
+      text_excludes: [],
       text: null,
+      regex_terms,
+      regex_excludes,
       start_ts: normalizeBugreportTimestamp(bugreportLogStart),
       end_ts: normalizeBugreportTimestamp(bugreportLogEnd),
     };
-  }, [bugreportLogLevels, bugreportLogPid, bugreportLogTag, bugreportLogTextChips, bugreportLogStart, bugreportLogEnd]);
+  }, [
+    bugreportLogPid,
+    bugreportLogTag,
+    bugreportLogStart,
+    bugreportLogEnd,
+    bugreportLogLiveFilter,
+    bugreportLogFilterKind,
+    logLevels,
+    sharedLogTextChips,
+  ]);
   const bugreportLogSearchPattern = useMemo(
     () => {
-      const terms = bugreportLogTextChips
-        .filter((chip) => chip.kind === "include")
-        .map((chip) => chip.value.trim())
-        .filter(Boolean);
-      if (terms.length === 0) {
+      const liveInclude = bugreportLogFilterKind === "include" ? bugreportLogLiveFilter.trim() : "";
+      const patterns = [
+        ...sharedLogTextChips
+          .filter((chip) => chip.kind === "include")
+          .map((chip) => chip.value.trim())
+          .filter(Boolean),
+        liveInclude,
+      ].filter(Boolean);
+      const valid = patterns.filter((pattern) => {
+        try {
+          // eslint-disable-next-line no-new
+          new RegExp(pattern, "i");
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (valid.length === 0) {
         return null;
       }
-      const escaped = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-      return buildSearchRegex(escaped, { caseSensitive: false, regex: true });
+      const combined = valid.map((pattern) => `(?:${pattern})`).join("|");
+      return buildSearchRegex(combined, { caseSensitive: false, regex: true });
     },
-    [bugreportLogTextChips],
+    [bugreportLogFilterKind, bugreportLogLiveFilter, sharedLogTextChips],
   );
   const bugreportLogOutputPaths = useMemo(
     () => new Set(bugreportAnalysisTargets.map((item) => item.output_path)),
@@ -1435,22 +1582,34 @@ function App() {
     [logcatSearchTerm, logcatSearchCaseSensitive, logcatSearchRegex],
   );
 
+  const sharedLogRegexFilters = useMemo(
+    () => buildLogTextFilters(sharedLogTextChips),
+    [sharedLogTextChips],
+  );
+
   const logcatFiltered = useMemo(
-    () =>
-      filterLogcatEntries(rawLogcatLines, {
-        levels: logcatLevels,
-        activePatterns: logcatActiveFilters,
-        livePattern: logcatLiveFilter,
+    () => {
+      const liveInclude = logcatTextKind === "include" ? logcatLiveFilter : "";
+      const liveExclude = logcatTextKind === "exclude" ? logcatLiveFilter : "";
+
+      return filterLogcatEntries(rawLogcatLines, {
+        levels: logLevels,
+        activePatterns: sharedLogRegexFilters.text_terms,
+        excludePatterns: [...sharedLogRegexFilters.text_excludes, liveExclude].filter(Boolean),
+        livePattern: liveInclude,
         searchTerm: logcatSearchTerm,
         searchCaseSensitive: logcatSearchCaseSensitive,
         searchRegex: logcatSearchRegex,
         searchOnly: logcatSearchOnly,
-      }),
+      });
+    },
     [
       rawLogcatLines,
-      logcatLevels,
-      logcatActiveFilters,
+      logLevels,
       logcatLiveFilter,
+      logcatTextKind,
+      sharedLogRegexFilters.text_terms,
+      sharedLogRegexFilters.text_excludes,
       logcatSearchTerm,
       logcatSearchCaseSensitive,
       logcatSearchRegex,
@@ -1488,6 +1647,13 @@ function App() {
   const uiScreenshotSrc = uiScreenshotDataUrl;
   const uiNodesParse = useMemo(() => parseUiNodes(uiXml), [uiXml]);
   const uiFilterTokenRef = useRef(0);
+  const uiAutoSyncTokenRef = useRef(0);
+
+  useEffect(() => {
+    if (!isUiInspectorView && uiAutoSyncEnabled) {
+      setUiAutoSyncEnabled(false);
+    }
+  }, [isUiInspectorView, uiAutoSyncEnabled]);
 
   useEffect(() => {
     const token = uiFilterTokenRef.current + 1;
@@ -1517,6 +1683,60 @@ function App() {
     }
   }, [uiScreenshotSrc]);
 
+  useEffect(() => {
+    if (!uiAutoSyncEnabled) {
+      return;
+    }
+    if (!isUiInspectorView) {
+      return;
+    }
+    if (selectedSerials.length !== 1 || !activeSerial) {
+      setUiAutoSyncEnabled(false);
+      return;
+    }
+
+    const serial = activeSerial;
+    const intervalMs = Math.max(250, uiAutoSyncIntervalMs);
+    const token = uiAutoSyncTokenRef.current + 1;
+    uiAutoSyncTokenRef.current = token;
+    let stopped = false;
+
+    const runOnce = async () => {
+      try {
+        const response = await captureUiHierarchy(serial);
+        if (stopped || uiAutoSyncTokenRef.current !== token) {
+          return;
+        }
+        setUiHtml(response.data.html);
+        setUiXml(response.data.xml);
+        setUiScreenshotDataUrl(response.data.screenshot_data_url ?? "");
+        setUiScreenshotError(response.data.screenshot_error ?? "");
+        setUiAutoSyncError("");
+        setUiAutoSyncLastAt(Date.now());
+      } catch (error) {
+        if (stopped || uiAutoSyncTokenRef.current !== token) {
+          return;
+        }
+        setUiAutoSyncError(formatError(error));
+      }
+    };
+
+    void (async () => {
+      while (!stopped && uiAutoSyncTokenRef.current === token) {
+        const startedAt = Date.now();
+        await runOnce();
+        const elapsed = Date.now() - startedAt;
+        const delay = Math.max(200, intervalMs - elapsed);
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
+      }
+    })();
+
+    return () => {
+      stopped = true;
+      uiAutoSyncTokenRef.current = token + 1;
+    };
+  }, [activeSerial, isUiInspectorView, selectedSerials.length, uiAutoSyncEnabled, uiAutoSyncIntervalMs]);
+
   const [uiHoveredNodeIndex, setUiHoveredNodeIndex] = useState<number>(-1);
   const [uiSelectedNodeIndex, setUiSelectedNodeIndex] = useState<number>(-1);
   const uiHoverRafRef = useRef<number | null>(null);
@@ -1527,8 +1747,45 @@ function App() {
 
   useEffect(() => {
     setUiHoveredNodeIndex(-1);
-    setUiSelectedNodeIndex(-1);
-  }, [uiXml]);
+    if (!uiAutoSyncEnabled) {
+      setUiSelectedNodeIndex(-1);
+      return;
+    }
+    setUiSelectedNodeIndex((prev) => {
+      if (prev < 0) {
+        return prev;
+      }
+      return prev < uiNodesParse.nodes.length ? prev : -1;
+    });
+  }, [uiAutoSyncEnabled, uiNodesParse.nodes.length, uiXml]);
+
+  useEffect(() => {
+    if (uiInspectorTab !== "hierarchy") {
+      return;
+    }
+    const doc = uiHierarchyFrameRef.current?.contentDocument;
+    if (!doc) {
+      return;
+    }
+
+    const prevSelectedIndex = uiHierarchySelectedIndexRef.current;
+    if (prevSelectedIndex != null && prevSelectedIndex !== uiSelectedNodeIndex) {
+      doc.getElementById(`ui-node-${prevSelectedIndex}`)?.classList.remove("is-selected");
+    }
+
+    if (uiSelectedNodeIndex < 0) {
+      uiHierarchySelectedIndexRef.current = null;
+      return;
+    }
+
+    uiHierarchySelectedIndexRef.current = uiSelectedNodeIndex;
+    const el = doc.getElementById(`ui-node-${uiSelectedNodeIndex}`);
+    if (!el) {
+      return;
+    }
+    el.classList.add("is-selected");
+    el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  }, [uiInspectorTab, uiSelectedNodeIndex, uiHierarchyFrameToken]);
 
   useEffect(() => {
     const canvas = uiBoundsCanvasRef.current;
@@ -2106,9 +2363,64 @@ function App() {
       return;
     }
     try {
-      const parsed = JSON.parse(stored) as { name: string; patterns: string[] }[];
+      const parsed = JSON.parse(stored) as unknown;
       if (Array.isArray(parsed)) {
-        setLogcatPresets(parsed.filter((preset) => preset.name && preset.patterns));
+        const asStringArray = (value: unknown) => {
+          if (!Array.isArray(value)) {
+            return [];
+          }
+          return value
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim())
+            .filter(Boolean);
+        };
+
+        const nextPresets: LogcatFilterPreset[] = [];
+        parsed.forEach((item) => {
+          if (!item || typeof item !== "object") {
+            return;
+          }
+          const record = item as Record<string, unknown>;
+          const name = typeof record.name === "string" ? record.name.trim() : "";
+          if (!name) {
+            return;
+          }
+
+          let include = asStringArray(record.include).slice(0, 50);
+          let exclude = asStringArray(record.exclude).slice(0, 50);
+
+          const legacyPatterns = asStringArray(record.patterns).slice(0, 50);
+          if (include.length === 0 && exclude.length === 0 && legacyPatterns.length > 0) {
+            include = legacyPatterns;
+          }
+
+          let levels: LogcatLevelsState | undefined;
+          if (record.levels && typeof record.levels === "object") {
+            const levelsRecord = record.levels as Record<string, unknown>;
+            const parsedLevels: Partial<LogcatLevelsState> = {};
+            let ok = true;
+            LOG_LEVELS.forEach((level) => {
+              const value = levelsRecord[level];
+              if (typeof value !== "boolean") {
+                ok = false;
+              } else {
+                parsedLevels[level] = value;
+              }
+            });
+            if (ok) {
+              levels = parsedLevels as LogcatLevelsState;
+            }
+          }
+
+          nextPresets.push({
+            name,
+            include,
+            exclude,
+            ...(levels ? { levels } : {}),
+          });
+        });
+
+        setLogcatPresets(nextPresets);
       }
     } catch {
       setLogcatPresets([]);
@@ -3206,21 +3518,62 @@ function App() {
 	    }
 	  };
 
-  const addActiveLogcatFilter = () => {
-    const value = logcatLiveFilter.trim();
-    if (!value) {
-      return;
+  const normalizeSharedLogFilterInput = (
+    rawValue: string,
+    defaultKind: LogTextChipKind,
+  ): { kind: LogTextChipKind; value: string } | null => {
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      return null;
     }
-    setLogcatActiveFilters((prev) => Array.from(new Set([...prev, value])));
-    setLogcatLiveFilter("");
+    let kind: LogTextChipKind = defaultKind;
+    let value = trimmed;
+    if (trimmed.startsWith("-") || trimmed.startsWith("!")) {
+      kind = "exclude";
+      value = trimmed.slice(1).trim();
+    } else if (trimmed.startsWith("+")) {
+      kind = "include";
+      value = trimmed.slice(1).trim();
+    }
+    if (!value) {
+      return null;
+    }
+    return { kind, value };
   };
 
-  const removeActiveLogcatFilter = (pattern: string) => {
-    setLogcatActiveFilters((prev) => prev.filter((item) => item !== pattern));
+  const addSharedLogFilter = (defaultKind: LogTextChipKind, rawValue: string) => {
+    const parsed = normalizeSharedLogFilterInput(rawValue, defaultKind);
+    if (!parsed) {
+      return false;
+    }
+    const { kind, value } = parsed;
+    try {
+      // Validate user input early; invalid patterns would silently do nothing otherwise.
+      // This keeps presets and bugreport regex sync predictable.
+      // eslint-disable-next-line no-new
+      new RegExp(value, "i");
+    } catch {
+      pushToast("Invalid regex pattern.", "error");
+      return false;
+    }
+    setSharedLogTextChips((prev) => addLogTextChip(prev, kind, value));
+    return true;
   };
 
-  const clearActiveLogcatFilters = () => {
-    setLogcatActiveFilters([]);
+  const clearSharedLogFilters = () => {
+    setSharedLogTextChips([]);
+  };
+
+  const addLogcatLiveFilter = () => {
+    if (addSharedLogFilter(logcatTextKind, logcatLiveFilter)) {
+      setLogcatLiveFilter("");
+    }
+  };
+
+  const addBugreportLogLiveFilter = () => {
+    if (addSharedLogFilter(bugreportLogFilterKind, bugreportLogLiveFilter)) {
+      setBugreportLogLiveFilter("");
+    }
   };
 
   const saveLogcatPreset = () => {
@@ -3229,14 +3582,32 @@ function App() {
       pushToast("Preset name is required.", "error");
       return;
     }
-    if (logcatActiveFilters.length === 0) {
-      pushToast("Add at least one active filter.", "error");
+
+    const hasAnyFilters = sharedLogTextChips.length > 0;
+    const hasLevelOverrides = LOG_LEVELS.some((level) => !logLevels[level]);
+    if (!hasAnyFilters && !hasLevelOverrides) {
+      pushToast("Preset must include at least one filter or a level override.", "error");
       return;
     }
-    setLogcatPresets((prev) => [
-      ...prev.filter((preset) => preset.name !== name),
-      { name, patterns: logcatActiveFilters },
-    ]);
+
+    const { text_terms: include, text_excludes: exclude } = buildLogTextFilters(sharedLogTextChips);
+    const levelsSnapshot: LogcatLevelsState = {
+      V: logLevels.V,
+      D: logLevels.D,
+      I: logLevels.I,
+      W: logLevels.W,
+      E: logLevels.E,
+      F: logLevels.F,
+    };
+
+    const nextPreset: LogcatFilterPreset = {
+      name,
+      include,
+      exclude,
+      levels: levelsSnapshot,
+    };
+
+    setLogcatPresets((prev) => [...prev.filter((preset) => preset.name !== name), nextPreset]);
     setLogcatPresetName("");
     setLogcatPresetSelected(name);
     pushToast("Preset saved.", "info");
@@ -3247,7 +3618,36 @@ function App() {
     if (!preset) {
       return;
     }
-    setLogcatActiveFilters(preset.patterns);
+
+    const invalidPatterns: string[] = [];
+    let nextChips: LogTextChip[] = [];
+    preset.include.forEach((pattern) => {
+      try {
+        // eslint-disable-next-line no-new
+        new RegExp(pattern, "i");
+        nextChips = addLogTextChip(nextChips, "include", pattern);
+      } catch {
+        invalidPatterns.push(pattern);
+      }
+    });
+    preset.exclude.forEach((pattern) => {
+      try {
+        // eslint-disable-next-line no-new
+        new RegExp(pattern, "i");
+        nextChips = addLogTextChip(nextChips, "exclude", pattern);
+      } catch {
+        invalidPatterns.push(pattern);
+      }
+    });
+
+    if (invalidPatterns.length > 0) {
+      pushToast("Some preset patterns were invalid and were ignored.", "error");
+    }
+
+    setSharedLogTextChips(nextChips);
+    if (preset.levels) {
+      setLogLevels(preset.levels);
+    }
   };
 
   const deleteLogcatPreset = (name: string) => {
@@ -4517,6 +4917,17 @@ function App() {
     }
   };
 
+  const handleUiAutoSyncToggle = () => {
+    const serial = ensureSingleSelection("UI inspector auto sync");
+    if (!serial) {
+      setUiAutoSyncEnabled(false);
+      return;
+    }
+    setUiAutoSyncError("");
+    setUiAutoSyncLastAt(null);
+    setUiAutoSyncEnabled((prev) => !prev);
+  };
+
   const handleUiExport = async () => {
     const serial = ensureSingleSelection("UI inspector export");
     if (!serial) {
@@ -5175,24 +5586,6 @@ function App() {
     }
   };
 
-  const handleBugreportLogAddTextChip = (rawValue: string) => {
-    const trimmed = rawValue.trim();
-    if (!trimmed) {
-      return;
-    }
-    let kind: BugreportLogTextChipKind = bugreportLogTextKind;
-    let value = trimmed;
-    if (trimmed.startsWith("-") || trimmed.startsWith("!")) {
-      kind = "exclude";
-      value = trimmed.slice(1).trim();
-    } else if (trimmed.startsWith("+")) {
-      kind = "include";
-      value = trimmed.slice(1).trim();
-    }
-    setBugreportLogTextChips((prev) => addBugreportLogTextChip(prev, kind, value));
-    setBugreportLogTextDraft("");
-  };
-
   const runBugreportLogQuery = async (reportId: string, offset: number, append: boolean) => {
     const requestId = bugreportLogRequestRef.current + 1;
     bugreportLogRequestRef.current = requestId;
@@ -5264,6 +5657,9 @@ function App() {
 
   useEffect(() => {
     if (!bugreportLogSummary) {
+      return;
+    }
+    if (!isBugreportLogViewer) {
       return;
     }
     if (bugreportLogLoadAllRunningRef.current) {
@@ -8125,13 +8521,13 @@ function App() {
                         <div className="panel-sub">
                           <h3>Levels</h3>
                           <div className="toggle-group">
-                            {(["V", "D", "I", "W", "E", "F"] as const).map((level) => (
+                            {LOG_LEVELS.map((level) => (
                               <label key={level} className="toggle">
                                 <input
                                   type="checkbox"
-                                  checked={logcatLevels[level]}
+                                  checked={logLevels[level]}
                                   onChange={(event) =>
-                                    setLogcatLevels((prev) => ({
+                                    setLogLevels((prev) => ({
                                       ...prev,
                                       [level]: event.target.checked,
                                     }))
@@ -8174,111 +8570,157 @@ function App() {
                       </div>
                     )}
                     <div className="logcat-filter-grid">
-                      <div className="panel-sub logcat-filter-combined">
-                        <div className="logcat-filter-split">
-                          <div className="logcat-filter-section">
-                            <h3 title="Use regex to refine the stream.">Live Filter</h3>
-                            <div className="form-row">
-                              <label>Pattern</label>
-                              <input
-                                value={logcatLiveFilter}
-                                onChange={(event) => setLogcatLiveFilter(event.target.value)}
-                                placeholder="e.g. ActivityManager|AndroidRuntime"
-                              />
-                              <button type="button" onClick={addActiveLogcatFilter} disabled={busy}>
-                                Add
-                              </button>
+                      <div className="panel-sub logcat-filter-bar">
+                        <div className="logcat-filter-combined">
+                          <div className="logcat-filter-split">
+                            <div className="logcat-filter-section">
+                              <h3 title="Use regex to refine the stream. Shared with Bugreport Log Viewer.">
+                                Live Filter
+                              </h3>
+                              <div className="form-row">
+                                <label>Pattern</label>
+                                <select
+                                  aria-label="Filter mode"
+                                  value={logcatTextKind}
+                                  onChange={(event) => setLogcatTextKind(event.target.value as LogTextChipKind)}
+                                  disabled={busy}
+                                  title="Prefix with - or ! to exclude, + to include."
+                                >
+                                  <option value="include">Include</option>
+                                  <option value="exclude">Exclude</option>
+                                </select>
+                                <input
+                                  value={logcatLiveFilter}
+                                  onChange={(event) => setLogcatLiveFilter(event.target.value)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      addLogcatLiveFilter();
+                                    }
+                                  }}
+                                  placeholder="e.g. ActivityManager|AndroidRuntime or -DEBUG"
+                                  title="Regex patterns are case-insensitive."
+                                />
+                                <button
+                                  type="button"
+                                  onClick={addLogcatLiveFilter}
+                                  disabled={busy || !logcatLiveFilter.trim()}
+                                >
+                                  Add
+                                </button>
+                              </div>
                             </div>
-                          </div>
-                          <div className="logcat-filter-section">
-                            <div className="logcat-filter-header">
-                              <h3 title="Applied in real time.">Active Filters</h3>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => setLogcatFiltersExpanded((prev) => !prev)}
-                              >
-                                {logcatFiltersExpanded ? "Hide" : "Expand"}
-                              </button>
-                            </div>
-                            <p className="muted">
-                              {logcatActiveFilters.length ? `${logcatActiveFilters.length} filters` : "No filters"}
-                            </p>
-                            {logcatFiltersExpanded && (
-                              <>
-                                {logcatActiveFilters.length === 0 ? (
-                                  <p className="muted">No active filters</p>
-                                ) : (
-                                  <div className="filter-chip-list">
-                                    {logcatActiveFilters.map((pattern) => (
-                                      <button
-                                        key={pattern}
-                                        type="button"
-                                        className="filter-chip"
-                                        onClick={() => removeActiveLogcatFilter(pattern)}
-                                      >
-                                        {pattern}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                                <div className="button-row compact">
-                                  <button type="button" className="ghost" onClick={clearActiveLogcatFilters}>
-                                    Clear
+                            <div className="logcat-filter-section">
+                              <div className="logcat-filter-header">
+                                <h3 title="Applied in real time.">Active Filters</h3>
+                                <div className="logcat-filter-header-actions">
+                                  <span className="muted">
+                                    {sharedLogTextChips.length
+                                      ? `${sharedLogTextChips.length} filters`
+                                      : "No filters"}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="ghost"
+                                    onClick={() => setLogcatFiltersExpanded((prev) => !prev)}
+                                  >
+                                    {logcatFiltersExpanded ? "Hide" : "Expand"}
                                   </button>
                                 </div>
-                              </>
-                            )}
+                              </div>
+                              {logcatFiltersExpanded && (
+                                <>
+                                  {sharedLogTextChips.length === 0 ? (
+                                    <p className="muted">No active filters</p>
+                                  ) : (
+                                    <div className="bugreport-log-chip-list" role="list">
+                                      {sharedLogTextChips.map((chip) => (
+                                        <span
+                                          key={chip.id}
+                                          className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
+                                          role="listitem"
+                                        >
+                                          <span className="bugreport-log-chip-label" title={chip.value}>
+                                            {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
+                                          </span>
+                                          <button
+                                            className="bugreport-log-chip-remove"
+                                            aria-label={`Remove ${chip.kind === "exclude" ? "NOT " : ""}${chip.value}`}
+                                            onClick={() =>
+                                              setSharedLogTextChips((prev) => removeLogTextChip(prev, chip.id))
+                                            }
+                                            disabled={busy}
+                                          >
+                                            ×
+                                          </button>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <div className="button-row compact">
+                                    <button
+                                      type="button"
+                                      className="ghost"
+                                      onClick={clearSharedLogFilters}
+                                      disabled={busy || sharedLogTextChips.length === 0}
+                                    >
+                                      Clear
+                                    </button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      <div className="panel-sub logcat-presets">
-                        <h3>Presets</h3>
-                        <div className="logcat-preset-row single">
-                          <label>Preset</label>
-                          <select
-                            value={logcatPresetSelected}
-                            onChange={(event) => setLogcatPresetSelected(event.target.value)}
-                          >
-                            <option value="">Select preset</option>
-                            {logcatPresets.map((preset) => (
-                              <option key={preset.name} value={preset.name}>
-                                {preset.name}
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (logcatPresetSelected) {
-                                applyLogcatPreset(logcatPresetSelected);
-                              }
-                            }}
-                            disabled={busy || !selectedLogcatPreset}
-                          >
-                            Apply
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost"
-                            onClick={() => {
-                              if (logcatPresetSelected) {
-                                deleteLogcatPreset(logcatPresetSelected);
-                              }
-                            }}
-                            disabled={busy || !selectedLogcatPreset}
-                          >
-                            Delete
-                          </button>
-                          <label>New</label>
-                          <input
-                            value={logcatPresetName}
-                            onChange={(event) => setLogcatPresetName(event.target.value)}
-                            placeholder="e.g. Crash Only"
-                          />
-                          <button type="button" onClick={saveLogcatPreset} disabled={busy}>
-                            Save
-                          </button>
+                        <div className="logcat-presets">
+                          <div className="logcat-preset-row single">
+                            <label>Preset</label>
+                            <select
+                              value={logcatPresetSelected}
+                              onChange={(event) => setLogcatPresetSelected(event.target.value)}
+                              disabled={busy}
+                            >
+                              <option value="">Select preset</option>
+                              {logcatPresets.map((preset) => (
+                                <option key={preset.name} value={preset.name}>
+                                  {preset.name}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (logcatPresetSelected) {
+                                  applyLogcatPreset(logcatPresetSelected);
+                                }
+                              }}
+                              disabled={busy || !selectedLogcatPreset}
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => {
+                                if (logcatPresetSelected) {
+                                  deleteLogcatPreset(logcatPresetSelected);
+                                }
+                              }}
+                              disabled={busy || !selectedLogcatPreset}
+                            >
+                              Delete
+                            </button>
+                            <label>New</label>
+                            <input
+                              value={logcatPresetName}
+                              onChange={(event) => setLogcatPresetName(event.target.value)}
+                              placeholder="e.g. Crash Only"
+                              disabled={busy}
+                            />
+                            <button type="button" onClick={saveLogcatPreset} disabled={busy}>
+                              Save
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -8370,38 +8812,60 @@ function App() {
 	                        <button className="ghost" onClick={handleUiExport} disabled={busy || selectedSerials.length !== 1}>
 	                          Export
 	                        </button>
-	                        <button
-	                          className="ghost"
-	                          onClick={handleScrcpyLaunch}
-	                          disabled={busy || !scrcpyInfo?.available || selectedSerials.length !== 1}
+	                        <select
+	                          aria-label="Auto sync interval"
+	                          title="Auto sync interval"
+	                          value={uiAutoSyncIntervalMs}
+	                          onChange={(event) => setUiAutoSyncIntervalMs(Number(event.target.value))}
+	                          disabled={selectedSerials.length !== 1}
 	                        >
-	                          Live Mirror
+	                          <option value={500}>0.5s</option>
+	                          <option value={1000}>1s</option>
+	                          <option value={2000}>2s</option>
+	                        </select>
+	                        <button
+	                          type="button"
+	                          className={`ghost ${uiAutoSyncEnabled ? "active" : ""}`}
+	                          onClick={handleUiAutoSyncToggle}
+	                          disabled={selectedSerials.length !== 1}
+	                          title="Automatically refresh screenshot and hierarchy"
+	                        >
+	                          Auto Sync
 	                        </button>
 	                      </div>
 	                    </div>
 	                    {singleSelectionWarning && (
 	                      <div className="inline-alert info">
 	                        <strong>Single device required</strong>
-	                        <span>Keep only one device selected (Device Context: Single) to use Refresh, Export, and Live Mirror.</span>
+	                        <span>
+	                          Keep only one device selected (Device Context: Single) to use Refresh, Export, and Auto Sync.
+	                        </span>
 	                      </div>
-	                    )}
-	                    {!scrcpyInfo?.available && (
-	                      <p className="muted">Live mirror requires scrcpy. Install it and try again.</p>
 	                    )}
 	                    {uiExportResult && (
 	                      <div className="inline-alert info">
-                        <strong>Exported</strong>
-                        <span>{uiExportResult}</span>
-                      </div>
-                    )}
+	                        <strong>Exported</strong>
+	                        <span>{uiExportResult}</span>
+	                      </div>
+	                    )}
                     <div className="split inspector-split">
                       <div className="panel-sub">
                         <div className="panel-header">
                           <h3>Screenshot</h3>
                           <span className="muted">
-                            {uiScreenshotSrc ? "Captured" : "No screenshot"}
+								{uiAutoSyncEnabled
+									? `Auto sync${uiAutoSyncLastAt ? ` · ${new Date(uiAutoSyncLastAt).toLocaleTimeString()}` : ""}`
+									: uiScreenshotSrc
+										? "Captured"
+										: "No screenshot"}
                           </span>
                         </div>
+							{uiAutoSyncEnabled && uiAutoSyncError && (
+								<div className="inline-alert error">
+									<strong>Auto sync error</strong>
+									<span>{uiAutoSyncError}</span>
+								</div>
+							)}
                         <div className="form-row">
                           <label>Zoom</label>
                           <input
@@ -8587,7 +9051,13 @@ function App() {
                         </div>
                         {uiInspectorTab === "hierarchy" ? (
                           uiHtml ? (
-                            <iframe title="UI Inspector" srcDoc={uiHtml} className="ui-frame" />
+                            <iframe
+                              ref={uiHierarchyFrameRef}
+                              title="UI Inspector"
+                              srcDoc={uiHtml}
+                              className="ui-frame"
+                              onLoad={() => setUiHierarchyFrameToken((value) => value + 1)}
+                            />
                           ) : (
                             <p className="muted">Capture UI hierarchy to preview the structure.</p>
                           )
@@ -9217,63 +9687,169 @@ function App() {
                     )}
 
                     <div className="bugreport-log-toolbar">
-                      <div className="bugreport-log-toolbar-row">
-                        <div className="bugreport-log-filter-field bugreport-log-text-filter">
-                          <label htmlFor="bugreport-log-text-draft">Text filters</label>
-                          {bugreportLogTextChips.length > 0 && (
-                            <div className="bugreport-log-chip-list" role="list">
-                              {bugreportLogTextChips.map((chip) => (
-                                <span
-                                  key={chip.id}
-                                  className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
-                                  role="listitem"
-                                >
-                                  <span className="bugreport-log-chip-label">
-                                    {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
-                                  </span>
-                                  <button
-                                    className="bugreport-log-chip-remove"
-                                    aria-label={`Remove ${chip.value}`}
-                                    onClick={() => setBugreportLogTextChips((prev) => removeBugreportLogTextChip(prev, chip.id))}
+                      <div className="logcat-filter-grid bugreport-log-filter-grid">
+                        <div className="panel-sub logcat-filter-bar">
+                          <div className="logcat-filter-combined">
+                            <div className="logcat-filter-split">
+                              <div className="logcat-filter-section">
+                                <h3 title="Use regex to refine the log output. Shared with Logcat Stream.">
+                                  Live Filter
+                                </h3>
+                                <div className="form-row">
+                                  <label>Pattern</label>
+                                  <select
+                                    aria-label="Filter mode"
+                                    value={bugreportLogFilterKind}
+                                    onChange={(event) =>
+                                      setBugreportLogFilterKind(event.target.value as LogTextChipKind)
+                                    }
                                     disabled={bugreportLogBusy}
+                                    title="Prefix with - or ! to exclude, + to include."
                                   >
-                                    ×
+                                    <option value="include">Include</option>
+                                    <option value="exclude">Exclude</option>
+                                  </select>
+                                  <input
+                                    value={bugreportLogLiveFilter}
+                                    onChange={(event) => setBugreportLogLiveFilter(event.target.value)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        event.preventDefault();
+                                        addBugreportLogLiveFilter();
+                                      }
+                                    }}
+                                    placeholder="e.g. ActivityManager|AndroidRuntime or -DEBUG"
+                                    title="Regex patterns are case-insensitive."
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={addBugreportLogLiveFilter}
+                                    disabled={bugreportLogBusy || !bugreportLogLiveFilter.trim()}
+                                  >
+                                    Add
                                   </button>
-                                </span>
-                              ))}
+                                </div>
+                              </div>
+                              <div className="logcat-filter-section">
+                                <div className="logcat-filter-header">
+                                  <h3 title="Applied to bugreport queries.">Active Filters</h3>
+                                  <div className="logcat-filter-header-actions">
+                                    <span className="muted">
+                                      {sharedLogTextChips.length
+                                        ? `${sharedLogTextChips.length} filters`
+                                        : "No filters"}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="ghost"
+                                      onClick={() => setBugreportLogFiltersExpanded((prev) => !prev)}
+                                    >
+                                      {bugreportLogFiltersExpanded ? "Hide" : "Expand"}
+                                    </button>
+                                  </div>
+                                </div>
+                                {bugreportLogFiltersExpanded && (
+                                  <>
+                                    {sharedLogTextChips.length === 0 ? (
+                                      <p className="muted">No active filters</p>
+                                    ) : (
+                                      <div className="bugreport-log-chip-list" role="list">
+                                        {sharedLogTextChips.map((chip) => (
+                                          <span
+                                            key={chip.id}
+                                            className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
+                                            role="listitem"
+                                          >
+                                            <span className="bugreport-log-chip-label" title={chip.value}>
+                                              {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
+                                            </span>
+                                            <button
+                                              className="bugreport-log-chip-remove"
+                                              aria-label={`Remove ${chip.kind === "exclude" ? "NOT " : ""}${chip.value}`}
+                                              onClick={() =>
+                                                setSharedLogTextChips((prev) => removeLogTextChip(prev, chip.id))
+                                              }
+                                              disabled={bugreportLogBusy}
+                                            >
+                                              ×
+                                            </button>
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                    <div className="button-row compact">
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={clearSharedLogFilters}
+                                        disabled={bugreportLogBusy || sharedLogTextChips.length === 0}
+                                      >
+                                        Clear
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
                             </div>
-                          )}
-                          <div className="bugreport-log-chip-entry">
-                            <select
-                              aria-label="Text filter mode"
-                              value={bugreportLogTextKind}
-                              onChange={(event) => setBugreportLogTextKind(event.target.value as BugreportLogTextChipKind)}
-                              disabled={bugreportLogBusy}
-                            >
-                              <option value="include">Include</option>
-                              <option value="exclude">Exclude</option>
-                            </select>
-                            <input
-                              id="bugreport-log-text-draft"
-                              value={bugreportLogTextDraft}
-                              onChange={(event) => setBugreportLogTextDraft(event.target.value)}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                  event.preventDefault();
-                                  handleBugreportLogAddTextChip(bugreportLogTextDraft);
-                                }
-                              }}
-                              placeholder="Type text and press Enter"
-                            />
-                            <button
-                              className="ghost"
-                              onClick={() => handleBugreportLogAddTextChip(bugreportLogTextDraft)}
-                              disabled={bugreportLogBusy || !bugreportLogTextDraft.trim()}
-                            >
-                              Add
-                            </button>
+                          </div>
+                          <div className="logcat-presets">
+                            <div className="logcat-preset-row single">
+                              <label>Preset</label>
+                              <select
+                                value={logcatPresetSelected}
+                                onChange={(event) => setLogcatPresetSelected(event.target.value)}
+                                disabled={bugreportLogBusy}
+                              >
+                                <option value="">Select preset</option>
+                                {logcatPresets.map((preset) => (
+                                  <option key={preset.name} value={preset.name}>
+                                    {preset.name}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (logcatPresetSelected) {
+                                    applyLogcatPreset(logcatPresetSelected);
+                                  }
+                                }}
+                                disabled={bugreportLogBusy || !selectedLogcatPreset}
+                              >
+                                Apply
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => {
+                                  if (logcatPresetSelected) {
+                                    deleteLogcatPreset(logcatPresetSelected);
+                                  }
+                                }}
+                                disabled={bugreportLogBusy || !selectedLogcatPreset}
+                              >
+                                Delete
+                              </button>
+                              <label>New</label>
+                              <input
+                                value={logcatPresetName}
+                                onChange={(event) => setLogcatPresetName(event.target.value)}
+                                placeholder="e.g. Crash Only"
+                                disabled={bugreportLogBusy}
+                              />
+                              <button
+                                type="button"
+                                onClick={saveLogcatPreset}
+                                disabled={bugreportLogBusy}
+                              >
+                                Save
+                              </button>
+                            </div>
                           </div>
                         </div>
+                      </div>
+
+                      <div className="bugreport-log-toolbar-row">
                         <div className="bugreport-log-filter-field">
                           <label htmlFor="bugreport-log-tag">Tag</label>
                           <input
@@ -9311,19 +9887,16 @@ function App() {
                           />
                         </div>
                       </div>
+
                       <div className="bugreport-log-toolbar-actions">
                         <div className="toggle-group">
-                          {["V", "D", "I", "W", "E", "F"].map((level) => (
+                          {LOG_LEVELS.map((level) => (
                             <label key={level} className="toggle">
                               <input
                                 type="checkbox"
-                                checked={bugreportLogLevels.includes(level)}
+                                checked={logLevels[level]}
                                 onChange={(event) => {
-                                  setBugreportLogLevels((prev) =>
-                                    event.target.checked
-                                      ? Array.from(new Set([...prev, level]))
-                                      : prev.filter((item) => item !== level),
-                                  );
+                                  setLogLevels((prev) => ({ ...prev, [level]: event.target.checked }));
                                 }}
                               />
                               {level}
@@ -9333,14 +9906,15 @@ function App() {
                         <button
                           className="ghost"
                           onClick={() => {
-                            setBugreportLogTextDraft("");
-                            setBugreportLogTextKind("include");
-                            setBugreportLogTextChips([]);
+                            setBugreportLogLiveFilter("");
+                            setBugreportLogFilterKind("include");
+                            setBugreportLogFiltersExpanded(false);
+                            clearSharedLogFilters();
                             setBugreportLogTag("");
                             setBugreportLogPid("");
                             setBugreportLogStart("");
                             setBugreportLogEnd("");
-                            setBugreportLogLevels(["V", "D", "I", "W", "E", "F"]);
+                            setLogLevels(defaultLogcatLevels);
                           }}
                           disabled={bugreportLogBusy}
                         >
