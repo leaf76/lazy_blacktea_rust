@@ -873,6 +873,16 @@ function App() {
   const [groupMap, setGroupMap] = useState<Record<string, string>>({});
   const [groupName, setGroupName] = useState("");
   const [groupFilter, setGroupFilter] = useState("all");
+  const [deviceContextMenu, setDeviceContextMenu] = useState<{
+    x: number;
+    y: number;
+    serial: string;
+  } | null>(null);
+  const [deviceCommandMenu, setDeviceCommandMenu] = useState<{
+    x: number;
+    y: number;
+    kind: "select_group" | "wifi" | "bluetooth";
+  } | null>(null);
   const [searchText, setSearchText] = useState("");
   const [apkPath, setApkPath] = useState("");
   const [apkBundlePath, setApkBundlePath] = useState("");
@@ -916,6 +926,7 @@ function App() {
   const [bugreportLogEnd, setBugreportLogEnd] = useState("");
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
   const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
+  const [devicePopoverSearch, setDevicePopoverSearch] = useState("");
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -929,7 +940,8 @@ function App() {
   const uiBoundsCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSelectedIndexRef = useRef<number | null>(null);
   const devicePopoverRef = useRef<HTMLDivElement | null>(null);
-  const devicePopoverTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const devicePopoverTriggerRef = useRef<HTMLDivElement | null>(null);
+  const devicePopoverSearchRef = useRef<HTMLInputElement | null>(null);
   const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
   const appsDetailsSeqRef = useRef(0);
@@ -993,40 +1005,11 @@ function App() {
   const fileSelectionLabel = hasFileSelection
     ? `${filesSelectedPaths.length} items selected`
     : "Select files to enable bulk actions.";
-  const primaryDeviceLabel =
-    activeDevice?.detail?.model ?? activeDevice?.summary.model ?? activeSerial ?? "Select a device";
   const requiresSingleSelection = useMemo(
     () => ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat", "/performance"].includes(location.pathname),
     [location.pathname],
   );
   const singleSelectionWarning = requiresSingleSelection && selectedCount > 1;
-  const deviceStatusLabel = useMemo(() => {
-    if (!activeSerial) {
-      return "No device";
-    }
-    if (deviceStatus === "device") {
-      return "Online";
-    }
-    if (deviceStatus === "unauthorized") {
-      return "Unauthorized";
-    }
-    if (deviceStatus === "offline") {
-      return "Offline";
-    }
-    return deviceStatus;
-  }, [activeSerial, deviceStatus]);
-  const deviceStatusTone = useMemo(() => {
-    if (!activeSerial) {
-      return "idle";
-    }
-    if (deviceStatus === "device") {
-      return "ok";
-    }
-    if (deviceStatus === "unauthorized") {
-      return "error";
-    }
-    return "warn";
-  }, [activeSerial, deviceStatus]);
   useEffect(() => {
     const prevSerial = perfLastSerialRef.current;
     const nextSerial = isPerformanceView ? activeSerial ?? null : null;
@@ -1055,10 +1038,20 @@ function App() {
     perfLastSerialRef.current = nextSerial;
   }, [isPerformanceView, activeSerial]);
   const groupedDevices = useMemo(() => {
+    const filtered = filterDevicesBySearch(devices, devicePopoverSearch);
+    const filteredBySerial = new Map(filtered.map((device) => [device.summary.serial, device]));
+    const selected = selectedSerials
+      .map((serial) => filteredBySerial.get(serial))
+      .filter((device): device is DeviceInfo => Boolean(device));
+    const selectedSet = new Set(selected.map((device) => device.summary.serial));
+
     const grouped = new Map<string, DeviceInfo[]>();
     const ungrouped: DeviceInfo[] = [];
-    devices.forEach((device) => {
+    filtered.forEach((device) => {
       const serial = device.summary.serial;
+      if (selectedSet.has(serial)) {
+        return;
+      }
       const group = groupMap[serial];
       if (group) {
         const list = grouped.get(group) ?? [];
@@ -1069,8 +1062,8 @@ function App() {
       }
     });
     const groupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
-    return { groupNames, grouped, ungrouped };
-  }, [devices, groupMap]);
+    return { filteredCount: filtered.length, selected, groupNames, grouped, ungrouped };
+  }, [devices, devicePopoverSearch, groupMap, selectedSerials]);
   const latestBugreportTask = useMemo(() => {
     if (!latestBugreportTaskId) {
       return null;
@@ -1259,6 +1252,29 @@ function App() {
     if (mode === "single") {
       setSelectedSerials((prev) => (prev.length > 0 ? [prev[0]] : []));
     }
+  };
+
+  const handleSelectActiveSerial = (serial: string) => {
+    setSelectedSerials((prev) => {
+      if (prev[0] === serial) {
+        return prev;
+      }
+      const others = prev.filter((s) => s !== serial);
+      return [serial, ...others];
+    });
+  };
+
+  const getDeviceTone = (state: string) => {
+    if (state === "device") {
+      return "ok";
+    }
+    if (state === "unauthorized") {
+      return "error";
+    }
+    if (state === "offline") {
+      return "warn";
+    }
+    return "warn";
   };
 
   useEffect(() => {
@@ -1563,16 +1579,6 @@ function App() {
     uiSelectedNode,
   ]);
 
-  const handleSelectActiveSerial = (serial: string) => {
-    if (!serial) {
-      return;
-    }
-    setSelectedSerials((prev) => {
-      const remaining = prev.filter((item) => item !== serial);
-      return [serial, ...remaining];
-    });
-  };
-
   const ensureSingleSelection = (context: string) => {
     if (!selectedSerials.length) {
       pushToast(`Select one device for ${context}.`, "error");
@@ -1602,6 +1608,42 @@ function App() {
       window.removeEventListener("scroll", handleScroll, true);
     };
   }, [appsContextMenu]);
+
+  useEffect(() => {
+    if (!deviceContextMenu) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDeviceContextMenu(null);
+      }
+    };
+    const handleScroll = () => setDeviceContextMenu(null);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [deviceContextMenu]);
+
+  useEffect(() => {
+    if (!deviceCommandMenu) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDeviceCommandMenu(null);
+      }
+    };
+    const handleScroll = () => setDeviceCommandMenu(null);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [deviceCommandMenu]);
 
   const openPairingModal = () => dispatchPairing({ type: "OPEN" });
   const closePairingModal = () => dispatchPairing({ type: "CLOSE" });
@@ -2447,7 +2489,12 @@ function App() {
         lastSelectedIndexRef.current = index;
         return;
       } else {
-        // Default click toggles selection; when selecting, also move it to the front to make it primary.
+        // Default click toggles selection without reordering.
+        // Double click will handle setting primary.
+        if (event.detail > 1) {
+          return;
+        }
+
         setSelectedSerials((prev) => {
           if (prev.includes(serial)) {
             if (prev.length === 1) {
@@ -2455,8 +2502,8 @@ function App() {
             }
             return prev.filter((item) => item !== serial);
           }
-          const rest = prev.filter((item) => item !== serial);
-          return [serial, ...rest];
+          // Add to end (don't change current primary)
+          return [...prev, serial];
         });
       }
 
@@ -2488,12 +2535,18 @@ function App() {
     setSelectedSerials(visibleDevices.map((device) => device.summary.serial));
   };
 
-  const selectAllDevices = () => {
+  const selectAllDevicesInPopover = () => {
+    const filtered = filterDevicesBySearch(devices, devicePopoverSearch);
+    const filteredSerials = filtered.map((device) => device.summary.serial);
     if (deviceSelectionMode === "single") {
-      setSelectedSerials(devices.length ? [devices[0].summary.serial] : []);
+      setSelectedSerials(filteredSerials.length ? [filteredSerials[0]] : []);
       return;
     }
-    setSelectedSerials(devices.map((device) => device.summary.serial));
+    setSelectedSerials((prev) => {
+      const existing = new Set(prev);
+      const toAdd = filteredSerials.filter((serial) => !existing.has(serial));
+      return [...prev, ...toAdd];
+    });
   };
 
   const clearSelection = () => {
@@ -4696,6 +4749,19 @@ function App() {
     }
   };
 
+  const handleCopyDeviceInfoSpecific = async (serial: string) => {
+    const device = devices.find((item) => item.summary.serial === serial);
+    if (!device) {
+      return;
+    }
+    try {
+      await writeText(formatDeviceInfoMarkdown(device));
+      pushToast("Device info copied.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
   const handleCopyDeviceInfo = async () => {
     const serial = ensureSingleSelection("device info copy");
     if (!serial) {
@@ -5307,12 +5373,24 @@ function App() {
       return;
     }
     const frame = window.requestAnimationFrame(() => {
+      const search = devicePopoverSearchRef.current;
+      if (search && !search.hasAttribute("disabled")) {
+        search.focus();
+        search.select();
+        return;
+      }
       const focusables = getPopoverFocusable();
       if (focusables.length > 0) {
         focusables[0].focus();
       }
     });
     return () => window.cancelAnimationFrame(frame);
+  }, [devicePopoverOpen]);
+
+  useEffect(() => {
+    if (!devicePopoverOpen) {
+      setDevicePopoverSearch("");
+    }
   }, [devicePopoverOpen]);
 
   const renderPerfSparkline = (values: number[]) => {
@@ -5609,42 +5687,92 @@ function App() {
       <div className="app-main">
         <header className="top-bar">
           <div className="device-context">
-            <div className="device-selector">
-              <p className="eyebrow">Device Context</p>
-              <div className="device-selector-row">
-                <button
-                  type="button"
-                  ref={devicePopoverTriggerRef}
-                  className="device-context-trigger"
-                  aria-haspopup="dialog"
-                  aria-expanded={devicePopoverOpen}
-                  aria-controls="device-context-popover"
-                  onClick={() => setDevicePopoverOpen((prev) => !prev)}
-                  disabled={devices.length === 0}
-                >
-                  <div className="device-context-main">
-                    <span className="device-context-title">{primaryDeviceLabel}</span>
-                    <span className="muted">
-                      {selectedCount ? `${selectedCount} selected` : "No selection"}
-                    </span>
-                  </div>
-                  <span className="device-context-caret" aria-hidden="true">
-                    ▾
-                  </span>
-                </button>
-                <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
-                  Manage
-                </button>
+            <div className="device-selector-row">
+              <div
+                className="device-context-chips"
+                ref={devicePopoverTriggerRef}
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) {
+                    setDevicePopoverOpen(!devicePopoverOpen);
+                  }
+                }}
+              >
+                {selectedCount === 0 ? (
+                  <button
+                    className="device-chip picker"
+                    onClick={() => setDevicePopoverOpen(!devicePopoverOpen)}
+                    disabled={!hasDevices}
+                  >
+                    Select devices
+                  </button>
+                ) : (
+                  <>
+                    {(() => {
+                      const serial = selectedSerials[0];
+                      const device = devices.find((d) => d.summary.serial === serial);
+                      const model = device?.detail?.model ?? device?.summary.model ?? serial;
+                      const suffix = serial.length > 4 ? serial.slice(-4) : serial;
+                      const tone = getDeviceTone(device?.summary.state ?? "offline");
+
+                      return (
+                        <button
+                          key={serial}
+                          className="device-chip primary"
+                          onClick={() => setDevicePopoverOpen(!devicePopoverOpen)}
+                          title={`${model} (${serial})`}
+                        >
+                          <span className={`device-chip-dot ${tone}`} />
+                          <span className="device-chip-label">{model}</span>
+                          <span className="device-chip-serial">{suffix}</span>
+                        </button>
+                      );
+                    })()}
+
+                    {selectedSerials.slice(1, 3).map((serial) => {
+                      const device = devices.find((d) => d.summary.serial === serial);
+                      const model = device?.detail?.model ?? device?.summary.model ?? serial;
+                      const suffix = serial.length > 4 ? serial.slice(-4) : serial;
+                      const tone = getDeviceTone(device?.summary.state ?? "offline");
+
+                      return (
+                        <button
+                          key={serial}
+                          className="device-chip secondary"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSelectActiveSerial(serial);
+                          }}
+                          title={`Switch to ${model}`}
+                        >
+                          <span className={`device-chip-dot ${tone}`} />
+                          <span className="device-chip-label">{model}</span>
+                          <span className="device-chip-serial">{suffix}</span>
+                        </button>
+                      );
+                    })}
+
+                    {selectedSerials.length > 3 && (
+                      <button
+                        className="device-chip overflow"
+                        onClick={() => setDevicePopoverOpen(!devicePopoverOpen)}
+                      >
+                        +{selectedSerials.length - 3}
+                      </button>
+                    )}
+
+                    <button
+                      className="device-context-caret-btn"
+                      onClick={() => setDevicePopoverOpen(!devicePopoverOpen)}
+                      aria-label="Toggle device menu"
+                    >
+                      ▼
+                    </button>
+                  </>
+                )}
               </div>
-            </div>
-            <div className="device-status-row">
-              <span className={`status-pill ${deviceStatusTone}`}>{deviceStatusLabel}</span>
-              <span className="badge">
-                {selectedCount ? `${selectedCount} selected` : "No selection"}
-              </span>
-              <span className="muted">
-                {activeSerial ? `Primary: ${activeSerial}` : "Select devices to set a primary"}
-              </span>
+              <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+                Manage
+              </button>
             </div>
             {devicePopoverOpen && (
               <div
@@ -5660,14 +5788,18 @@ function App() {
 	                  <div className="device-popover-header-top">
 	                    <div className="device-popover-header-info">
 	                      <strong>Devices</strong>
-	                      <span className="muted">{devices.length} connected</span>
+	                      <span className="muted">
+	                        {devicePopoverSearch.trim()
+	                          ? `${groupedDevices.filteredCount}/${devices.length} shown`
+	                          : `${devices.length} connected`}
+	                      </span>
 	                    </div>
 	                    <div className="device-popover-header-actions">
 	                      {deviceSelectionMode === "multi" && (
 	                        <button
 	                          className="ghost"
-	                          onClick={selectAllDevices}
-	                          disabled={busy || devices.length === 0}
+	                          onClick={selectAllDevicesInPopover}
+	                          disabled={busy || groupedDevices.filteredCount === 0}
 	                        >
 	                          Select all
 	                        </button>
@@ -5681,6 +5813,24 @@ function App() {
 		                        Keep one
 		                      </button>
 	                    </div>
+	                  </div>
+
+	                  <div className="device-popover-search">
+	                    <input
+	                      ref={devicePopoverSearchRef}
+	                      value={devicePopoverSearch}
+	                      onChange={(event) => setDevicePopoverSearch(event.target.value)}
+	                      placeholder="Filter devices"
+	                      aria-label="Filter devices"
+	                    />
+	                    <button
+	                      type="button"
+	                      className="ghost"
+	                      onClick={() => setDevicePopoverSearch("")}
+	                      disabled={!devicePopoverSearch.trim()}
+	                    >
+	                      Clear
+	                    </button>
 	                  </div>
 
 	                  <div className="device-popover-mode" role="group" aria-label="Selection mode">
@@ -5711,8 +5861,18 @@ function App() {
                 <div className="device-popover-list">
                   {devices.length === 0 ? (
                     <p className="muted">No devices detected.</p>
+                  ) : groupedDevices.filteredCount === 0 ? (
+                    <p className="muted">No matches.</p>
                   ) : (
                     <>
+                      {groupedDevices.selected.length > 0 && (
+                        <div className="device-popover-section">
+                          <div className="device-popover-section-title">Selected</div>
+                          <div className="device-popover-section-body">
+                            {groupedDevices.selected.map(renderDeviceRow)}
+                          </div>
+                        </div>
+                      )}
                       {groupedDevices.groupNames.map((group) => (
                         <div className="device-popover-section" key={group}>
                           <div className="device-popover-section-title">{group}</div>
@@ -5933,30 +6093,19 @@ function App() {
                           ))}
                         </select>
                       </div>
-	                      <div className="device-filter-actions">
-	                        <div className="toggle-group" role="group" aria-label="Selection mode">
-	                          <button
-	                            type="button"
-	                            className={`toggle${deviceSelectionMode === "single" ? " active" : ""}`}
-	                            onClick={() => handleSetDeviceSelectionMode("single")}
-	                            disabled={busy}
-	                            title="Single device selection"
-	                          >
-	                            Single
-	                          </button>
-	                          <button
-	                            type="button"
-	                            className={`toggle${deviceSelectionMode === "multi" ? " active" : ""}`}
-	                            onClick={() => handleSetDeviceSelectionMode("multi")}
-	                            disabled={busy}
-	                            title="Multi-device selection"
-	                          >
-	                            Multi
-	                          </button>
-	                        </div>
-	                        <button onClick={selectAllVisible} disabled={busy}>
-	                          Select Visible
-	                        </button>
+                      <div className="device-filter-actions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => handleSetDeviceSelectionMode(deviceSelectionMode === "single" ? "multi" : "single")}
+                          disabled={busy}
+                          title="Toggle selection mode"
+                        >
+                          {deviceSelectionMode === "single" ? "Single Select" : "Multi Select"}
+                        </button>
+                        <button onClick={selectAllVisible} disabled={busy}>
+                          Select Visible
+                        </button>
 	                        <button
 	                          onClick={clearSelection}
 	                          disabled={busy || devices.length === 0}
@@ -5976,6 +6125,7 @@ function App() {
                         <span>Radios</span>
                         <span>Battery</span>
                         <span>Status</span>
+                        <span />
                       </div>
                       {visibleDevices.map((device, index) => {
                         const serial = device.summary.serial;
@@ -5994,8 +6144,9 @@ function App() {
                           <div
                             key={serial}
                             className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
-	                            onClick={(event) => handleDeviceRowSelect(event, serial, index)}
-	                          >
+                            onClick={(event) => handleDeviceRowSelect(event, serial, index)}
+                            onDoubleClick={() => handleSelectActiveSerial(serial)}
+                          >
 	                            <label className="device-check" onClick={(event) => event.stopPropagation()}>
 	                              <input
 	                                type="checkbox"
@@ -6050,101 +6201,249 @@ function App() {
                             <div className="device-cell device-state">
                               <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
                             </div>
+                            <div className="device-cell device-actions">
+                              <button
+                                type="button"
+                                className="ghost icon-only"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDeviceCommandMenu(null);
+                                  setDeviceContextMenu({ x: e.clientX, y: e.clientY, serial });
+                                }}
+                                disabled={busy}
+                                title="Device actions"
+                              >
+                                ⋯
+                              </button>
+                            </div>
                           </div>
                         );
                       })}
                     </div>
-	                    <div className="device-command-bar">
-	                      <div className="device-command-group">
-	                        <label>Group</label>
-	                        <div className="device-group-controls">
-	                          <select
-	                            defaultValue=""
-	                            onChange={(event) => {
-	                              const preset = event.target.value;
-	                              if (!preset) {
-	                                return;
-	                              }
-	                              applyGroupSelectionPreset(preset);
-	                              event.currentTarget.value = "";
-	                            }}
-	                            disabled={busy || devices.length === 0}
-	                            aria-label="Select devices by group"
-	                            title="Select devices by group"
-	                          >
-	                            <option value="">Select devices...</option>
-	                            <option value="__all_devices__">All devices</option>
-	                            {groupOptions.map((group) => (
-	                              <option key={group} value={group}>
-	                                {group}
-	                              </option>
-	                            ))}
-	                          </select>
-	                          <input
-	                            value={groupName}
-	                            onChange={(event) => setGroupName(event.target.value)}
-	                            placeholder="Group name"
-	                          />
-		                          <select
-		                            defaultValue=""
-		                            onChange={(event) => {
-		                              const picked = event.target.value;
-		                              if (!picked) {
-		                                return;
-		                              }
-		                              setGroupName(picked);
-		                              event.currentTarget.value = "";
-		                            }}
-		                            disabled={busy || groupOptions.length === 0}
-		                            aria-label="Use existing group name"
-		                            title={
-		                              groupOptions.length === 0
-		                                ? "No groups yet. Assign a group to a device first."
-		                                : "Use existing group name"
-		                            }
-		                          >
-		                            <option value="">
-		                              {groupOptions.length === 0 ? "No groups yet" : "Use existing..."}
-		                            </option>
-		                            {groupOptions.map((group) => (
-		                              <option key={group} value={group}>
-		                                {group}
-		                              </option>
-		                            ))}
-	                          </select>
-	                          <button onClick={handleAssignGroup} disabled={busy || selectedCount === 0}>
-	                            Assign
-	                          </button>
-	                        </div>
-	                        <span className="muted">{selectedCount} selected</span>
+                    {deviceContextMenu && (
+                      <>
+                        <div
+                          className="context-menu-backdrop"
+                          onClick={() => setDeviceContextMenu(null)}
+                        />
+                        <div
+                          className="context-menu"
+                          style={{
+                            top: deviceContextMenu.y,
+                            left: Math.max(10, deviceContextMenu.x - 160),
+                          }}
+                        >
+                          <button
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => {
+                              handleSelectActiveSerial(deviceContextMenu.serial);
+                              setDeviceContextMenu(null);
+                            }}
+                          >
+                            Set Primary
+                          </button>
+                          <button
+                            type="button"
+                            className="context-menu-item"
+                            onClick={() => {
+                              void handleCopyDeviceInfoSpecific(deviceContextMenu.serial);
+                              setDeviceContextMenu(null);
+                            }}
+                          >
+                            Copy Device Info
+                          </button>
+                        </div>
+                      </>
+                    )}
+
+                    {deviceCommandMenu && (
+                      <>
+                        <div className="context-menu-backdrop" onClick={() => setDeviceCommandMenu(null)} />
+                        <div
+                          className="context-menu"
+                          style={{
+                            top: deviceCommandMenu.y,
+                            left: Math.max(10, deviceCommandMenu.x - 160),
+                          }}
+                        >
+                          {deviceCommandMenu.kind === "select_group" ? (
+                            <>
+                              <button
+                                type="button"
+                                className="context-menu-item"
+                                onClick={() => {
+                                  applyGroupSelectionPreset("__all_devices__");
+                                  setDeviceCommandMenu(null);
+                                }}
+                                disabled={busy || devices.length === 0}
+                              >
+                                Select all devices
+                              </button>
+                              {groupOptions.length === 0 ? (
+                                <button type="button" className="context-menu-item" disabled>
+                                  No groups yet
+                                </button>
+                              ) : (
+                                groupOptions.map((group) => (
+                                  <button
+                                    key={group}
+                                    type="button"
+                                    className="context-menu-item"
+                                    onClick={() => {
+                                      applyGroupSelectionPreset(group);
+                                      setDeviceCommandMenu(null);
+                                    }}
+                                    disabled={busy || devices.length === 0}
+                                  >
+                                    Select group: {group}
+                                  </button>
+                                ))
+                              )}
+                            </>
+                          ) : deviceCommandMenu.kind === "wifi" ? (
+                            <>
+                              <button
+                                type="button"
+                                className="context-menu-item"
+                                onClick={() => {
+                                  void handleToggleWifi(true);
+                                  setDeviceCommandMenu(null);
+                                }}
+                                disabled={busy || selectedCount === 0}
+                              >
+                                WiFi On
+                              </button>
+                              <button
+                                type="button"
+                                className="context-menu-item"
+                                onClick={() => {
+                                  void handleToggleWifi(false);
+                                  setDeviceCommandMenu(null);
+                                }}
+                                disabled={busy || selectedCount === 0}
+                              >
+                                WiFi Off
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                className="context-menu-item"
+                                onClick={() => {
+                                  void handleToggleBluetooth(true);
+                                  setDeviceCommandMenu(null);
+                                }}
+                                disabled={busy || selectedCount === 0}
+                              >
+                                Bluetooth On
+                              </button>
+                              <button
+                                type="button"
+                                className="context-menu-item"
+                                onClick={() => {
+                                  void handleToggleBluetooth(false);
+                                  setDeviceCommandMenu(null);
+                                }}
+                                disabled={busy || selectedCount === 0}
+                              >
+                                Bluetooth Off
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </>
+                    )}
+
+                    {selectedCount > 0 && (
+                      <div className="device-command-bar">
+                        <div className="device-command-group">
+                          <label>Group</label>
+                          <div className="device-group-controls">
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                setDeviceContextMenu(null);
+                                setDeviceCommandMenu({ x: event.clientX, y: event.clientY, kind: "select_group" });
+                              }}
+                              disabled={busy || devices.length === 0}
+                              title="Select devices by group"
+                            >
+                              Select group…
+                            </button>
+                            <input
+                              value={groupName}
+                              onChange={(event) => setGroupName(event.target.value)}
+                              placeholder="Group name"
+                            />
+                            <select
+                              defaultValue=""
+                              onChange={(event) => {
+                                const picked = event.target.value;
+                                if (!picked) {
+                                  return;
+                                }
+                                setGroupName(picked);
+                                event.currentTarget.value = "";
+                              }}
+                              disabled={busy || groupOptions.length === 0}
+                              aria-label="Use existing group name"
+                              title={
+                                groupOptions.length === 0
+                                  ? "No groups yet. Assign a group to a device first."
+                                  : "Use existing group name"
+                              }
+                            >
+                              <option value="">{groupOptions.length === 0 ? "No groups yet" : "Use existing…"}</option>
+                              {groupOptions.map((group) => (
+                                <option key={group} value={group}>
+                                  {group}
+                                </option>
+                              ))}
+                            </select>
+                            <button onClick={handleAssignGroup} disabled={busy || selectedCount === 0}>
+                              Assign
+                            </button>
+                          </div>
+                          <span className="muted">{selectedCount} selected</span>
+                        </div>
+                        <div className="button-row compact">
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              setDeviceContextMenu(null);
+                              setDeviceCommandMenu({ x: event.clientX, y: event.clientY, kind: "wifi" });
+                            }}
+                            disabled={busy || selectedCount === 0}
+                          >
+                            WiFi…
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              setDeviceContextMenu(null);
+                              setDeviceCommandMenu({ x: event.clientX, y: event.clientY, kind: "bluetooth" });
+                            }}
+                            disabled={busy || selectedCount === 0}
+                          >
+                            Bluetooth…
+                          </button>
+                          <button type="button" className="danger" onClick={requestRebootConfirm} disabled={busy || selectedCount === 0}>
+                            Reboot…
+                          </button>
+                          <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount !== 1}>
+                            Copy Device Info
+                          </button>
+                        </div>
                       </div>
-                      <div className="button-row compact">
-                        <button onClick={() => handleReboot()} disabled={busy || selectedCount === 0}>
-                          Reboot
-                        </button>
-                        <button onClick={() => handleReboot("recovery")} disabled={busy || selectedCount === 0}>
-                          Reboot Recovery
-                        </button>
-                        <button onClick={() => handleReboot("bootloader")} disabled={busy || selectedCount === 0}>
-                          Reboot Bootloader
-                        </button>
-                        <button onClick={() => handleToggleWifi(true)} disabled={busy || selectedCount === 0}>
-                          WiFi On
-                        </button>
-                        <button onClick={() => handleToggleWifi(false)} disabled={busy || selectedCount === 0}>
-                          WiFi Off
-                        </button>
-                        <button onClick={() => handleToggleBluetooth(true)} disabled={busy || selectedCount === 0}>
-                          Bluetooth On
-                        </button>
-                        <button onClick={() => handleToggleBluetooth(false)} disabled={busy || selectedCount === 0}>
-                          Bluetooth Off
-                        </button>
-                        <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount !== 1}>
-                          Copy Device Info
-                        </button>
-                      </div>
-                    </div>
+                    )}
                   </section>
                 </div>
               }
