@@ -1,9 +1,10 @@
 [package]
 name = "lazy_blacktea_rust"
-version = "0.0.50"
+version = "0.0.51"
 description = "Lazy Blacktea (Rust + Tauri)"
 authors = ["cy76"]
 edition = "2021"
+default-run = "lazy_blacktea_rust"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
