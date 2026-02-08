@@ -48,6 +48,7 @@ import {
   clearAppData,
   clearLogcat,
   getAppBasicInfo,
+  getAppIcon,
   exportLogcat,
   exportUiHierarchy,
   forceStopApp,
@@ -862,6 +863,9 @@ function App() {
   const [filePreviewDevicePath, setFilePreviewDevicePath] = useState<string | null>(null);
   const [filesSelectedPaths, setFilesSelectedPaths] = useState<string[]>([]);
   const [filesSearchQuery, setFilesSearchQuery] = useState("");
+  const FILES_LIST_PAGE_SIZE = 80;
+  const FILES_GRID_PAGE_SIZE = 48;
+  const [filesVisibleCount, setFilesVisibleCount] = useState(FILES_LIST_PAGE_SIZE);
   const [filesOverwriteEnabled, setFilesOverwriteEnabled] = useState(true);
   const [filesDropActive, setFilesDropActive] = useState(false);
   const [apkDropActive, setApkDropActive] = useState(false);
@@ -919,10 +923,22 @@ function App() {
   const [appsFilter, setAppsFilter] = useState("");
   const [appsThirdPartyOnly, setAppsThirdPartyOnly] = useState(true);
   const [appsIncludeVersions, setAppsIncludeVersions] = useState(false);
+  const APPS_PAGE_SIZE = 40;
+  const [appsVisibleCount, setAppsVisibleCount] = useState(APPS_PAGE_SIZE);
   const [selectedApp, setSelectedApp] = useState<AppInfo | null>(null);
   const [selectedAppDetails, setSelectedAppDetails] = useState<AppBasicInfo | null>(null);
   const [appsDetailsBusy, setAppsDetailsBusy] = useState(false);
   const [appsContextMenu, setAppsContextMenu] = useState<null | { x: number; y: number; app: AppInfo }>(null);
+  type AppIconStatus = "queued" | "loading" | "ready" | "error";
+  const [appIconsByKey, setAppIconsByKey] = useState<
+    Record<string, { status: AppIconStatus; dataUrl?: string; error?: string }>
+  >({});
+  const appIconsByKeyRef = useRef(appIconsByKey);
+  useEffect(() => {
+    appIconsByKeyRef.current = appIconsByKey;
+  }, [appIconsByKey]);
+  const appIconQueueRef = useRef<{ key: string; serial: string; app: AppInfo }[]>([]);
+  const appIconInFlightRef = useRef(0);
   const [bugreportProgress, setBugreportProgress] = useState<number | null>(null);
   const [bugreportResult, setBugreportResult] = useState<BugreportResult | null>(null);
   const [latestBugreportTaskId, setLatestBugreportTaskId] = useState<string | null>(null);
@@ -3587,6 +3603,72 @@ function App() {
     });
   }, [files, filesSearchQuery]);
 
+  const filesPageSize = filesViewMode === "grid" ? FILES_GRID_PAGE_SIZE : FILES_LIST_PAGE_SIZE;
+  useEffect(() => {
+    setFilesVisibleCount(filesPageSize);
+  }, [filesSearchQuery, filesPath, filesViewMode]);
+
+  const visibleFiles = useMemo(() => {
+    const count = Math.max(filesPageSize, filesVisibleCount);
+    return filteredFiles.slice(0, count);
+  }, [filteredFiles, filesPageSize, filesVisibleCount]);
+
+  const canLoadMoreFiles = visibleFiles.length < filteredFiles.length;
+
+  const filesListRef = useRef<HTMLDivElement | null>(null);
+  const filesLoadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  const filesLoadMoreLockedRef = useRef(false);
+  const filesFilteredLenRef = useRef(0);
+  const filesCanLoadMoreRef = useRef(false);
+  useEffect(() => {
+    filesFilteredLenRef.current = filteredFiles.length;
+    filesCanLoadMoreRef.current = canLoadMoreFiles;
+  }, [filteredFiles.length, canLoadMoreFiles]);
+
+  const loadMoreFiles = () => {
+    if (!filesCanLoadMoreRef.current) {
+      return;
+    }
+    if (filesLoadMoreLockedRef.current) {
+      return;
+    }
+    filesLoadMoreLockedRef.current = true;
+    setFilesVisibleCount((prev) => {
+      const next = Math.min(prev + filesPageSize, filesFilteredLenRef.current);
+      return next;
+    });
+    window.requestAnimationFrame(() => {
+      filesLoadMoreLockedRef.current = false;
+    });
+  };
+
+  useEffect(() => {
+    if (location.pathname !== "/files") {
+      return;
+    }
+    if (!filesCanLoadMoreRef.current) {
+      return;
+    }
+    const sentinel = filesLoadMoreSentinelRef.current;
+    if (!sentinel) {
+      return;
+    }
+    const root = filesListRef.current;
+    const hasOverflow = root ? root.scrollHeight > root.clientHeight + 8 : false;
+    const resolvedRoot = hasOverflow ? root : null;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadMoreFiles();
+        }
+      },
+      { root: resolvedRoot, rootMargin: "240px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [location.pathname, filesPath, filesSearchQuery, filesViewMode, filesVisibleCount]);
+
   const fileFilterSummary = filesSearchQuery.trim()
     ? `${filteredFiles.length} of ${files.length} items`
     : `${files.length} items`;
@@ -4465,10 +4547,14 @@ function App() {
         appsIncludeVersions,
       );
       setApps(response.data);
+      setAppsVisibleCount(APPS_PAGE_SIZE);
       setSelectedApp(null);
       setSelectedAppDetails(null);
       setAppsDetailsBusy(false);
       setAppsContextMenu(null);
+      setAppIconsByKey({});
+      appIconQueueRef.current = [];
+      appIconInFlightRef.current = 0;
       appsDetailsSeqRef.current += 1;
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -4476,6 +4562,226 @@ function App() {
       setBusy(false);
     }
   };
+
+  const getAppDisplayName = (packageName: string) => {
+    const trimmed = packageName.trim();
+    if (!trimmed) {
+      return "(unknown)";
+    }
+    const last = trimmed.split(".").filter(Boolean).pop() ?? trimmed;
+    const normalized = last.replace(/[_-]+/g, " ").trim();
+    const words = normalized
+      .split(" ")
+      .filter(Boolean)
+      .slice(0, 3)
+      .map((word) => {
+        const lower = word.toLowerCase();
+        return lower.length ? lower[0].toUpperCase() + lower.slice(1) : lower;
+      });
+    const candidate = words.join(" ").trim();
+    return candidate || trimmed;
+  };
+
+  const getAppAvatarLetters = (packageName: string) => {
+    const label = getAppDisplayName(packageName);
+    const parts = label.split(" ").filter(Boolean);
+    const first = parts[0]?.[0] ?? label[0] ?? "A";
+    const second = parts.length > 1 ? parts[1]?.[0] : undefined;
+    const letters = `${first}${second ?? ""}`.toUpperCase();
+    return letters.slice(0, 2);
+  };
+
+  const getStableToneIndex = (value: string) => {
+    let sum = 0;
+    for (let i = 0; i < value.length; i += 1) {
+      sum = (sum + value.charCodeAt(i) * (i + 1)) % 1_000_000;
+    }
+    return sum % 6;
+  };
+
+  const appsSerial = selectedSerials.length === 1 ? selectedSerials[0] : null;
+  const getAppIconKey = (serial: string, packageName: string) => `${serial}::${packageName}`;
+
+  const pumpAppIconQueue = () => {
+    const MAX_IN_FLIGHT = 2;
+    while (appIconInFlightRef.current < MAX_IN_FLIGHT) {
+      const next = appIconQueueRef.current.shift();
+      if (!next) {
+        break;
+      }
+      const current = appIconsByKeyRef.current[next.key];
+      if (current && (current.status === "loading" || current.status === "ready")) {
+        continue;
+      }
+      appIconInFlightRef.current += 1;
+      setAppIconsByKey((prev) => ({
+        ...prev,
+        [next.key]: { status: "loading" },
+      }));
+      void (async () => {
+        try {
+          const response = await getAppIcon(next.serial, next.app.package_name, next.app.apk_path ?? undefined);
+          setAppIconsByKey((prev) => ({
+            ...prev,
+            [next.key]: { status: "ready", dataUrl: response.data.data_url },
+          }));
+        } catch (error) {
+          setAppIconsByKey((prev) => ({
+            ...prev,
+            [next.key]: { status: "error", error: formatError(error) },
+          }));
+        } finally {
+          appIconInFlightRef.current -= 1;
+          pumpAppIconQueue();
+        }
+      })();
+    }
+  };
+
+  const enqueueAppIconFetch = (serial: string, app: AppInfo) => {
+    const key = getAppIconKey(serial, app.package_name);
+    const current = appIconsByKeyRef.current[key];
+    if (current && (current.status === "queued" || current.status === "loading" || current.status === "ready")) {
+      return;
+    }
+    setAppIconsByKey((prev) => ({
+      ...prev,
+      [key]: { status: "queued" },
+    }));
+    appIconQueueRef.current.push({ key, serial, app });
+    pumpAppIconQueue();
+  };
+
+  useEffect(() => {
+    if (!appsSerial || !selectedApp) {
+      return;
+    }
+    enqueueAppIconFetch(appsSerial, selectedApp);
+  }, [appsSerial, selectedApp?.package_name]);
+
+  const appsListRef = useRef<HTMLDivElement | null>(null);
+  const appsLoadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+  const appsLoadMoreLockedRef = useRef(false);
+  const appsFilteredLenRef = useRef(0);
+  const appsCanLoadMoreRef = useRef(false);
+  const appsByPackage = useMemo(() => {
+    return new Map(apps.map((app) => [app.package_name, app] as const));
+  }, [apps]);
+
+  useEffect(() => {
+    setAppsVisibleCount(APPS_PAGE_SIZE);
+  }, [appsFilter]);
+
+  useEffect(() => {
+    setAppsVisibleCount(APPS_PAGE_SIZE);
+  }, [appsSerial]);
+
+  useEffect(() => {
+    if (!appsSerial) {
+      return;
+    }
+    const root = appsListRef.current;
+    if (!root) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) {
+            continue;
+          }
+          const target = entry.target as HTMLElement;
+          const pkg = target.dataset.appPkg;
+          if (!pkg) {
+            continue;
+          }
+          const app = appsByPackage.get(pkg);
+          if (!app) {
+            continue;
+          }
+          enqueueAppIconFetch(appsSerial, app);
+        }
+      },
+      { root, rootMargin: "220px" },
+    );
+    const nodes = root.querySelectorAll<HTMLElement>("[data-app-pkg]");
+    nodes.forEach((node) => {
+      observer.observe(node);
+    });
+    return () => observer.disconnect();
+  }, [appsSerial, appsByPackage, appsFilter, appsVisibleCount]);
+
+  const appsAutoLoadKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (location.pathname !== "/apps") {
+      return;
+    }
+    if (!appsSerial) {
+      return;
+    }
+    if (busy) {
+      return;
+    }
+    if (singleSelectionWarning) {
+      return;
+    }
+    if (apps.length > 0) {
+      return;
+    }
+    const key = `${appsSerial}|${appsThirdPartyOnly ? "3" : "all"}|${appsIncludeVersions ? "v" : ""}`;
+    if (appsAutoLoadKeyRef.current === key) {
+      return;
+    }
+    appsAutoLoadKeyRef.current = key;
+    void handleLoadApps();
+  }, [location.pathname, appsSerial, appsThirdPartyOnly, appsIncludeVersions, apps.length, busy, singleSelectionWarning]);
+
+  const loadMoreApps = () => {
+    if (!appsCanLoadMoreRef.current) {
+      return;
+    }
+    if (appsLoadMoreLockedRef.current) {
+      return;
+    }
+    appsLoadMoreLockedRef.current = true;
+    setAppsVisibleCount((prev) => {
+      const next = Math.min(prev + APPS_PAGE_SIZE, appsFilteredLenRef.current);
+      return next;
+    });
+    window.requestAnimationFrame(() => {
+      appsLoadMoreLockedRef.current = false;
+    });
+  };
+
+  useEffect(() => {
+    if (location.pathname !== "/apps") {
+      return;
+    }
+    if (!appsCanLoadMoreRef.current) {
+      return;
+    }
+    const sentinel = appsLoadMoreSentinelRef.current;
+    if (!sentinel) {
+      return;
+    }
+    const root = appsListRef.current;
+    const hasOverflow = root ? root.scrollHeight > root.clientHeight + 8 : false;
+    const resolvedRoot = hasOverflow ? root : null;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadMoreApps();
+        }
+      },
+      {
+        root: resolvedRoot,
+        rootMargin: "240px",
+      },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [location.pathname, appsVisibleCount, appsFilter, appsSerial]);
 
   const handleSelectAppRow = (app: AppInfo) => {
     setSelectedApp(app);
@@ -5073,8 +5379,26 @@ function App() {
     if (!query) {
       return apps;
     }
-    return apps.filter((app) => app.package_name.toLowerCase().includes(query));
+    return apps.filter((app) => {
+      const pkg = app.package_name.toLowerCase();
+      if (pkg.includes(query)) {
+        return true;
+      }
+      const name = getAppDisplayName(app.package_name).toLowerCase();
+      return name.includes(query);
+    });
   }, [apps, appsFilter]);
+
+  const visibleApps = useMemo(() => {
+    return filteredApps.slice(0, Math.max(APPS_PAGE_SIZE, appsVisibleCount));
+  }, [filteredApps, appsVisibleCount, APPS_PAGE_SIZE]);
+
+  const canLoadMoreApps = visibleApps.length < filteredApps.length;
+
+  useEffect(() => {
+    appsFilteredLenRef.current = filteredApps.length;
+    appsCanLoadMoreRef.current = canLoadMoreApps;
+  }, [filteredApps.length, canLoadMoreApps]);
 
   const dashboardActions: Array<{
     id: DashboardActionId;
@@ -7281,13 +7605,16 @@ function App() {
                       <span className="muted file-filter-meta">{fileFilterSummary}</span>
                     </div>
                     <div className="split files-split">
-                      <div className={filesViewMode === "grid" ? "file-grid" : "file-list"}>
+                      <div
+                        className={filesViewMode === "grid" ? "file-grid" : "file-list"}
+                        ref={filesListRef}
+                      >
                         {files.length === 0 ? (
                           <p className="muted">No files loaded. Click Go to load the folder.</p>
                         ) : filteredFiles.length === 0 ? (
                           <p className="muted">No matches. Clear the filter to see all items.</p>
                         ) : (
-                          filteredFiles.map((entry) => {
+                          visibleFiles.map((entry) => {
                             const kind = getFileKind(entry);
                             const kindLabel = getFileKindLabel(kind);
                             const sizeLabel = entry.size_bytes == null ? "—" : formatBytes(entry.size_bytes);
@@ -7404,6 +7731,26 @@ function App() {
                             );
                           })
                         )}
+                        {files.length > 0 && filteredFiles.length > 0 && (
+                          <div className="file-list-footer">
+                            <span className="muted">
+                              Showing {visibleFiles.length}/{filteredFiles.length}
+                            </span>
+                            {canLoadMoreFiles ? (
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={loadMoreFiles}
+                                disabled={busy}
+                              >
+                                Load more
+                              </button>
+                            ) : (
+                              <span className="muted">All loaded</span>
+                            )}
+                          </div>
+                        )}
+							<div className="file-load-more-sentinel" ref={filesLoadMoreSentinelRef} />
                       </div>
                       <div className="preview-panel">
                         <h3>Preview</h3>
@@ -8305,93 +8652,347 @@ function App() {
                       <button onClick={handleLoadApps} disabled={busy || selectedSerials.length !== 1}>
                         Load Apps
                       </button>
+	                      {(() => {
+	                        if (!appsSerial || apps.length === 0) {
+	                          return null;
+	                        }
+	                        const prefix = `${appsSerial}::`;
+	                        const entries = Object.entries(appIconsByKey).filter(([key]) => key.startsWith(prefix));
+	                        const readyCount = entries.filter(([, item]) => item.status === "ready").length;
+	                        const queuedCount = entries.filter(([, item]) => item.status === "queued").length;
+	                        const loadingCount = entries.filter(([, item]) => item.status === "loading").length;
+	                        const errorCount = entries.filter(([, item]) => item.status === "error").length;
+	                        return (
+	                          <span className="muted app-icons-progress" title="App icon loading">
+	                            Icons {readyCount}/{apps.length}
+	                            {loadingCount || queuedCount ? " · loading" : ""}
+	                            {errorCount ? ` · ${errorCount} failed` : ""}
+	                          </span>
+	                        );
+	                      })()}
                     </div>
-                    <div className="split">
-                      <div className="file-list">
-                        {filteredApps.map((app) => (
-                          <button
-                            key={app.package_name}
-                            className={`app-row ${selectedApp?.package_name === app.package_name ? "active" : ""}`}
-                            type="button"
-                            onClick={() => handleSelectAppRow(app)}
-                            onDoubleClick={() => void handleAppDoubleClick(app)}
-                            onContextMenu={(event) => handleAppContextMenu(event, app)}
-                          >
-                            <strong>{app.package_name}</strong>
-                            <span>{app.version_name ?? ""}</span>
-                            {app.is_system && <span className="badge">System</span>}
-                          </button>
-                        ))}
-                      </div>
-                      <div className="preview-panel">
-                        <h3>Selected App</h3>
-                        {selectedApp ? (
-                          <div className="stack">
-                            <p>{selectedApp.package_name}</p>
-                            {appsDetailsBusy && <p className="muted">Loading details...</p>}
-                            <p className="muted">
-                              Version: {selectedAppDetails?.version_name ?? selectedApp.version_name ?? "--"}
-                            </p>
-                            <p className="muted">
-                              First install: {selectedAppDetails?.first_install_time ?? "--"}
-                            </p>
-                            <p className="muted">
-                              Last update: {selectedAppDetails?.last_update_time ?? "--"}
-                            </p>
-                            <p className="muted">
-                              APK size:{" "}
-                              {selectedAppDetails?.apk_size_bytes_total != null
-                                ? formatBytes(selectedAppDetails.apk_size_bytes_total)
-                                : "--"}
-                            </p>
-                            <div className="button-row">
-                              <button onClick={() => handleAppAction("forceStop")} disabled={busy || selectedSerials.length !== 1}>
-                                Force Stop
-                              </button>
-                              <button onClick={() => handleAppAction("clear")} disabled={busy || selectedSerials.length !== 1}>
-                                Clear Data
-                              </button>
-                              <button onClick={() => handleAppAction("info")} disabled={busy || selectedSerials.length !== 1}>
-                                Open Info
-                              </button>
-                              <button onClick={() => handleAppAction("enable")} disabled={busy || selectedSerials.length !== 1}>
-                                Enable
-                              </button>
-                              <button onClick={() => handleAppAction("disable")} disabled={busy || selectedSerials.length !== 1}>
-                                Disable
-                              </button>
-                              <button onClick={() => handleAppAction("uninstall")} disabled={busy || selectedSerials.length !== 1}>
-                                Uninstall
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <p className="muted">Select an app to manage.</p>
-                        )}
-                      </div>
-                    </div>
-                    {appsContextMenu && (
-                      <>
-                        <div
-                          className="context-menu-backdrop"
-                          onMouseDown={() => setAppsContextMenu(null)}
-                        />
-                        <div
-                          className="context-menu"
-                          style={{ left: appsContextMenu.x, top: appsContextMenu.y }}
-                          onMouseDown={(event) => event.stopPropagation()}
-                        >
-                          <button
-                            type="button"
-                            className="context-menu-item"
-                            onClick={() => void handleContextForceStop(appsContextMenu.app)}
-                            disabled={busy || selectedSerials.length !== 1}
-                          >
-                            Force Stop
-                          </button>
-                        </div>
-                      </>
-                    )}
+	                    <div className="split">
+	                      <div className="app-list" ref={appsListRef} role="list" aria-label="Apps">
+	                        {apps.length === 0 ? (
+	                          <p className="muted">No apps loaded. Click Load Apps.</p>
+	                        ) : filteredApps.length === 0 ? (
+	                          <p className="muted">No matches.</p>
+	                        ) : (
+	                          <>
+	                            {visibleApps.map((app) => {
+	                            const isActive = selectedApp?.package_name === app.package_name;
+	                            const tone = getStableToneIndex(app.package_name);
+	                            const displayName = getAppDisplayName(app.package_name);
+	                            const letters = getAppAvatarLetters(app.package_name);
+	                            const versionLabel = appsIncludeVersions ? app.version_name ?? "" : "";
+	                            const iconKey = appsSerial ? getAppIconKey(appsSerial, app.package_name) : null;
+	                            const iconUrl = iconKey ? appIconsByKey[iconKey]?.dataUrl : undefined;
+	                            return (
+	                              <button
+	                                key={app.package_name}
+	                                className={`app-row${isActive ? " active" : ""}`}
+	                                type="button"
+	                                onClick={() => handleSelectAppRow(app)}
+	                                onDoubleClick={() => void handleAppDoubleClick(app)}
+	                                onContextMenu={(event) => handleAppContextMenu(event, app)}
+	                                role="listitem"
+	                                aria-current={isActive ? "true" : undefined}
+	                                data-app-pkg={app.package_name}
+	                              >
+	                                <div
+	                                  className={`app-avatar tone-${tone}`}
+	                                  aria-hidden="true"
+	                                  title={
+	                                    iconKey && appIconsByKey[iconKey]?.status === "error"
+	                                      ? appIconsByKey[iconKey]?.error
+	                                      : undefined
+	                                  }
+	                                >
+	                                  {iconUrl ? <img className="app-icon-img" src={iconUrl} alt="" /> : letters}
+	                                  {iconKey && appIconsByKey[iconKey]?.status === "loading" ? (
+	                                    <span className="app-icon-spinner" aria-hidden="true" />
+	                                  ) : iconKey && appIconsByKey[iconKey]?.status === "queued" ? (
+	                                    <span className="app-icon-dot" aria-hidden="true" />
+	                                  ) : iconKey && appIconsByKey[iconKey]?.status === "error" ? (
+	                                    <span className="app-icon-error" aria-hidden="true">
+	                                      !
+	                                    </span>
+	                                  ) : null}
+	                                </div>
+	                                <div className="app-row-main">
+	                                  <div className="app-row-title">
+	                                    <strong>{displayName}</strong>
+	                                    {app.is_system && <span className="badge">System</span>}
+	                                  </div>
+	                                  <div className="app-row-sub">
+	                                    <span className="app-row-package">{app.package_name}</span>
+	                                    {versionLabel ? <span className="app-row-version">{versionLabel}</span> : null}
+	                                  </div>
+	                                </div>
+	                                <div className="app-row-tail" aria-hidden="true">
+	                                  <span className="chevron">›</span>
+	                                </div>
+	                              </button>
+	                            );
+	                          })}
+	                            <div className="app-list-footer">
+	                              <span className="muted">
+	                                Showing {visibleApps.length}/{filteredApps.length}
+	                              </span>
+	                              {canLoadMoreApps ? (
+	                                <button
+	                                  type="button"
+	                                  className="ghost"
+	                                  onClick={loadMoreApps}
+	                                >
+	                                  Load more
+	                                </button>
+	                              ) : (
+	                                <span className="muted">All loaded</span>
+	                              )}
+	                            </div>
+	                            <div className="app-load-more-sentinel" ref={appsLoadMoreSentinelRef} />
+	                          </>
+	                        )}
+	                      </div>
+	                      <div className="preview-panel app-details">
+	                        <h3>Selected App</h3>
+	                        {selectedApp ? (
+	                          <div className="stack">
+	                            {(() => {
+	                              const tone = getStableToneIndex(selectedApp.package_name);
+	                              const displayName = getAppDisplayName(selectedApp.package_name);
+	                              const letters = getAppAvatarLetters(selectedApp.package_name);
+	                              const iconKey = appsSerial ? getAppIconKey(appsSerial, selectedApp.package_name) : null;
+	                              const iconUrl = iconKey ? appIconsByKey[iconKey]?.dataUrl : undefined;
+	                              return (
+	                                <div className="app-details-header">
+	                                  <div className={`app-avatar large tone-${tone}`} aria-hidden="true">
+	                                    {iconUrl ? <img className="app-icon-img" src={iconUrl} alt="" /> : letters}
+	                                  </div>
+	                                  <div className="app-details-title">
+	                                    <div className="app-details-name">{displayName}</div>
+	                                    <div className="app-details-package">{selectedApp.package_name}</div>
+	                                  </div>
+	                                </div>
+	                              );
+	                            })()}
+	                            {appsDetailsBusy && <p className="muted">Loading details...</p>}
+	                            <div className="stack">
+	                              <p className="muted">
+	                                Version: {selectedAppDetails?.version_name ?? selectedApp.version_name ?? "--"}
+	                              </p>
+	                              <details>
+	                                <summary className="muted">Install source</summary>
+	                                <div className="stack">
+	                                  <p className="muted">
+	                                    Installer: {selectedAppDetails?.installer_package_name ?? "--"}
+	                                  </p>
+	                                  <p className="muted">
+	                                    Installing: {selectedAppDetails?.installing_package_name ?? "--"}
+	                                  </p>
+	                                  <p className="muted">
+	                                    Originating: {selectedAppDetails?.originating_package_name ?? "--"}
+	                                  </p>
+	                                  <p className="muted">
+	                                    Initiating: {selectedAppDetails?.initiating_package_name ?? "--"}
+	                                  </p>
+	                                </div>
+	                              </details>
+	                              <p className="muted">UID: {selectedAppDetails?.uid ?? "--"}</p>
+	                              <p className="muted">
+	                                Data dir: {selectedAppDetails?.data_dir ?? "--"}
+	                              </p>
+	                              <p className="muted">
+	                                Target SDK: {selectedAppDetails?.target_sdk ?? "--"}
+	                              </p>
+	                              <details>
+	                                <summary className="muted">
+	                                  Permissions (granted {selectedAppDetails?.granted_permissions?.length ?? 0} / requested {selectedAppDetails?.requested_permissions?.length ?? 0})
+	                                </summary>
+	                                <div className="stack">
+	                                  <p className="muted">Granted</p>
+	                                  <pre>{(selectedAppDetails?.granted_permissions ?? []).join("\n")}</pre>
+	                                  <p className="muted">Requested</p>
+	                                  <pre>{(selectedAppDetails?.requested_permissions ?? []).join("\n")}</pre>
+	                                </div>
+	                              </details>
+	                              <details>
+	                                <summary className="muted">Components</summary>
+	                                <div className="stack">
+	                                  <p className="muted">Activities: {selectedAppDetails?.components_summary?.activities ?? 0}</p>
+	                                  <p className="muted">Services: {selectedAppDetails?.components_summary?.services ?? 0}</p>
+	                                  <p className="muted">Receivers: {selectedAppDetails?.components_summary?.receivers ?? 0}</p>
+	                                  <p className="muted">Providers: {selectedAppDetails?.components_summary?.providers ?? 0}</p>
+	                                </div>
+	                              </details>
+	                              <p className="muted">First install: {selectedAppDetails?.first_install_time ?? "--"}</p>
+	                              <p className="muted">Last update: {selectedAppDetails?.last_update_time ?? "--"}</p>
+	                              <p className="muted">
+	                                APK size:{" "}
+	                                {selectedAppDetails?.apk_size_bytes_total != null
+	                                  ? formatBytes(selectedAppDetails.apk_size_bytes_total)
+	                                  : "--"}
+	                              </p>
+	                            </div>
+	                            <div className="button-row compact">
+	                              <button
+	                                onClick={() => void handleAppDoubleClick(selectedApp)}
+	                                disabled={busy || selectedSerials.length !== 1}
+	                              >
+	                                Launch
+	                              </button>
+	                              <button
+	                                onClick={() => handleAppAction("info")}
+	                                disabled={busy || selectedSerials.length !== 1}
+	                              >
+	                                Open Info
+	                              </button>
+	                            </div>
+	                            <div className="button-row compact">
+	                              <button
+	                                onClick={() => handleAppAction("forceStop")}
+	                                disabled={busy || selectedSerials.length !== 1}
+	                              >
+	                                Force Stop
+	                              </button>
+	                              <button onClick={() => handleAppAction("clear")} disabled={busy || selectedSerials.length !== 1}>
+	                                Clear Data
+	                              </button>
+	                              <button
+	                                className="ghost"
+	                                onClick={() => handleAppAction("enable")}
+	                                disabled={busy || selectedSerials.length !== 1}
+	                              >
+	                                Enable
+	                              </button>
+	                              <button
+	                                className="ghost"
+	                                onClick={() => handleAppAction("disable")}
+	                                disabled={busy || selectedSerials.length !== 1}
+	                              >
+	                                Disable
+	                              </button>
+	                              <button
+	                                className="danger"
+	                                onClick={() => handleAppAction("uninstall")}
+	                                disabled={busy || selectedSerials.length !== 1}
+	                              >
+	                                Uninstall
+	                              </button>
+	                            </div>
+	                          </div>
+	                        ) : (
+	                          <p className="muted">Select an app to manage.</p>
+	                        )}
+	                      </div>
+	                    </div>
+	                    {appsContextMenu && (
+	                      <>
+	                        <div
+	                          className="context-menu-backdrop"
+	                          onMouseDown={() => setAppsContextMenu(null)}
+	                        />
+	                        <div
+	                          className="context-menu"
+	                          style={{ left: appsContextMenu.x, top: appsContextMenu.y, minWidth: 240 }}
+	                          onMouseDown={(event) => event.stopPropagation()}
+	                        >
+	                          {(() => {
+	                            const app = appsContextMenu.app;
+	                            const displayName = getAppDisplayName(app.package_name);
+	                            return (
+	                              <>
+	                                <div className="context-menu-header">
+	                                  <div className="context-menu-header-title">{displayName}</div>
+	                                  <div className="context-menu-header-sub">{app.package_name}</div>
+	                                  <div className="context-menu-header-sub">
+	                                    {app.is_system ? "System" : "Third-party"}
+	                                    {appsIncludeVersions && app.version_name ? ` · ${app.version_name}` : ""}
+	                                  </div>
+	                                </div>
+	                                <div className="context-menu-sep" />
+	                              </>
+	                            );
+	                          })()}
+	                          <button
+	                            type="button"
+	                            className="context-menu-item"
+	                            onClick={() => void handleAppDoubleClick(appsContextMenu.app)}
+	                            disabled={busy || selectedSerials.length !== 1}
+	                          >
+	                            Launch
+	                          </button>
+	                          <button
+	                            type="button"
+	                            className="context-menu-item"
+	                            onClick={() => void handleContextForceStop(appsContextMenu.app)}
+	                            disabled={busy || selectedSerials.length !== 1}
+	                          >
+	                            Force Stop
+	                          </button>
+	                          <button
+	                            type="button"
+	                            className="context-menu-item"
+	                            onClick={() => void handleAppAction("clear")}
+	                            disabled={busy || selectedSerials.length !== 1}
+	                          >
+	                            Clear Data
+	                          </button>
+	                          <button
+	                            type="button"
+	                            className="context-menu-item"
+	                            onClick={() => void handleAppAction("info")}
+	                            disabled={busy || selectedSerials.length !== 1}
+	                          >
+	                            Open Info
+	                          </button>
+	                          <div className="context-menu-sep" />
+	                          <button
+	                            type="button"
+	                            className="context-menu-item"
+	                            onClick={() => void handleAppAction("enable")}
+	                            disabled={busy || selectedSerials.length !== 1}
+	                          >
+	                            Enable
+	                          </button>
+	                          <button
+	                            type="button"
+	                            className="context-menu-item"
+	                            onClick={() => void handleAppAction("disable")}
+	                            disabled={busy || selectedSerials.length !== 1}
+	                          >
+	                            Disable
+	                          </button>
+	                          <div className="context-menu-sep" />
+	                          <button
+	                            type="button"
+	                            className="context-menu-item"
+	                            onClick={() => {
+	                              void (async () => {
+	                                try {
+	                                  await writeText(appsContextMenu.app.package_name);
+	                                  pushToast("Package copied.", "info");
+	                                } catch (error) {
+	                                  pushToast(formatError(error), "error");
+	                                }
+	                              })();
+	                              setAppsContextMenu(null);
+	                            }}
+	                          >
+	                            Copy package
+	                          </button>
+	                          <button
+	                            type="button"
+	                            className="context-menu-item danger"
+	                            onClick={() => void handleAppAction("uninstall")}
+	                            disabled={busy || selectedSerials.length !== 1}
+	                          >
+	                            Uninstall
+	                          </button>
+	                        </div>
+	                      </>
+	                    )}
                   </section>
                 </div>
               }

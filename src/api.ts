@@ -4,6 +4,7 @@ import type {
   ApkBatchInstallResult,
   AppConfig,
   AppBasicInfo,
+  AppIcon,
   AppInfo,
   BugreportLogFilters,
   BugreportLogPage,
@@ -474,6 +475,19 @@ export const getAppBasicInfo = async (serial: string, packageName: string) => {
     serial,
     package_name: packageName,
     packageName,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const getAppIcon = async (serial: string, packageName: string, apkPath?: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<AppIcon>>("get_app_icon", {
+    serial,
+    package_name: packageName,
+    packageName,
+    apk_path: apkPath,
+    apkPath,
     trace_id: traceId,
     traceId,
   });

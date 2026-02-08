@@ -152,9 +152,37 @@ pub struct AppBasicInfo {
     pub version_code: Option<String>,
     pub first_install_time: Option<String>,
     pub last_update_time: Option<String>,
+    pub installer_package_name: Option<String>,
+    pub installing_package_name: Option<String>,
+    pub originating_package_name: Option<String>,
+    pub initiating_package_name: Option<String>,
+    pub uid: Option<i64>,
+    pub data_dir: Option<String>,
+    pub target_sdk: Option<i64>,
+    #[serde(default)]
+    pub requested_permissions: Vec<String>,
+    #[serde(default)]
+    pub granted_permissions: Vec<String>,
+    pub components_summary: Option<AppComponentsSummary>,
     #[serde(default)]
     pub apk_paths: Vec<String>,
     pub apk_size_bytes_total: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppComponentsSummary {
+    pub activities: usize,
+    pub services: usize,
+    pub receivers: usize,
+    pub providers: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppIcon {
+    pub package_name: String,
+    pub mime_type: String,
+    pub data_url: String,
+    pub from_cache: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

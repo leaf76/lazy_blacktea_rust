@@ -267,8 +267,30 @@ export type AppBasicInfo = {
   version_code?: string | null;
   first_install_time?: string | null;
   last_update_time?: string | null;
+  installer_package_name?: string | null;
+  installing_package_name?: string | null;
+  originating_package_name?: string | null;
+  initiating_package_name?: string | null;
+  uid?: number | null;
+  data_dir?: string | null;
+  target_sdk?: number | null;
+  requested_permissions?: string[];
+  granted_permissions?: string[];
+  components_summary?: {
+    activities: number;
+    services: number;
+    receivers: number;
+    providers: number;
+  } | null;
   apk_paths: string[];
   apk_size_bytes_total?: number | null;
+};
+
+export type AppIcon = {
+  package_name: string;
+  mime_type: string;
+  data_url: string;
+  from_cache: boolean;
 };
 
 export type BugreportResult = {

@@ -135,6 +135,158 @@ pub fn parse_dumpsys_last_update_time(output: &str) -> Option<String> {
     None
 }
 
+fn parse_dumpsys_value(output: &str, key: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix(key) {
+            let result = value.trim_matches(['"', '\'']).trim();
+            if !result.is_empty() {
+                return Some(result.to_string());
+            }
+        }
+        if let Some((_, tail)) = trimmed.split_once(key) {
+            let result = tail.trim_matches(['"', '\'']).trim();
+            if !result.is_empty() {
+                return Some(result.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_dumpsys_int(output: &str, key: &str) -> Option<i64> {
+    let raw = parse_dumpsys_value(output, key)?;
+    let digits: String = raw.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<i64>().ok()
+}
+
+pub fn parse_dumpsys_installer_package_name(output: &str) -> Option<String> {
+    parse_dumpsys_value(output, "installerPackageName=")
+        .or_else(|| parse_dumpsys_value(output, "installerPackageName:"))
+}
+
+pub fn parse_dumpsys_installing_package_name(output: &str) -> Option<String> {
+    parse_dumpsys_value(output, "installingPackageName=")
+        .or_else(|| parse_dumpsys_value(output, "installingPackageName:"))
+}
+
+pub fn parse_dumpsys_originating_package_name(output: &str) -> Option<String> {
+    parse_dumpsys_value(output, "originatingPackageName=")
+        .or_else(|| parse_dumpsys_value(output, "originatingPackageName:"))
+}
+
+pub fn parse_dumpsys_initiating_package_name(output: &str) -> Option<String> {
+    parse_dumpsys_value(output, "initiatingPackageName=")
+        .or_else(|| parse_dumpsys_value(output, "initiatingPackageName:"))
+}
+
+pub fn parse_dumpsys_requested_permissions(output: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_section = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("requested permissions:") {
+            in_section = true;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.ends_with(':') {
+            break;
+        }
+        if trimmed.contains(':') {
+            break;
+        }
+        if trimmed.contains('.') {
+            out.push(trimmed.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn parse_dumpsys_granted_permissions(output: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.contains("granted=true") {
+            continue;
+        }
+        let Some((head, _tail)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let perm = head.trim();
+        if perm.is_empty() {
+            continue;
+        }
+        if !perm.contains('.') {
+            continue;
+        }
+        out.push(perm.to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn count_components_in_section(output: &str, section: &str, marker: &str) -> usize {
+    let mut in_section = false;
+    let mut count = 0usize;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed == section {
+            in_section = true;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if trimmed.ends_with(':') {
+            break;
+        }
+        if trimmed.contains(marker) {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+pub fn parse_dumpsys_components_summary(output: &str) -> (usize, usize, usize, usize) {
+    let activities = count_components_in_section(output, "Activities:", "Activity{");
+    let services = count_components_in_section(output, "Services:", "Service{");
+    let receivers = count_components_in_section(output, "Receivers:", "Receiver{");
+    let providers = count_components_in_section(output, "Providers:", "Provider{");
+    (activities, services, receivers, providers)
+}
+
+pub fn parse_dumpsys_user_id(output: &str) -> Option<i64> {
+    parse_dumpsys_int(output, "userId=")
+        .or_else(|| parse_dumpsys_int(output, "userId:"))
+        .or_else(|| parse_dumpsys_int(output, "uid="))
+}
+
+pub fn parse_dumpsys_data_dir(output: &str) -> Option<String> {
+    parse_dumpsys_value(output, "dataDir=").or_else(|| parse_dumpsys_value(output, "dataDir:"))
+}
+
+pub fn parse_dumpsys_target_sdk(output: &str) -> Option<i64> {
+    parse_dumpsys_int(output, "targetSdk=")
+        .or_else(|| parse_dumpsys_int(output, "targetSdkVersion="))
+        .or_else(|| parse_dumpsys_int(output, "targetSdk:"))
+        .or_else(|| parse_dumpsys_int(output, "targetSdkVersion:"))
+}
+
 pub fn parse_pm_path_output(output: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for raw in output.lines() {
@@ -231,5 +383,65 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "/a.apk");
         assert_eq!(paths[1], "/b.apk");
+    }
+
+    #[test]
+    fn parses_dumpsys_installer_uid_data_dir_target_sdk() {
+        let output = "\
+            installerPackageName=com.android.vending\n\
+            installingPackageName=com.android.vending\n\
+            originatingPackageName=com.android.vending\n\
+            initiatingPackageName=com.android.vending\n\
+            userId=10234\n\
+            dataDir=/data/user/0/com.example.app\n\
+            targetSdk=34\n\
+            requested permissions:\n\
+              android.permission.INTERNET\n\
+              android.permission.ACCESS_NETWORK_STATE\n\
+            install permissions:\n\
+              android.permission.INTERNET: granted=true\n\
+              android.permission.ACCESS_NETWORK_STATE: granted=false\n\
+            Activities:\n\
+              Activity{111 com.example/.MainActivity}\n\
+              Activity{222 com.example/.SettingsActivity}\n\
+            Services:\n\
+              Service{333 com.example/.SyncService}\n\
+            Receivers:\n\
+              Receiver{444 com.example/.BootReceiver}\n\
+            Providers:\n\
+              Provider{555 com.example/.MyProvider}\n\
+        ";
+        assert_eq!(
+            parse_dumpsys_installer_package_name(output).as_deref(),
+            Some("com.android.vending")
+        );
+        assert_eq!(
+            parse_dumpsys_installing_package_name(output).as_deref(),
+            Some("com.android.vending")
+        );
+        assert_eq!(
+            parse_dumpsys_originating_package_name(output).as_deref(),
+            Some("com.android.vending")
+        );
+        assert_eq!(
+            parse_dumpsys_initiating_package_name(output).as_deref(),
+            Some("com.android.vending")
+        );
+        assert_eq!(parse_dumpsys_user_id(output), Some(10234));
+        assert_eq!(
+            parse_dumpsys_data_dir(output).as_deref(),
+            Some("/data/user/0/com.example.app")
+        );
+        assert_eq!(parse_dumpsys_target_sdk(output), Some(34));
+
+        let requested = parse_dumpsys_requested_permissions(output);
+        assert_eq!(requested.len(), 2);
+        assert!(requested.contains(&"android.permission.INTERNET".to_string()));
+
+        let granted = parse_dumpsys_granted_permissions(output);
+        assert_eq!(granted, vec!["android.permission.INTERNET".to_string()]);
+
+        let (a, s, r, p) = parse_dumpsys_components_summary(output);
+        assert_eq!((a, s, r, p), (2, 1, 1, 1));
     }
 }
