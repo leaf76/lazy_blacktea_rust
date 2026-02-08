@@ -17,6 +17,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { isTauriRuntime } from "./tauriEnv";
+import { BluetoothMonitorPage } from "./BluetoothMonitorPage";
 import type {
   AdbInfo,
   AppConfig,
@@ -915,8 +916,6 @@ function App() {
   const [bugreportLogEnd, setBugreportLogEnd] = useState("");
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
   const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
-  const [bluetoothEvents, setBluetoothEvents] = useState<string[]>([]);
-  const [bluetoothState, setBluetoothStateText] = useState<string>("");
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -2240,24 +2239,6 @@ function App() {
         });
       }
     });
-    const unlistenBluetoothSnapshot = listen("bluetooth-snapshot", (event) => {
-      const payload = event.payload as { snapshot?: { summary?: string } };
-      if (payload?.snapshot?.summary) {
-        setBluetoothStateText(payload.snapshot.summary);
-      }
-    });
-    const unlistenBluetoothState = listen("bluetooth-state", (event) => {
-      const payload = event.payload as { state?: { summary?: string } };
-      if (payload?.state?.summary) {
-        setBluetoothStateText(payload.state.summary);
-      }
-    });
-    const unlistenBluetoothEvent = listen("bluetooth-event", (event) => {
-      const payload = event.payload as { event?: { message?: string } };
-      if (payload?.event?.message) {
-        setBluetoothEvents((prev) => [payload.event?.message ?? "", ...prev].slice(0, 200));
-      }
-    });
     const unlistenFileTransferProgress = listen<FileTransferProgress>("file-transfer-progress", (event) => {
       const payload = event.payload;
       const taskId = fileTransferTaskByTraceIdRef.current[payload.trace_id];
@@ -2370,9 +2351,6 @@ function App() {
         terminalFlushTimerRef.current = null;
       }
       terminalPendingRef.current = {};
-      void unlistenBluetoothSnapshot.then((unlisten) => unlisten());
-      void unlistenBluetoothState.then((unlisten) => unlisten());
-      void unlistenBluetoothEvent.then((unlisten) => unlisten());
       void unlistenFileTransferProgress.then((unlisten) => unlisten());
       void unlistenBugreportProgress.then((unlisten) => unlisten());
       void unlistenBugreportComplete.then((unlisten) => unlisten());
@@ -4464,7 +4442,7 @@ function App() {
   const handleBluetoothMonitor = async (enable: boolean) => {
     const serial = ensureSingleSelection("bluetooth monitor");
     if (!serial) {
-      return;
+      return false;
     }
     setBusy(true);
     try {
@@ -4474,8 +4452,10 @@ function App() {
         await stopBluetoothMonitor(serial);
       }
       pushToast(enable ? "Bluetooth monitor started." : "Bluetooth monitor stopped.", "info");
+      return true;
     } catch (error) {
       pushToast(formatError(error), "error");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -7902,38 +7882,16 @@ function App() {
                   <div className="page-header">
                     <div>
                       <h1>Bluetooth Monitor</h1>
-                      <p className="muted">Track Bluetooth state changes.</p>
+                      <p className="muted">State dashboard and event timeline for the selected device.</p>
                     </div>
                   </div>
-	                  <section className="panel">
-	                    <div className="panel-header">
-	                      <h2>Bluetooth Monitor</h2>
-	                      <span>{selectedSummaryLabel}</span>
-	                    </div>
-	                    {singleSelectionWarning && (
-	                      <div className="inline-alert info">
-	                        <strong>Single device required</strong>
-	                        <span>Keep only one device selected (Device Context: Single) to start the monitor.</span>
-	                      </div>
-	                    )}
-	                    <div className="button-row">
-	                      <button onClick={() => handleBluetoothMonitor(true)} disabled={busy || selectedSerials.length !== 1}>
-	                        Start Monitor
-	                      </button>
-                      <button onClick={() => handleBluetoothMonitor(false)} disabled={busy || selectedSerials.length !== 1}>
-                        Stop Monitor
-                      </button>
-                    </div>
-                    <div className="output-block">
-                      <h3>Current State</h3>
-                      <p>{bluetoothState || "No state yet."}</p>
-                    </div>
-                    <div className="logcat-output">
-                      {bluetoothEvents.map((line, index) => (
-                        <div key={`${line}-${index}`}>{line}</div>
-                      ))}
-                    </div>
-                  </section>
+                  <BluetoothMonitorPage
+                    serial={selectedSerials.length === 1 ? selectedSerials[0] : null}
+                    serialLabel={selectedSummaryLabel}
+                    busy={busy}
+                    singleSelectionWarning={singleSelectionWarning}
+                    onToggleMonitor={handleBluetoothMonitor}
+                  />
                 </div>
               }
             />

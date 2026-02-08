@@ -87,6 +87,94 @@ export type CommandResponse<T> = {
   data: T;
 };
 
+export type BluetoothState =
+  | "Idle"
+  | "Scanning"
+  | "Advertising"
+  | "Connected"
+  | "Off"
+  | "Unknown";
+
+export type BluetoothEventType =
+  | "AdvertisingStart"
+  | "AdvertisingStop"
+  | "ScanStart"
+  | "ScanResult"
+  | "ScanStop"
+  | "Connect"
+  | "Disconnect"
+  | "Error";
+
+export type BluetoothAdvertisingSet = {
+  set_id?: number | null;
+  interval_ms?: number | null;
+  tx_power?: string | null;
+  data_length: number;
+  service_uuids: string[];
+};
+
+export type BluetoothAdvertisingState = {
+  is_advertising: boolean;
+  sets: BluetoothAdvertisingSet[];
+};
+
+export type BluetoothScanningState = {
+  is_scanning: boolean;
+  clients: string[];
+};
+
+export type BluetoothBondState = "None" | "Bonding" | "Bonded";
+
+export type BluetoothBondedDevice = {
+  address: string;
+  name?: string | null;
+  bond_state: BluetoothBondState;
+};
+
+export type BluetoothParsedSnapshot = {
+  serial: string;
+  timestamp: number;
+  adapter_enabled: boolean;
+  address?: string | null;
+  scanning: BluetoothScanningState;
+  advertising: BluetoothAdvertisingState;
+  profiles: Record<string, string>;
+  bonded_devices: BluetoothBondedDevice[];
+  raw_text: string;
+};
+
+export type BluetoothParsedEvent = {
+  serial: string;
+  timestamp: number;
+  event_type: BluetoothEventType;
+  message: string;
+  tag?: string | null;
+  metadata: Record<string, unknown>;
+  raw_line: string;
+};
+
+export type BluetoothStateSummary = {
+  serial: string;
+  active_states: BluetoothState[];
+  metrics: Record<string, unknown>;
+  timestamp: number;
+};
+
+export type BluetoothSnapshotEvent = {
+  trace_id: string;
+  snapshot: BluetoothParsedSnapshot;
+};
+
+export type BluetoothStateEvent = {
+  trace_id: string;
+  state: BluetoothStateSummary;
+};
+
+export type BluetoothEventEvent = {
+  trace_id: string;
+  event: BluetoothParsedEvent;
+};
+
 export type LogcatEvent = {
   serial: string;
   line?: string;
@@ -275,21 +363,6 @@ export type ScrcpyInfo = {
   version_output: string;
   major_version: number;
   command_path: string;
-};
-
-export type BluetoothSnapshotEvent = {
-  trace_id: string;
-  snapshot: Record<string, unknown>;
-};
-
-export type BluetoothStateEvent = {
-  trace_id: string;
-  state: Record<string, unknown>;
-};
-
-export type BluetoothLogEvent = {
-  trace_id: string;
-  event: Record<string, unknown>;
 };
 
 export type UiSettings = {
