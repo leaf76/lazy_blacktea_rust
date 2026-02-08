@@ -212,6 +212,47 @@ fn stop_logcat_inner(
     Ok(true)
 }
 
+// Smoke helpers: these allow macOS-friendly "real device" checks without needing a Tauri AppHandle.
+// They intentionally reuse the same registries and inner logic as the Tauri commands.
+pub fn smoke_start_logcat_stream(
+    serial: String,
+    filter: Option<String>,
+    adb_program: &str,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, LogcatHandle>>,
+    emitter: Arc<dyn Fn(LogcatEvent) + Send + Sync>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    start_logcat_inner(
+        serial,
+        filter,
+        adb_program,
+        registry,
+        emitter,
+        trace_id,
+        |program, serial, filter, trace_id| {
+            let mut cmd = Command::new(program);
+            cmd.args(["-s", serial, "logcat"]);
+            if let Some(filter) = filter {
+                cmd.args(filter.split_whitespace());
+            }
+            cmd.stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|err| {
+                    AppError::dependency(format!("Failed to start logcat: {err}"), trace_id)
+                })
+        },
+    )
+}
+
+pub fn smoke_stop_logcat_stream(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, LogcatHandle>>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    stop_logcat_inner(serial, registry, trace_id)
+}
+
 fn clamp_perf_interval_ms(input: Option<u64>) -> u64 {
     let value = input.unwrap_or(1000);
     value.clamp(500, 5000)
@@ -264,6 +305,285 @@ fn stop_perf_monitor_inner(
         .join()
         .map_err(|_| AppError::system("Perf monitor thread panicked", trace_id))?;
     Ok(true)
+}
+
+pub fn smoke_start_perf_monitor(
+    serial: String,
+    interval_ms: Option<u64>,
+    adb_program: &str,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, PerfMonitorHandle>>,
+    emitter: Arc<dyn Fn(PerfEvent) + Send + Sync>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let interval_ms = clamp_perf_interval_ms(interval_ms);
+    let interval = Duration::from_millis(interval_ms);
+    let perf_script = build_perf_script();
+
+    let serial_spawn = serial.clone();
+    let trace_spawn = trace_id.to_string();
+    let adb_program_spawn = adb_program.to_string();
+
+    start_perf_monitor_inner(serial, registry, trace_id, move |stop_flag| {
+        std::thread::spawn(move || {
+            let max_samples = 3usize;
+            let mut samples = 0usize;
+
+            let mut cpu_prev: Option<CpuTotals> = None;
+            let mut cores_prev: Option<Vec<CpuTotals>> = None;
+            let mut net_prev: Option<NetTotals> = None;
+            let mut net_prev_instant: Option<Instant> = None;
+
+            loop {
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                if samples >= max_samples {
+                    break;
+                }
+
+                let loop_started = Instant::now();
+                let args = vec![
+                    "-s".to_string(),
+                    serial_spawn.clone(),
+                    "shell".to_string(),
+                    perf_script.clone(),
+                ];
+
+                let output = match run_command_with_timeout(
+                    &adb_program_spawn,
+                    &args,
+                    Duration::from_secs(5),
+                    &trace_spawn,
+                ) {
+                    Ok(out) => out,
+                    Err(err) => {
+                        emitter(PerfEvent {
+                            serial: serial_spawn.clone(),
+                            snapshot: None,
+                            error: Some(err.error),
+                            trace_id: trace_spawn.clone(),
+                        });
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                if output.exit_code.unwrap_or_default() != 0 {
+                    emitter(PerfEvent {
+                        serial: serial_spawn.clone(),
+                        snapshot: None,
+                        error: Some(output.stderr),
+                        trace_id: trace_spawn.clone(),
+                    });
+                    sleep_with_stop(interval, &stop_flag);
+                    continue;
+                }
+
+                let sections = match split_marked_sections(&output.stdout) {
+                    Ok(sections) => sections,
+                    Err(err) => {
+                        emitter(PerfEvent {
+                            serial: serial_spawn.clone(),
+                            snapshot: None,
+                            error: Some(err),
+                            trace_id: trace_spawn.clone(),
+                        });
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                let proc_stat = sections
+                    .get(MARK_PROC_STAT)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let meminfo = sections.get(MARK_MEMINFO).map(String::as_str).unwrap_or("");
+                let netdev = sections.get(MARK_NETDEV).map(String::as_str).unwrap_or("");
+                let cpufreq = sections.get(MARK_CPUFREQ).map(String::as_str).unwrap_or("");
+
+                let cpu_curr = match parse_cpu_totals(proc_stat) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        emitter(PerfEvent {
+                            serial: serial_spawn.clone(),
+                            snapshot: None,
+                            error: Some(err),
+                            trace_id: trace_spawn.clone(),
+                        });
+                        sleep_with_stop(interval, &stop_flag);
+                        continue;
+                    }
+                };
+
+                let cores_curr = parse_per_core_cpu_totals(proc_stat).unwrap_or_default();
+                let core_count = cores_curr.len();
+                let core_percents_x100: Vec<Option<u16>> = match cores_prev.as_ref() {
+                    Some(prev) if prev.len() == core_count && core_count > 0 => prev
+                        .iter()
+                        .zip(cores_curr.iter())
+                        .map(|(p, c)| compute_cpu_percent_x100(*p, *c))
+                        .collect(),
+                    _ => vec![None; core_count],
+                };
+
+                let freq_map = parse_cpu_freq_khz(cpufreq);
+                let core_freq_khz: Vec<Option<u32>> = (0..core_count)
+                    .map(|idx| freq_map.get(&idx).copied())
+                    .collect();
+                let mem = parse_mem_totals(meminfo).unwrap_or(MemTotals {
+                    total_bytes: 0,
+                    available_bytes: 0,
+                });
+                let net_curr = parse_net_totals(netdev).unwrap_or(NetTotals {
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                });
+
+                let now = Instant::now();
+                let dt_ms = net_prev_instant.map(|prev| now.duration_since(prev).as_millis());
+
+                let snapshot = build_perf_snapshot(PerfSnapshotInput {
+                    ts_ms: Utc::now().timestamp_millis(),
+                    cpu_prev,
+                    cpu_curr,
+                    core_percents_x100,
+                    core_freq_khz,
+                    mem,
+                    net_prev,
+                    net_curr,
+                    dt_ms,
+                    battery: BatteryTotals {
+                        level: None,
+                        temperature_decic: None,
+                    },
+                    display_refresh_hz_x100: None,
+                    missed_frames_per_sec_x100: None,
+                });
+
+                cpu_prev = Some(cpu_curr);
+                cores_prev = Some(cores_curr);
+                net_prev = Some(net_curr);
+                net_prev_instant = Some(now);
+
+                emitter(PerfEvent {
+                    serial: serial_spawn.clone(),
+                    snapshot: Some(snapshot),
+                    error: None,
+                    trace_id: trace_spawn.clone(),
+                });
+
+                samples += 1;
+
+                let elapsed = loop_started.elapsed();
+                if elapsed < interval {
+                    sleep_with_stop(interval - elapsed, &stop_flag);
+                }
+            }
+        })
+    })
+}
+
+pub fn smoke_stop_perf_monitor(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, PerfMonitorHandle>>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    stop_perf_monitor_inner(serial, registry, trace_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn smoke_install_apk_batch(
+    serials: Vec<String>,
+    apk_path: String,
+    replace: bool,
+    allow_downgrade: bool,
+    grant: bool,
+    allow_test_packages: bool,
+    extra_args: Option<String>,
+    state: &AppState,
+    trace_id: &str,
+) -> Result<ApkBatchInstallResult, AppError> {
+    install_apk_batch_inner(
+        serials,
+        apk_path,
+        replace,
+        allow_downgrade,
+        grant,
+        allow_test_packages,
+        extra_args,
+        state,
+        trace_id,
+    )
+}
+
+pub fn smoke_launch_app(
+    serials: Vec<String>,
+    package_name: String,
+    state: &AppState,
+    trace_id: &str,
+) -> Result<Vec<CommandResult>, AppError> {
+    ensure_non_empty(&package_name, "package_name", trace_id)?;
+    if serials.is_empty() {
+        return Err(AppError::validation("serials is required", trace_id));
+    }
+
+    let adb_program = get_adb_program(trace_id)?;
+    let scheduler = Arc::clone(&state.scheduler);
+
+    let mut handles = Vec::new();
+    for (index, serial) in serials.into_iter().enumerate() {
+        ensure_non_empty(&serial, "serial", trace_id)?;
+        let scheduler_clone = Arc::clone(&scheduler);
+        let trace_clone = trace_id.to_string();
+        let adb_program_clone = adb_program.clone();
+        let package_clone = package_name.clone();
+        handles.push(std::thread::spawn(move || -> Result<_, AppError> {
+            let _permit = scheduler_clone.acquire_global();
+            let device_lock = scheduler_clone.device_lock(&serial);
+            let _device_guard = device_lock
+                .lock()
+                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+
+            let args = vec![
+                "-s".to_string(),
+                serial.clone(),
+                "shell".to_string(),
+                "monkey".to_string(),
+                "-p".to_string(),
+                package_clone,
+                "-c".to_string(),
+                "android.intent.category.LAUNCHER".to_string(),
+                "1".to_string(),
+            ];
+            let output = run_command_with_timeout(
+                &adb_program_clone,
+                &args,
+                Duration::from_secs(10),
+                &trace_clone,
+            )?;
+            Ok((
+                index,
+                CommandResult {
+                    serial,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_code: output.exit_code,
+                },
+            ))
+        }));
+    }
+
+    let mut collected = Vec::new();
+    for handle in handles {
+        let (index, result) = handle
+            .join()
+            .map_err(|_| AppError::system("Launch app thread panicked", trace_id))??;
+        collected.push((index, result));
+    }
+    collected.sort_by_key(|item| item.0);
+    Ok(collected.into_iter().map(|item| item.1).collect())
 }
 
 fn emit_perf_event(app: &AppHandle, event: PerfEvent) {

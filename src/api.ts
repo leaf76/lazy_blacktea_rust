@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 import type {
   AdbInfo,
   ApkBatchInstallResult,
@@ -21,12 +21,22 @@ import type {
   UiHierarchyCaptureResult,
   UiHierarchyExportResult,
 } from "./types";
+import { isTauriRuntime } from "./tauriEnv";
 
 const createTraceId = () => crypto.randomUUID();
 
+const tauriInvoke = <T>(command: string, args?: InvokeArgs) => {
+  if (!isTauriRuntime()) {
+    return Promise.reject(
+      new Error('Tauri runtime not available. Run this app using "npm run tauri dev".'),
+    );
+  }
+  return invoke<T>(command, args);
+};
+
 export const getConfig = async () => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<AppConfig>>("get_config", {
+  return tauriInvoke<CommandResponse<AppConfig>>("get_config", {
     trace_id: traceId,
     traceId,
   });
@@ -42,7 +52,7 @@ export const checkAdb = async (commandPath?: string) => {
     payload.command_path = commandPath;
     payload.commandPath = commandPath;
   }
-  return invoke<CommandResponse<AdbInfo>>("check_adb", payload);
+  return tauriInvoke<CommandResponse<AdbInfo>>("check_adb", payload);
 };
 
 export const exportDiagnosticsBundle = async (outputDir?: string) => {
@@ -56,12 +66,12 @@ export const exportDiagnosticsBundle = async (outputDir?: string) => {
     // Tauri command args are often camelCase on the JS side; keep both for compatibility.
     payload.outputDir = outputDir;
   }
-  return invoke<CommandResponse<string>>("export_diagnostics_bundle", payload);
+  return tauriInvoke<CommandResponse<string>>("export_diagnostics_bundle", payload);
 };
 
 export const saveConfig = async (config: AppConfig) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<AppConfig>>("save_app_config", {
+  return tauriInvoke<CommandResponse<AppConfig>>("save_app_config", {
     config,
     trace_id: traceId,
     traceId,
@@ -70,7 +80,7 @@ export const saveConfig = async (config: AppConfig) => {
 
 export const resetConfig = async () => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<AppConfig>>("reset_config", {
+  return tauriInvoke<CommandResponse<AppConfig>>("reset_config", {
     trace_id: traceId,
     traceId,
   });
@@ -78,7 +88,7 @@ export const resetConfig = async () => {
 
 export const listDevices = async (detailed = true) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<DeviceInfo[]>>("list_devices", {
+  return tauriInvoke<CommandResponse<DeviceInfo[]>>("list_devices", {
     detailed,
     trace_id: traceId,
     traceId,
@@ -87,7 +97,7 @@ export const listDevices = async (detailed = true) => {
 
 export const adbPair = async (address: string, pairingCode: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<HostCommandResult>>("adb_pair", {
+  return tauriInvoke<CommandResponse<HostCommandResult>>("adb_pair", {
     address,
     pairing_code: pairingCode,
     pairingCode,
@@ -98,7 +108,7 @@ export const adbPair = async (address: string, pairingCode: string) => {
 
 export const adbConnect = async (address: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<HostCommandResult>>("adb_connect", {
+  return tauriInvoke<CommandResponse<HostCommandResult>>("adb_connect", {
     address,
     trace_id: traceId,
     traceId,
@@ -111,7 +121,7 @@ export const runShell = async (
   parallel?: boolean,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<CommandResult[]>>("run_shell", {
+  return tauriInvoke<CommandResponse<CommandResult[]>>("run_shell", {
     serials,
     command,
     parallel,
@@ -122,7 +132,7 @@ export const runShell = async (
 
 export const startTerminalSession = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<TerminalSessionInfo>>("start_terminal_session", {
+  return tauriInvoke<CommandResponse<TerminalSessionInfo>>("start_terminal_session", {
     serial,
     trace_id: traceId,
     traceId,
@@ -135,7 +145,7 @@ export const writeTerminalSession = async (
   newline: boolean,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("write_terminal_session", {
+  return tauriInvoke<CommandResponse<boolean>>("write_terminal_session", {
     serial,
     data,
     newline,
@@ -146,7 +156,7 @@ export const writeTerminalSession = async (
 
 export const stopTerminalSession = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("stop_terminal_session", {
+  return tauriInvoke<CommandResponse<boolean>>("stop_terminal_session", {
     serial,
     trace_id: traceId,
     traceId,
@@ -158,7 +168,7 @@ export const persistTerminalState = async (
   buffers: Record<string, string[]>,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("persist_terminal_state", {
+  return tauriInvoke<CommandResponse<boolean>>("persist_terminal_state", {
     restore_sessions,
     restoreSessions: restore_sessions,
     buffers,
@@ -169,7 +179,7 @@ export const persistTerminalState = async (
 
 export const rebootDevices = async (serials: string[], mode?: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<CommandResult[]>>("reboot_devices", {
+  return tauriInvoke<CommandResponse<CommandResult[]>>("reboot_devices", {
     serials,
     mode,
     trace_id: traceId,
@@ -179,7 +189,7 @@ export const rebootDevices = async (serials: string[], mode?: string) => {
 
 export const setWifiState = async (serials: string[], enable: boolean) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<CommandResult[]>>("set_wifi_state", {
+  return tauriInvoke<CommandResponse<CommandResult[]>>("set_wifi_state", {
     serials,
     enable,
     trace_id: traceId,
@@ -189,7 +199,7 @@ export const setWifiState = async (serials: string[], enable: boolean) => {
 
 export const setBluetoothState = async (serials: string[], enable: boolean) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<CommandResult[]>>("set_bluetooth_state", {
+  return tauriInvoke<CommandResponse<CommandResult[]>>("set_bluetooth_state", {
     serials,
     enable,
     trace_id: traceId,
@@ -207,7 +217,7 @@ export const installApkBatch = async (
   extraArgs?: string,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<ApkBatchInstallResult>>("install_apk_batch", {
+  return tauriInvoke<CommandResponse<ApkBatchInstallResult>>("install_apk_batch", {
     serials,
     apk_path: apkPath,
     apkPath,
@@ -226,7 +236,7 @@ export const installApkBatch = async (
 
 export const captureScreenshot = async (serial: string, outputDir: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<string>>("capture_screenshot", {
+  return tauriInvoke<CommandResponse<string>>("capture_screenshot", {
     serial,
     output_dir: outputDir,
     outputDir,
@@ -237,7 +247,7 @@ export const captureScreenshot = async (serial: string, outputDir: string) => {
 
 export const startScreenRecord = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<string>>("start_screen_record", {
+  return tauriInvoke<CommandResponse<string>>("start_screen_record", {
     serial,
     trace_id: traceId,
     traceId,
@@ -246,7 +256,7 @@ export const startScreenRecord = async (serial: string) => {
 
 export const stopScreenRecord = async (serial: string, outputDir?: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<string>>("stop_screen_record", {
+  return tauriInvoke<CommandResponse<string>>("stop_screen_record", {
     serial,
     output_dir: outputDir,
     outputDir,
@@ -257,7 +267,7 @@ export const stopScreenRecord = async (serial: string, outputDir?: string) => {
 
 export const listDeviceFiles = async (serial: string, path: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<DeviceFileEntry[]>>("list_device_files", {
+  return tauriInvoke<CommandResponse<DeviceFileEntry[]>>("list_device_files", {
     serial,
     path,
     trace_id: traceId,
@@ -272,7 +282,7 @@ export const pullDeviceFile = async (
   traceId?: string,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
-  return invoke<CommandResponse<string>>("pull_device_file", {
+  return tauriInvoke<CommandResponse<string>>("pull_device_file", {
     serial,
     device_path: devicePath,
     output_dir: outputDir,
@@ -290,7 +300,7 @@ export const pushDeviceFile = async (
   traceId?: string,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
-  return invoke<CommandResponse<string>>("push_device_file", {
+  return tauriInvoke<CommandResponse<string>>("push_device_file", {
     serial,
     local_path: localPath,
     localPath,
@@ -303,7 +313,7 @@ export const pushDeviceFile = async (
 
 export const mkdirDeviceDir = async (serial: string, devicePath: string, traceId?: string) => {
   const resolvedTraceId = traceId ?? createTraceId();
-  return invoke<CommandResponse<string>>("mkdir_device_dir", {
+  return tauriInvoke<CommandResponse<string>>("mkdir_device_dir", {
     serial,
     device_path: devicePath,
     devicePath,
@@ -319,7 +329,7 @@ export const renameDevicePath = async (
   traceId?: string,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
-  return invoke<CommandResponse<string>>("rename_device_path", {
+  return tauriInvoke<CommandResponse<string>>("rename_device_path", {
     serial,
     from_path: fromPath,
     to_path: toPath,
@@ -337,7 +347,7 @@ export const deleteDevicePath = async (
   traceId?: string,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
-  return invoke<CommandResponse<string>>("delete_device_path", {
+  return tauriInvoke<CommandResponse<string>>("delete_device_path", {
     serial,
     device_path: devicePath,
     devicePath,
@@ -349,7 +359,7 @@ export const deleteDevicePath = async (
 
 export const previewLocalFile = async (localPath: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<FilePreview>>("preview_local_file", {
+  return tauriInvoke<CommandResponse<FilePreview>>("preview_local_file", {
     local_path: localPath,
     localPath,
     trace_id: traceId,
@@ -359,7 +369,7 @@ export const previewLocalFile = async (localPath: string) => {
 
 export const captureUiHierarchy = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<UiHierarchyCaptureResult>>("capture_ui_hierarchy", {
+  return tauriInvoke<CommandResponse<UiHierarchyCaptureResult>>("capture_ui_hierarchy", {
     serial,
     trace_id: traceId,
     traceId,
@@ -368,7 +378,7 @@ export const captureUiHierarchy = async (serial: string) => {
 
 export const exportUiHierarchy = async (serial: string, outputDir?: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<UiHierarchyExportResult>>("export_ui_hierarchy", {
+  return tauriInvoke<CommandResponse<UiHierarchyExportResult>>("export_ui_hierarchy", {
     serial,
     output_dir: outputDir,
     outputDir,
@@ -379,7 +389,7 @@ export const exportUiHierarchy = async (serial: string, outputDir?: string) => {
 
 export const startPerfMonitor = async (serial: string, intervalMs?: number) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("start_perf_monitor", {
+  return tauriInvoke<CommandResponse<boolean>>("start_perf_monitor", {
     serial,
     interval_ms: intervalMs,
     intervalMs,
@@ -390,7 +400,7 @@ export const startPerfMonitor = async (serial: string, intervalMs?: number) => {
 
 export const stopPerfMonitor = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("stop_perf_monitor", {
+  return tauriInvoke<CommandResponse<boolean>>("stop_perf_monitor", {
     serial,
     trace_id: traceId,
     traceId,
@@ -399,7 +409,7 @@ export const stopPerfMonitor = async (serial: string) => {
 
 export const startLogcat = async (serial: string, filter?: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("start_logcat", {
+  return tauriInvoke<CommandResponse<boolean>>("start_logcat", {
     serial,
     filter,
     trace_id: traceId,
@@ -409,7 +419,7 @@ export const startLogcat = async (serial: string, filter?: string) => {
 
 export const stopLogcat = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("stop_logcat", {
+  return tauriInvoke<CommandResponse<boolean>>("stop_logcat", {
     serial,
     trace_id: traceId,
     traceId,
@@ -418,7 +428,7 @@ export const stopLogcat = async (serial: string) => {
 
 export const clearLogcat = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("clear_logcat", {
+  return tauriInvoke<CommandResponse<boolean>>("clear_logcat", {
     serial,
     trace_id: traceId,
     traceId,
@@ -431,7 +441,7 @@ export const exportLogcat = async (
   outputDir?: string,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<LogcatExportResult>>("export_logcat", {
+  return tauriInvoke<CommandResponse<LogcatExportResult>>("export_logcat", {
     serial,
     lines,
     output_dir: outputDir,
@@ -447,7 +457,7 @@ export const listApps = async (
   includeVersions?: boolean,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<AppInfo[]>>("list_apps", {
+  return tauriInvoke<CommandResponse<AppInfo[]>>("list_apps", {
     serial,
     third_party_only: thirdPartyOnly,
     thirdPartyOnly,
@@ -460,7 +470,7 @@ export const listApps = async (
 
 export const getAppBasicInfo = async (serial: string, packageName: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<AppBasicInfo>>("get_app_basic_info", {
+  return tauriInvoke<CommandResponse<AppBasicInfo>>("get_app_basic_info", {
     serial,
     package_name: packageName,
     packageName,
@@ -475,7 +485,7 @@ export const uninstallApp = async (
   keepData: boolean,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("uninstall_app", {
+  return tauriInvoke<CommandResponse<boolean>>("uninstall_app", {
     serial,
     package_name: packageName,
     keep_data: keepData,
@@ -488,7 +498,7 @@ export const uninstallApp = async (
 
 export const forceStopApp = async (serial: string, packageName: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("force_stop_app", {
+  return tauriInvoke<CommandResponse<boolean>>("force_stop_app", {
     serial,
     package_name: packageName,
     packageName,
@@ -499,7 +509,7 @@ export const forceStopApp = async (serial: string, packageName: string) => {
 
 export const clearAppData = async (serial: string, packageName: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("clear_app_data", {
+  return tauriInvoke<CommandResponse<boolean>>("clear_app_data", {
     serial,
     package_name: packageName,
     packageName,
@@ -515,7 +525,7 @@ export const setAppEnabled = async (
   userId?: number,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("set_app_enabled", {
+  return tauriInvoke<CommandResponse<boolean>>("set_app_enabled", {
     serial,
     package_name: packageName,
     enable,
@@ -529,7 +539,7 @@ export const setAppEnabled = async (
 
 export const openAppInfo = async (serial: string, packageName: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("open_app_info", {
+  return tauriInvoke<CommandResponse<boolean>>("open_app_info", {
     serial,
     package_name: packageName,
     packageName,
@@ -540,7 +550,7 @@ export const openAppInfo = async (serial: string, packageName: string) => {
 
 export const launchApp = async (serials: string[], packageName: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<CommandResult[]>>("launch_app", {
+  return tauriInvoke<CommandResponse<CommandResult[]>>("launch_app", {
     serials,
     package_name: packageName,
     packageName,
@@ -551,7 +561,7 @@ export const launchApp = async (serials: string[], packageName: string) => {
 
 export const checkScrcpy = async () => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<ScrcpyInfo>>("check_scrcpy", {
+  return tauriInvoke<CommandResponse<ScrcpyInfo>>("check_scrcpy", {
     trace_id: traceId,
     traceId,
   });
@@ -559,7 +569,7 @@ export const checkScrcpy = async () => {
 
 export const launchScrcpy = async (serials: string[]) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<CommandResult[]>>("launch_scrcpy", {
+  return tauriInvoke<CommandResponse<CommandResult[]>>("launch_scrcpy", {
     serials,
     trace_id: traceId,
     traceId,
@@ -568,7 +578,7 @@ export const launchScrcpy = async (serials: string[]) => {
 
 export const startBluetoothMonitor = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("start_bluetooth_monitor", {
+  return tauriInvoke<CommandResponse<boolean>>("start_bluetooth_monitor", {
     serial,
     trace_id: traceId,
     traceId,
@@ -577,7 +587,7 @@ export const startBluetoothMonitor = async (serial: string) => {
 
 export const stopBluetoothMonitor = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("stop_bluetooth_monitor", {
+  return tauriInvoke<CommandResponse<boolean>>("stop_bluetooth_monitor", {
     serial,
     trace_id: traceId,
     traceId,
@@ -586,7 +596,7 @@ export const stopBluetoothMonitor = async (serial: string) => {
 
 export const generateBugreport = async (serial: string, outputDir: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<BugreportResult>>("generate_bugreport", {
+  return tauriInvoke<CommandResponse<BugreportResult>>("generate_bugreport", {
     serial,
     output_dir: outputDir,
     outputDir,
@@ -597,7 +607,7 @@ export const generateBugreport = async (serial: string, outputDir: string) => {
 
 export const cancelBugreport = async (serial: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<boolean>>("cancel_bugreport", {
+  return tauriInvoke<CommandResponse<boolean>>("cancel_bugreport", {
     serial,
     trace_id: traceId,
     traceId,
@@ -606,7 +616,7 @@ export const cancelBugreport = async (serial: string) => {
 
 export const prepareBugreportLogcat = async (sourcePath: string) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<BugreportLogSummary>>("prepare_bugreport_logcat", {
+  return tauriInvoke<CommandResponse<BugreportLogSummary>>("prepare_bugreport_logcat", {
     source_path: sourcePath,
     sourcePath,
     trace_id: traceId,
@@ -621,7 +631,7 @@ export const queryBugreportLogcat = async (
   limit?: number,
 ) => {
   const traceId = createTraceId();
-  return invoke<CommandResponse<BugreportLogPage>>("query_bugreport_logcat", {
+  return tauriInvoke<CommandResponse<BugreportLogPage>>("query_bugreport_logcat", {
     report_id: reportId,
     reportId,
     filters,

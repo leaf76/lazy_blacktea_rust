@@ -35,6 +35,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all --all-features
 ```
 
+## Smoke Testing
+
+See `docs/testing.md` for macOS-friendly smoke checks (web UI + Rust tests + real-device ADB smoke).
+
 ## Contributing
 
 See `CONTRIBUTING.md` for guidelines and PR expectations.

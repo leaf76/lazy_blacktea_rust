@@ -1,7 +1,113 @@
-# LAZY BLACKTEA RUST KNOWLEDGE BASE
+# Agent Instructions (Read First)
 
-**Generated:** 2026-02-03  
-**Branch:** main
+These rules are **always on** for any automated agent work in this repository.
+
+## Language
+
+- Use **English only** for: code, comments, logs, config, UI strings, and commit messages.
+- Use **Traditional Chinese (Taiwan)** for: planning and explanations in chat.
+
+## Core Rules
+
+- If requirements, scope, acceptance criteria, or constraints are unclear: **ask before coding**.
+- Do **not** modify, revert, delete, or refactor unrelated code or files.
+- Do **not** remove or revert changes without explicit user approval.
+- No hardcoded secrets, credentials, or environment-specific config.
+- No SQL string concatenation; all SQL must be parameterized.
+- No silent error swallowing (no empty `catch`, no ignored `Result` without intent).
+- Do not experiment directly in production environments.
+
+## Default Flow
+
+Follow this flow unless explicitly allowed otherwise:
+
+1. Clarify
+2. Plan
+3. TDD
+4. Implement
+5. Summary
+
+Notes:
+- If TDD is skipped, explicitly state why and how correctness is verified.
+- Auth, payments, permissions, and data mutation require TDD plus integration tests.
+
+## Security (Always On)
+
+- Least-privilege access.
+- Validate all external input (including device output and user-provided paths).
+- Never log secrets, tokens, or PII.
+
+## Logging & Traceability (Server-side / Integrations)
+
+- Use `X-Request-ID` if provided; otherwise generate UUID v4.
+- Include `trace_id` in all logs and error responses.
+- Logs must be JSON in production.
+
+### Error Response Contract (API/server-side)
+
+Return to clients only (no internal details):
+
+```json
+{
+  "error": "Human readable message",
+  "code": "ERR_xxx",
+  "trace_id": "uuid-v4"
+}
+```
+
+## Error Handling (When Applicable)
+
+- Classify errors: validation, business, system, dependency.
+- Log stack traces for system errors (but keep client errors user-safe).
+- Retry only idempotent operations.
+- Use bounded exponential backoff for retries.
+- Define timeouts (rule of thumb: API ~10s, DB ~5s).
+
+## UI / UX (User-facing)
+
+- Do not change UI/UX behavior without explicit intent or approval.
+- Preserve established interaction patterns unless a change is required.
+- All user-visible states must be handled: Loading, Empty, Error, Disabled, Success (if applicable).
+- Error messages must be human-readable and must not expose technical/internal details.
+- Avoid layout shifts during loading where reasonably possible.
+- Do not degrade accessibility compared to existing behavior.
+
+## Backend Compatibility
+
+- Do not break API contracts without versioning or approval.
+- DB schema changes require safe rollout (expand, migrate, contract).
+
+## Files & Repo Hygiene
+
+- Check file size before reading large files (`wc -l`) and prefer partial reads (`rg`, `sed -n`).
+- Do not dump large files blindly into chat.
+
+## Testing (This Repo)
+
+Preferred commands:
+
+```bash
+scripts/smoke_all.sh
+scripts/security_audit.sh
+```
+
+macOS note:
+- Full desktop UI automation for the Tauri WebView is limited on macOS.
+- Prefer: browser-mode UI smoke + Rust backend smoke/soak + real-device ADB smoke.
+- See `docs/testing.md` for the manual desktop QA checklist (product paths).
+
+During any manual testing (DevTools / adb / real devices), always verify:
+- Functionality: core flows work without errors.
+- UI/UX: layout, feedback, and interactions are usable.
+- Regressions: no new obvious breakage introduced.
+
+---
+
+# Project Knowledge Base
+
+**Generated:** 2026-02-08  
+**Commit:** 8e599e7  
+**Branch:** master
 
 ## OVERVIEW
 
@@ -16,7 +122,7 @@ lazy_blacktea_rust/
 │   ├── src/app/             # Backend modules
 │   │   ├── adb/             # ADB parsing + runner + app helpers
 │   │   ├── bluetooth/       # Bluetooth monitoring helpers
-│   │   ├── commands.rs      # Tauri commands
+│   │   ├── commands/        # Tauri commands (invoke surface)
 │   │   ├── config.rs        # Config load/save + legacy migration
 │   │   ├── models.rs        # Shared data types
 │   │   ├── ui_xml.rs        # UI hierarchy rendering
@@ -32,7 +138,7 @@ lazy_blacktea_rust/
 | ADB parsing | `src-tauri/src/app/adb/parse.rs` | Pure functions + tests |
 | App package parsing | `src-tauri/src/app/adb/apps.rs` | `pm list packages` parsing |
 | ADB execution | `src-tauri/src/app/adb/runner.rs` | Timeout wrapper, no silent failures |
-| Tauri commands | `src-tauri/src/app/commands.rs` | All app-facing APIs |
+| Tauri commands | `src-tauri/src/app/commands/mod.rs` | All app-facing APIs |
 | UI hierarchy | `src-tauri/src/app/ui_xml.rs` | XML → HTML renderer |
 | Frontend API | `src/api.ts` | Tauri invoke wrappers |
 | Frontend UI | `src/App.tsx` | Device console layout |
@@ -50,10 +156,10 @@ lazy_blacktea_rust/
 | Logcat compact layout | `src/App.tsx`, `src/App.css` | Tightened spacing + inline labels to reduce height |
 | APK installer | `src/App.tsx` | Single/multi/bundle install flow + launch |
 | Logcat helpers | `src/logcat.ts` | Filter/regex/search utilities |
-| UI inspector export | `src-tauri/src/app/commands.rs` | capture/export UI hierarchy + screenshot |
+| UI inspector export | `src-tauri/src/app/commands/mod.rs` | capture/export UI hierarchy + screenshot |
 | Bugreport analysis | `src-tauri/src/app/bugreport_analysis.rs`, `src/App.tsx` | local parser + right-side analysis panel |
 | Bugreport log viewer | `src-tauri/src/app/bugreport_logcat.rs`, `src/App.tsx` | cached index + filterable log viewer |
-| Wireless pairing | `src-tauri/src/app/commands.rs`, `src/api.ts`, `src/App.tsx` | adb pair/connect flow |
+| Wireless pairing | `src-tauri/src/app/commands/mod.rs`, `src/api.ts`, `src/App.tsx` | adb pair/connect flow |
 | Pairing helpers | `src/pairing.ts` | QR/pair output parsing + reducer |
 
 ## CONVENTIONS
@@ -97,3 +203,10 @@ cargo test --all --all-features
 - `uiux/`: UI/UX audit, plan, tokens, and backlog for the redesign.
 - `uiux/device-manager/`: Device Manager optimization artifacts (Gemini CLI).
 - Decisions: wireless ADB pairing and live UI inspector mirror support.
+
+## AGENTS.md Hierarchy
+
+- `src/AGENTS.md`: Frontend conventions and hotspots.
+- `src-tauri/AGENTS.md`: Tauri backend entry points and build/test automation.
+- `src-tauri/src/app/AGENTS.md`: Backend modules and command plumbing.
+- `uiux/AGENTS.md`: UI/UX artifacts and how to use them.

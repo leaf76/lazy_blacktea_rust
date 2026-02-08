@@ -1,4 +1,4 @@
-mod app;
+pub mod app;
 
 use app::commands::{
     adb_connect, adb_pair, cancel_bugreport, capture_screenshot, capture_ui_hierarchy, check_adb,

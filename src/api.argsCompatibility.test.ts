@@ -1,13 +1,26 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 
 describe("api command args compatibility", () => {
+  let prevTauriInternals: unknown;
+
   beforeEach(() => {
+    prevTauriInternals = (globalThis as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    (globalThis as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     vi.stubGlobal("crypto", { randomUUID: () => "trace-123" });
     (invoke as unknown as { mockReset: () => void }).mockReset();
+  });
+
+  afterEach(() => {
+    const g = globalThis as unknown as Record<string, unknown>;
+    if (prevTauriInternals == null) {
+      delete g.__TAURI_INTERNALS__;
+    } else {
+      g.__TAURI_INTERNALS__ = prevTauriInternals;
+    }
   });
 
   it("sends both snake_case and camelCase keys for captureScreenshot", async () => {
@@ -72,4 +85,3 @@ describe("api command args compatibility", () => {
     );
   });
 });
-

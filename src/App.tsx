@@ -16,6 +16,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { isTauriRuntime } from "./tauriEnv";
 import type {
   AdbInfo,
   AppConfig,
@@ -867,6 +868,7 @@ function App() {
   const [uiBoundsEnabled, setUiBoundsEnabled] = useState(true);
   const [uiScreenshotSize, setUiScreenshotSize] = useState({ width: 0, height: 0 });
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const tauriUnavailableToastShownRef = useRef(false);
   const [groupMap, setGroupMap] = useState<Record<string, string>>({});
   const [groupName, setGroupName] = useState("");
   const [groupFilter, setGroupFilter] = useState("all");
@@ -1654,6 +1656,16 @@ function App() {
   };
 
   const pushToast = (message: string, tone: Toast["tone"]) => {
+    if (
+      message.startsWith('Tauri runtime not available. Run this app using "npm run tauri dev".') &&
+      tauriUnavailableToastShownRef.current
+    ) {
+      return;
+    }
+    if (message.startsWith('Tauri runtime not available. Run this app using "npm run tauri dev".')) {
+      tauriUnavailableToastShownRef.current = true;
+    }
+
     const id = crypto.randomUUID();
     setToasts((prev) => [...prev, { id, message, tone }]);
     setTimeout(() => {
@@ -2039,6 +2051,10 @@ function App() {
   }, [logcatFiltered.matchIds.length, logcatMatchIndex]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
     const flushLogcatPending = () => {
       logcatFlushTimerRef.current = null;
       const pending = logcatPendingRef.current;
@@ -3886,6 +3902,10 @@ function App() {
   };
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
     const unlistenPromise = getCurrentWindow().onDragDropEvent((event) => {
       const filesCtx = filesDragContextRef.current;
       const apkCtx = apkDragContextRef.current;
