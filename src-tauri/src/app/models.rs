@@ -218,6 +218,7 @@ pub struct FilePreview {
     pub mime_type: String,
     pub is_text: bool,
     pub preview_text: Option<String>,
+    pub preview_data_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -2671,17 +2671,39 @@ pub fn list_device_files(
     ensure_non_empty(&path, "path", &trace_id)?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    let args = vec![
+    let normalized = path.trim().to_string();
+    let dir_hint = if normalized == "/" {
+        "/".to_string()
+    } else {
+        format!("{}/", normalized.trim_end_matches('/'))
+    };
+    let dir_args = vec![
         "-s".to_string(),
         serial.clone(),
         "shell".to_string(),
         "ls".to_string(),
         "-la".to_string(),
-        path.clone(),
+        dir_hint,
     ];
-    let output =
-        run_command_with_timeout(&adb_program, &args, Duration::from_secs(300), &trace_id)?;
-    let entries = parse_ls_la(&path, &output.stdout);
+    let mut output =
+        run_command_with_timeout(&adb_program, &dir_args, Duration::from_secs(300), &trace_id)?;
+    if output.exit_code.unwrap_or_default() != 0 {
+        let fallback_args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "shell".to_string(),
+            "ls".to_string(),
+            "-la".to_string(),
+            normalized.clone(),
+        ];
+        output = run_command_with_timeout(
+            &adb_program,
+            &fallback_args,
+            Duration::from_secs(300),
+            &trace_id,
+        )?;
+    }
+    let entries = parse_ls_la(&normalized, &output.stdout);
 
     Ok(CommandResponse {
         trace_id,
@@ -3000,6 +3022,8 @@ pub fn preview_local_file(
     local_path: String,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<FilePreview>, AppError> {
+    use base64::Engine as _;
+
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&local_path, "local_path", &trace_id)?;
 
@@ -3011,23 +3035,38 @@ pub fn preview_local_file(
     let mime = MimeGuess::from_path(&path).first_or_octet_stream();
     let mime_type = mime.essence_str().to_string();
 
-    const MAX_PREVIEW_BYTES: usize = 200_000;
+    const MAX_TEXT_PREVIEW_BYTES: usize = 200_000;
+    const MAX_IMAGE_PREVIEW_BYTES: usize = 6_000_000;
     let mut file = fs::File::open(&path)
         .map_err(|err| AppError::system(format!("Failed to open file: {err}"), &trace_id))?;
     let mut buffer = Vec::new();
+    let is_image = mime_type.starts_with("image/");
+    let max_preview_bytes = if is_image {
+        MAX_IMAGE_PREVIEW_BYTES
+    } else {
+        MAX_TEXT_PREVIEW_BYTES
+    };
     std::io::Read::by_ref(&mut file)
-        .take((MAX_PREVIEW_BYTES + 1) as u64)
+        .take((max_preview_bytes + 1) as u64)
         .read_to_end(&mut buffer)
         .map_err(|err| AppError::system(format!("Failed to read file: {err}"), &trace_id))?;
 
     let mut preview_text = None;
     let mut is_text = false;
-    if let Ok(text) = std::str::from_utf8(&buffer) {
+    let mut preview_data_url = None;
+
+    if is_image {
+        // For images we only return a data URL if we captured the full file within the cap.
+        if buffer.len() <= max_preview_bytes {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer);
+            preview_data_url = Some(format!("data:{mime_type};base64,{encoded}"));
+        }
+    } else if let Ok(text) = std::str::from_utf8(&buffer) {
         if !contains_binary_control_chars(text) {
             is_text = true;
             let mut content = text.to_string();
-            if buffer.len() > MAX_PREVIEW_BYTES {
-                content.truncate(MAX_PREVIEW_BYTES);
+            if buffer.len() > MAX_TEXT_PREVIEW_BYTES {
+                content.truncate(MAX_TEXT_PREVIEW_BYTES);
                 content.push_str("\n… (truncated)");
             }
             preview_text = Some(content);
@@ -3043,6 +3082,7 @@ pub fn preview_local_file(
             mime_type,
             is_text: is_text_flag,
             preview_text,
+            preview_data_url,
         },
     })
 }

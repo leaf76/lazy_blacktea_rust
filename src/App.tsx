@@ -11,6 +11,7 @@ import {
   type RefObject,
 } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -842,9 +843,23 @@ function App() {
   const [logcatAdvancedOpen, setLogcatAdvancedOpen] = useState(false);
   const [perfBySerial, setPerfBySerial] = useState<Record<string, PerfMonitorState>>({});
   const perfBySerialRef = useRef<Record<string, PerfMonitorState>>({});
+  const [filesViewMode, setFilesViewMode] = useState<"list" | "grid">(() => {
+    try {
+      const raw = localStorage.getItem("lazy_blacktea_files_view_mode_v1");
+      return raw === "grid" ? "grid" : "list";
+    } catch {
+      return "list";
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem("lazy_blacktea_files_view_mode_v1", filesViewMode);
+  }, [filesViewMode]);
+
   const [filesPath, setFilesPath] = useState("/sdcard");
   const [files, setFiles] = useState<DeviceFileEntry[]>([]);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
+  const [filePreviewDevicePath, setFilePreviewDevicePath] = useState<string | null>(null);
   const [filesSelectedPaths, setFilesSelectedPaths] = useState<string[]>([]);
   const [filesSearchQuery, setFilesSearchQuery] = useState("");
   const [filesOverwriteEnabled, setFilesOverwriteEnabled] = useState(true);
@@ -857,6 +872,9 @@ function App() {
     | { type: "delete"; entry: DeviceFileEntry; recursive: boolean; confirm: string }
     | { type: "delete_many"; entries: DeviceFileEntry[]; recursive: boolean; confirm: string }
   >(null);
+  const [filesContextMenu, setFilesContextMenu] = useState<null | { x: number; y: number; entry: DeviceFileEntry }>(
+    null,
+  );
   const [uiHtml, setUiHtml] = useState("");
   const [uiXml, setUiXml] = useState("");
   const [uiScreenshotDataUrl, setUiScreenshotDataUrl] = useState("");
@@ -1644,6 +1662,24 @@ function App() {
       window.removeEventListener("scroll", handleScroll, true);
     };
   }, [deviceCommandMenu]);
+
+  useEffect(() => {
+    if (!filesContextMenu) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setFilesContextMenu(null);
+      }
+    };
+    const handleScroll = () => setFilesContextMenu(null);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [filesContextMenu]);
 
   const openPairingModal = () => dispatchPairing({ type: "OPEN" });
   const closePairingModal = () => dispatchPairing({ type: "CLOSE" });
@@ -3488,6 +3524,7 @@ function App() {
       setFilesPath(trimmed);
       setFiles(response.data);
       setFilePreview(null);
+      setFilePreviewDevicePath(null);
       setFilesSelectedPaths([]);
     } catch (error) {
       pushToast(`Refresh failed: ${formatError(error)}`, "error");
@@ -3510,6 +3547,7 @@ function App() {
       setFilesPath(targetPath);
       setFiles(response.data);
       setFilePreview(null);
+      setFilePreviewDevicePath(null);
       setFilesSelectedPaths([]);
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -3552,6 +3590,183 @@ function App() {
   const fileFilterSummary = filesSearchQuery.trim()
     ? `${filteredFiles.length} of ${files.length} items`
     : `${files.length} items`;
+
+  type FileKind = "folder" | "apk" | "image" | "archive" | "text" | "file";
+
+  const getFileKind = (entry: DeviceFileEntry): FileKind => {
+    if (entry.is_dir) {
+      return "folder";
+    }
+    const lower = entry.name.toLowerCase();
+    const ext = lower.includes(".") ? lower.split(".").pop() ?? "" : "";
+    if (["apk", "apks", "xapk"].includes(ext)) {
+      return "apk";
+    }
+    if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "heic"].includes(ext)) {
+      return "image";
+    }
+    if (["zip", "tar", "gz", "tgz", "7z", "rar", "bz2", "xz"].includes(ext)) {
+      return "archive";
+    }
+    if (["txt", "log", "json", "xml", "md", "csv", "yaml", "yml"].includes(ext)) {
+      return "text";
+    }
+    return "file";
+  };
+
+  const getFileKindLabel = (kind: FileKind) => {
+    if (kind === "folder") {
+      return "Folder";
+    }
+    if (kind === "apk") {
+      return "APK";
+    }
+    if (kind === "image") {
+      return "Image";
+    }
+    if (kind === "archive") {
+      return "Archive";
+    }
+    if (kind === "text") {
+      return "Text";
+    }
+    return "File";
+  };
+
+  const FileTypeIcon = ({ kind }: { kind: FileKind }) => {
+    if (kind === "folder") {
+      return (
+        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M2.5 4.5h3.9l1.2 1.2H13.5c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1h-11c-.6 0-1-.4-1-1V5.5c0-.6.4-1 1-1Z"
+            fill="currentColor"
+            opacity="0.9"
+          />
+          <path
+            d="M1.5 6h13"
+            stroke="currentColor"
+            strokeOpacity="0.35"
+            strokeWidth="1"
+          />
+        </svg>
+      );
+    }
+
+    if (kind === "image") {
+      return (
+        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="2.3" y="3" width="11.4" height="10" rx="2" fill="currentColor" opacity="0.25" />
+          <path
+            d="M4 11.2 6.2 8.8 8.1 10.7 10.1 8.5 12.3 11.2"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+          <circle cx="6" cy="6.3" r="1" fill="currentColor" opacity="0.85" />
+        </svg>
+      );
+    }
+
+    if (kind === "archive") {
+      return (
+        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="3" y="3.2" width="10" height="9.6" rx="2" fill="currentColor" opacity="0.25" />
+          <path
+            d="M6.2 4.7h3.6M6.2 6.3h3.6M7.8 7.9v4.1"
+            stroke="currentColor"
+            strokeWidth="1.1"
+            strokeLinecap="round"
+            opacity="0.9"
+          />
+          <path
+            d="M7.2 9.1h1.2"
+            stroke="currentColor"
+            strokeWidth="1.1"
+            strokeLinecap="round"
+            opacity="0.5"
+          />
+        </svg>
+      );
+    }
+
+    if (kind === "text") {
+      return (
+        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M4 2.5h5l3 3V13c0 .6-.4 1-1 1H4c-.6 0-1-.4-1-1V3.5c0-.6.4-1 1-1Z"
+            fill="currentColor"
+            opacity="0.22"
+          />
+          <path
+            d="M9 2.6V6h3"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.1"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            opacity="0.9"
+          />
+          <path
+            d="M5.1 7.6h6M5.1 9.4h6M5.1 11.2h4.2"
+            stroke="currentColor"
+            strokeWidth="1.1"
+            strokeLinecap="round"
+            opacity="0.7"
+          />
+        </svg>
+      );
+    }
+
+    if (kind === "apk") {
+      return (
+        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="5" y="2.7" width="6" height="10.6" rx="1.4" fill="currentColor" opacity="0.25" />
+          <path
+            d="M6.7 4.4h2.6"
+            stroke="currentColor"
+            strokeWidth="1.1"
+            strokeLinecap="round"
+            opacity="0.85"
+          />
+          <path
+            d="M6.8 12h2.4"
+            stroke="currentColor"
+            strokeWidth="1.1"
+            strokeLinecap="round"
+            opacity="0.6"
+          />
+        </svg>
+      );
+    }
+
+    return (
+      <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+        <path
+          d="M4 2.5h5l3 3V13c0 .6-.4 1-1 1H4c-.6 0-1-.4-1-1V3.5c0-.6.4-1 1-1Z"
+          fill="currentColor"
+          opacity="0.22"
+        />
+        <path
+          d="M9 2.6V6h3"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.1"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          opacity="0.9"
+        />
+      </svg>
+    );
+  };
+
+  const openFilesContextMenu = (event: React.MouseEvent, entry: DeviceFileEntry) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setFilesSelectedPaths((prev) => (prev.includes(entry.path) ? prev : [entry.path]));
+    setFilesContextMenu({ x: event.clientX, y: event.clientY, entry });
+  };
 
   const openFilesMkdirModal = () => {
     setFilesModal({ type: "mkdir", name: "" });
@@ -4100,6 +4315,7 @@ function App() {
 		      try {
 		        const preview = await previewLocalFile(response.data);
 	        setFilePreview(preview.data);
+	        setFilePreviewDevicePath(entry.path);
 	      } catch (error) {
 	        dispatchTasks({
 	          type: "TASK_UPDATE_DEVICE",
@@ -4122,6 +4338,79 @@ function App() {
 		      setBusy(false);
 		    }
 		  };
+
+      const handleFilePreview = async (entry: DeviceFileEntry) => {
+        const serial = ensureSingleSelection("file preview");
+        if (!serial) {
+          return;
+        }
+        if (entry.is_dir) {
+          pushToast("Select a file to preview.", "error");
+          return;
+        }
+        const kind = getFileKind(entry);
+        const canPreview = kind === "image" || kind === "text";
+        if (!canPreview) {
+          pushToast("Preview is supported for image and text files.", "info");
+          return;
+        }
+
+        const outputDir = config?.file_gen_output_path || config?.output_path || "";
+        if (!outputDir) {
+          pushToast("Set an output folder in Settings to enable preview.", "error");
+          return;
+        }
+
+        const traceId = crypto.randomUUID();
+        const taskId = beginTask({
+          kind: "file_pull",
+          title: `Preview File: ${entry.name}`,
+          serials: [serial],
+        });
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
+        fileTransferTaskByTraceIdRef.current[traceId] = taskId;
+        setBusy(true);
+        try {
+          const response = await pullDeviceFile(serial, entry.path, outputDir, traceId);
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial,
+            patch: {
+              status: "success",
+              output_path: response.data,
+              progress: 100,
+              message: `Pulled to ${response.data}`,
+            },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+          try {
+            const preview = await previewLocalFile(response.data);
+            setFilePreview(preview.data);
+            setFilePreviewDevicePath(entry.path);
+          } catch (error) {
+            dispatchTasks({
+              type: "TASK_UPDATE_DEVICE",
+              id: taskId,
+              serial,
+              patch: { message: `Pulled. Preview failed: ${formatError(error)}` },
+            });
+            pushToast(`Preview failed: ${formatError(error)}`, "error");
+          }
+        } catch (error) {
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial,
+            patch: { status: "error", message: formatError(error), progress: null },
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+          pushToast(formatError(error), "error");
+        } finally {
+          delete fileTransferTaskByTraceIdRef.current[traceId];
+          setBusy(false);
+        }
+      };
 
   const handleUiInspect = async () => {
     const serial = ensureSingleSelection("UI inspector");
@@ -6879,7 +7168,7 @@ function App() {
 	            <Route
 	              path="/files"
 	              element={
-	                <div className="page-section">
+	                <div className="page-section files-page">
 	                  {filesDropActive && (
 	                    <div className="file-drop-overlay">
 	                      <div className="file-drop-overlay-inner">
@@ -6894,7 +7183,7 @@ function App() {
                       <p className="muted">Browse device storage, download files, and upload files.</p>
                     </div>
                   </div>
-	                  <section className="panel">
+	                  <section className="panel files-panel">
 	                    <div className="panel-header">
 	                      <h2>Device Files</h2>
 	                      <span>{selectedSummaryLabel}</span>
@@ -6971,82 +7260,230 @@ function App() {
                       >
                         Clear filter
                       </button>
+                      <div className="toggle-group files-view-toggle" role="group" aria-label="File view mode">
+                        <button
+                          type="button"
+                          className={`toggle${filesViewMode === "list" ? " active" : ""}`}
+                          onClick={() => setFilesViewMode("list")}
+                          title="List view"
+                        >
+                          List
+                        </button>
+                        <button
+                          type="button"
+                          className={`toggle${filesViewMode === "grid" ? " active" : ""}`}
+                          onClick={() => setFilesViewMode("grid")}
+                          title="Grid view"
+                        >
+                          Icons
+                        </button>
+                      </div>
                       <span className="muted file-filter-meta">{fileFilterSummary}</span>
                     </div>
-                    <div className="split">
-                      <div className="file-list">
+                    <div className="split files-split">
+                      <div className={filesViewMode === "grid" ? "file-grid" : "file-list"}>
                         {files.length === 0 ? (
                           <p className="muted">No files loaded. Click Go to load the folder.</p>
                         ) : filteredFiles.length === 0 ? (
                           <p className="muted">No matches. Clear the filter to see all items.</p>
                         ) : (
-                          filteredFiles.map((entry) => (
-                            <div
-                              key={entry.path}
-                              className={`file-row${isFileSelected(entry.path) ? " is-selected" : ""}`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={isFileSelected(entry.path)}
-                                onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
-                                disabled={busy}
-	                                aria-label={`Select ${entry.name}`}
-	                              />
-	                              <div className="file-row-main">
-	                                <strong>{entry.name}</strong>
-	                                <p className="muted">
-	                                  {entry.is_dir ? "Directory" : "File"} · {entry.size_bytes ?? "--"} bytes
-	                                </p>
-	                              </div>
-                              <div className="file-row-actions">
-                                {entry.is_dir ? (
+                          filteredFiles.map((entry) => {
+                            const kind = getFileKind(entry);
+                            const kindLabel = getFileKindLabel(kind);
+                            const sizeLabel = entry.size_bytes == null ? "—" : formatBytes(entry.size_bytes);
+                            const isSelected = isFileSelected(entry.path);
+
+                            if (filesViewMode === "grid") {
+                              return (
+                                <div
+                                  key={entry.path}
+                                  className={`file-card${isSelected ? " is-selected" : ""}`}
+                                  onContextMenu={(event) => openFilesContextMenu(event, entry)}
+                                  onDoubleClick={() => {
+                                    if (busy || selectedSerials.length !== 1) {
+                                      return;
+                                    }
+                                    if (entry.is_dir) {
+                                      void handleFilesRefresh(entry.path);
+                                    } else {
+                                      void handleFilePull(entry);
+                                    }
+                                  }}
+                                   onClick={(event) => {
+                                     if (event.ctrlKey || event.metaKey) {
+                                       toggleFileSelected(entry.path, !isSelected);
+                                       return;
+                                     }
+                                     setFilesSelectedPaths((prev) =>
+                                       prev.length === 1 && prev[0] === entry.path ? prev : [entry.path],
+                                     );
+                                   }}
+                                >
+                                  <div className="file-card-check">
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
+                                      disabled={busy}
+                                      onClick={(e) => e.stopPropagation()}
+                                    />
+                                  </div>
+                                  <div className={`file-card-icon kind-${kind}`} title={kindLabel}>
+                                    <FileTypeIcon kind={kind} />
+                                  </div>
+                                  <div className="file-card-name" title={entry.name}>
+                                    {entry.name}
+                                  </div>
                                   <button
-                                    className="ghost"
-                                    onClick={() => void handleFilesRefresh(entry.path)}
-                                    disabled={busy || selectedSerials.length !== 1}
+                                    className="ghost icon-only file-card-menu"
+                                    onClick={(event) => openFilesContextMenu(event, entry)}
+                                    title="Actions"
                                   >
-                                    Open folder
+                                    ⋯
                                   </button>
-                                ) : (
-                                  <button onClick={() => handleFilePull(entry)} disabled={busy || selectedSerials.length !== 1}>
-                                    Download
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <div
+                                key={entry.path}
+                                className={`file-row${isSelected ? " is-selected" : ""}`}
+                                onContextMenu={(event) => openFilesContextMenu(event, entry)}
+                                onDoubleClick={() => {
+                                  if (busy || selectedSerials.length !== 1) {
+                                    return;
+                                  }
+                                  if (entry.is_dir) {
+                                    void handleFilesRefresh(entry.path);
+                                  } else {
+                                    void handleFilePull(entry);
+                                  }
+                                }}
+                                onClick={(event) => {
+                                  if (event.ctrlKey || event.metaKey) {
+                                    toggleFileSelected(entry.path, !isSelected);
+                                    return;
+                                  }
+                                  setFilesSelectedPaths((prev) =>
+                                    prev.length === 1 && prev[0] === entry.path ? prev : [entry.path],
+                                  );
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
+                                  disabled={busy}
+                                  aria-label={`Select ${entry.name}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                                <div className={`file-row-icon kind-${kind}`} title={kindLabel} aria-hidden="true">
+                                  <FileTypeIcon kind={kind} />
+                                </div>
+                                <div className="file-row-main">
+                                  <strong title={entry.path}>{entry.name}</strong>
+                                  <p className="muted">{kindLabel}</p>
+                                </div>
+                                <div className="file-row-meta">
+                                  {entry.is_dir ? <span className="muted">—</span> : <span className="file-row-size">{sizeLabel}</span>}
+                                </div>
+                                <div className="file-row-actions">
+                                  <button
+                                    type="button"
+                                    className="ghost icon-only"
+                                    onClick={(event) => openFilesContextMenu(event, entry)}
+                                    disabled={busy}
+                                    title="File actions"
+                                    aria-label={`Actions for ${entry.name}`}
+                                  >
+                                    ⋯
                                   </button>
-                                )}
-                                <button
-                                  className="ghost"
-                                  onClick={() => openFilesRenameModal(entry)}
-                                  disabled={busy || selectedSerials.length !== 1}
-                                >
-                                  Rename
-                                </button>
-                                <button
-                                  className="danger"
-                                  onClick={() => openFilesDeleteModal(entry)}
-                                  disabled={busy || selectedSerials.length !== 1}
-                                >
-                                  Delete
-                                </button>
-	                              </div>
-	                            </div>
-	                          ))
+                                </div>
+                              </div>
+                            );
+                          })
                         )}
                       </div>
                       <div className="preview-panel">
                         <h3>Preview</h3>
-                        {filePreview?.is_text && filePreview.preview_text ? (
-                          <pre>{filePreview.preview_text}</pre>
-                        ) : (
-                          <p className="muted">
-                            {filePreview
-                              ? `Preview not available (${filePreview.mime_type}).`
-                              : "Download a file to preview."}
-                          </p>
-                        )}
-                        {filePreview && (
-                          <button onClick={() => openPath(filePreview.local_path)} disabled={busy}>
-                            Open Externally
-                          </button>
-                        )}
+
+                        {(() => {
+                          if (selectedSerials.length !== 1) {
+                            return <p className="muted">Select one device to preview files.</p>;
+                          }
+                          if (filesSelectedPaths.length !== 1) {
+                            return <p className="muted">Select one file to preview.</p>;
+                          }
+                          const selectedPath = filesSelectedPaths[0];
+                          const entry = files.find((item) => item.path === selectedPath);
+                          if (!entry) {
+                            return <p className="muted">Select a file to preview.</p>;
+                          }
+                          if (entry.is_dir) {
+                            return <p className="muted">Folder selected. Double click to open.</p>;
+                          }
+
+                          const kind = getFileKind(entry);
+                          const canPreview = kind === "image" || kind === "text";
+                          const previewMatches = filePreview && filePreviewDevicePath === entry.path;
+                          const isImage = previewMatches && filePreview.mime_type.startsWith("image/");
+                          const imageSrc = isImage
+                            ? filePreview.preview_data_url ?? (isTauriRuntime() ? convertFileSrc(filePreview.local_path) : null)
+                            : null;
+
+                          if (!previewMatches) {
+                            return (
+                              <div className="preview-empty">
+                                <p className="muted">
+                                  {canPreview
+                                    ? "Preview is available for this file."
+                                    : "Preview is available for image and text files."}
+                                </p>
+                                <div className="button-row compact">
+                                  <button
+                                    onClick={() => void handleFilePreview(entry)}
+                                    disabled={busy || !canPreview}
+                                  >
+                                    Preview
+                                  </button>
+                                  <button
+                                    className="ghost"
+                                    onClick={() => void handleFilePull(entry)}
+                                    disabled={busy}
+                                  >
+                                    Download
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <>
+                              {isImage ? (
+                                imageSrc ? (
+                                  <img className="preview-image" src={imageSrc} alt={entry.name} />
+                                ) : (
+                                  <p className="muted">Image preview requires the desktop app runtime.</p>
+                                )
+                              ) : filePreview.is_text && filePreview.preview_text ? (
+                                <pre>{filePreview.preview_text}</pre>
+                              ) : (
+                                <p className="muted">Preview not available ({filePreview.mime_type}).</p>
+                              )}
+
+                              <div className="button-row compact">
+                                <button onClick={() => openPath(filePreview.local_path)} disabled={busy}>
+                                  Open Externally
+                                </button>
+                                <button className="ghost" onClick={() => void handleFilePull(entry)} disabled={busy}>
+                                  Download
+                                </button>
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
                     </div>
                     <div className="file-bulk-bar">
@@ -7074,6 +7511,164 @@ function App() {
                         </button>
                       </div>
                     </div>
+
+                    {filesContextMenu && (
+                      <>
+                        <div className="context-menu-backdrop" onClick={() => setFilesContextMenu(null)} />
+                        <div
+                          className="context-menu"
+                          style={{
+                            top: filesContextMenu.y,
+                            left: Math.max(10, filesContextMenu.x - 160),
+                          }}
+                        >
+                          {(() => {
+                            const entry = filesContextMenu.entry;
+                            const kind = getFileKind(entry);
+                            const kindLabel = getFileKindLabel(kind);
+                            const sizeLabel = entry.is_dir
+                              ? "—"
+                              : entry.size_bytes == null
+                                ? "—"
+                                : formatBytes(entry.size_bytes);
+                            const modifiedLabel = entry.modified_at ? entry.modified_at : "";
+                            const previewable = !entry.is_dir && (kind === "image" || kind === "text");
+
+                            return (
+                              <>
+                                <div className="context-menu-header">
+                                  <div className="context-menu-header-title">{entry.name}</div>
+                                  <div className="context-menu-header-sub">
+                                    {kindLabel} · {sizeLabel}
+                                    {modifiedLabel ? ` · ${modifiedLabel}` : ""}
+                                  </div>
+                                  <div className="context-menu-header-sub">{entry.path}</div>
+                                </div>
+                                <div className="context-menu-sep" />
+
+                                {entry.is_dir ? (
+                                  <button
+                                    type="button"
+                                    className="context-menu-item"
+                                    onClick={() => {
+                                      setFilesContextMenu(null);
+                                      void handleFilesRefresh(entry.path);
+                                    }}
+                                    disabled={busy || selectedSerials.length !== 1}
+                                  >
+                                    Open folder
+                                  </button>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className="context-menu-item"
+                                      onClick={() => {
+                                        setFilesContextMenu(null);
+                                        void handleFilePull(entry);
+                                      }}
+                                      disabled={busy || selectedSerials.length !== 1}
+                                    >
+                                      Download
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="context-menu-item"
+                                      onClick={() => {
+                                        setFilesContextMenu(null);
+                                        void handleFilePreview(entry);
+                                      }}
+                                      disabled={busy || selectedSerials.length !== 1 || !previewable}
+                                      title={previewable ? "" : "Preview is supported for image and text files."}
+                                    >
+                                      Preview
+                                    </button>
+                                  </>
+                                )}
+
+                                <button
+                                  type="button"
+                                  className="context-menu-item"
+                                  onClick={() => {
+                                    openFilesRenameModal(entry);
+                                    setFilesContextMenu(null);
+                                  }}
+                                  disabled={busy || selectedSerials.length !== 1}
+                                >
+                                  Rename
+                                </button>
+                                <button
+                                  type="button"
+                                  className="context-menu-item danger"
+                                  onClick={() => {
+                                    openFilesDeleteModal(entry);
+                                    setFilesContextMenu(null);
+                                  }}
+                                  disabled={busy || selectedSerials.length !== 1}
+                                >
+                                  Delete
+                                </button>
+
+                                <div className="context-menu-sep" />
+
+                                <button
+                                  type="button"
+                                  className="context-menu-item"
+                                  onClick={() => {
+                                    const path = entry.path;
+                                    void (async () => {
+                                      try {
+                                        await writeText(path);
+                                        pushToast("Path copied.", "info");
+                                      } catch (error) {
+                                        pushToast(formatError(error), "error");
+                                      }
+                                    })();
+                                    setFilesContextMenu(null);
+                                  }}
+                                >
+                                  Copy path
+                                </button>
+                                <button
+                                  type="button"
+                                  className="context-menu-item"
+                                  onClick={() => {
+                                    const name = entry.name;
+                                    void (async () => {
+                                      try {
+                                        await writeText(name);
+                                        pushToast("Name copied.", "info");
+                                      } catch (error) {
+                                        pushToast(formatError(error), "error");
+                                      }
+                                    })();
+                                    setFilesContextMenu(null);
+                                  }}
+                                >
+                                  Copy name
+                                </button>
+
+                                <div className="context-menu-sep" />
+
+                                <button
+                                  type="button"
+                                  className="context-menu-item"
+                                  onClick={() => {
+                                    pushToast(
+                                      `${kindLabel}: ${entry.name} · ${sizeLabel}${modifiedLabel ? ` · ${modifiedLabel}` : ""}`,
+                                      "info",
+                                    );
+                                    setFilesContextMenu(null);
+                                  }}
+                                >
+                                  Get info
+                                </button>
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </>
+                    )}
                   </section>
                 </div>
               }

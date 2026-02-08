@@ -356,6 +356,7 @@ export type FilePreview = {
   mime_type: string;
   is_text: boolean;
   preview_text?: string | null;
+  preview_data_url?: string | null;
 };
 
 export type ScrcpyInfo = {

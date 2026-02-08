@@ -336,17 +336,34 @@ pub fn parse_ls_la(path: &str, output: &str) -> Vec<DeviceFileEntry> {
             let perm = tokens[0];
             let is_dir = perm.starts_with('d');
             let size_bytes = tokens.get(4).and_then(|value| value.parse::<u64>().ok());
-            let (modified_at, name_start_index) = if tokens.len() >= 9 {
-                (format!("{} {} {}", tokens[5], tokens[6], tokens[7]), 8usize)
-            } else {
+
+            let looks_like_iso_date = |value: &str| {
+                let bytes = value.as_bytes();
+                bytes.len() == 10
+                    && bytes[4] == b'-'
+                    && bytes[7] == b'-'
+                    && bytes[..4].iter().all(|b| b.is_ascii_digit())
+                    && bytes[5..7].iter().all(|b| b.is_ascii_digit())
+                    && bytes[8..].iter().all(|b| b.is_ascii_digit())
+            };
+
+            // Android `ls -la` may emit either:
+            // - ISO format:   2024-01-01 12:00 <name>
+            // - Locale-ish:   Jan  1 12:00 <name>
+            let (modified_at, name_start_index) = if looks_like_iso_date(tokens[5]) {
                 (format!("{} {}", tokens[5], tokens[6]), 7usize)
+            } else {
+                (format!("{} {} {}", tokens[5], tokens[6], tokens[7]), 8usize)
             };
             let modified_at = Some(modified_at).filter(|value| !value.trim().is_empty());
-            let name = if tokens.len() > name_start_index {
+            let mut name = if tokens.len() > name_start_index {
                 tokens[name_start_index..].join(" ")
             } else {
                 String::new()
             };
+            if let Some((base, _)) = name.split_once(" -> ") {
+                name = base.to_string();
+            }
             if name.is_empty() || name == "." || name == ".." {
                 return None;
             }
@@ -364,6 +381,16 @@ pub fn parse_ls_la(path: &str, output: &str) -> Vec<DeviceFileEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_ls_la_symlink_name_without_target() {
+        let output = "lrwxrwxrwx 1 root root 21 2025-01-01 00:00 sdcard -> /storage/self/primary\n";
+        let parsed = parse_ls_la("/", output);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "sdcard");
+        assert_eq!(parsed[0].path, "/sdcard");
+        assert_eq!(parsed[0].is_dir, false);
+    }
 
     #[test]
     fn parses_adb_devices_output() {
