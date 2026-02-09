@@ -149,6 +149,7 @@ import {
   sanitizeMultiPathsForStorage,
   sanitizeStoredState,
 } from "./apkInstallerState";
+import appPackage from "../package.json";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
@@ -879,6 +880,8 @@ function App() {
   const didRestoreTerminalRef = useRef(false);
   const didInitialDeviceRefreshRef = useRef(false);
   const [busy, setBusy] = useState(false);
+  const [appVersion, setAppVersion] = useState(appPackage.version);
+  const appVersionLabel = appVersion.trim() || "--";
   const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
   const [logcatSourceValue, setLogcatSourceValue] = useState("");
@@ -915,6 +918,30 @@ function App() {
   useEffect(() => {
     localStorage.setItem("lazy_blacktea_files_view_mode_v1", filesViewMode);
   }, [filesViewMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        const version = await getVersion();
+        if (!cancelled) {
+          setAppVersion(version);
+        }
+      } catch (error) {
+        console.warn("Failed to read app version from Tauri.", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -5586,6 +5613,38 @@ function App() {
     }
   };
 
+  const handleBrowseOutputPath = async () => {
+    try {
+      const selected = await openDialog({
+        title: "Select default output folder",
+        multiple: false,
+        directory: true,
+      });
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+      setConfig((prev) => (prev ? { ...prev, output_path: selected } : prev));
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleBrowseFileExportPath = async () => {
+    try {
+      const selected = await openDialog({
+        title: "Select file export folder",
+        multiple: false,
+        directory: true,
+      });
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+      setConfig((prev) => (prev ? { ...prev, file_gen_output_path: selected } : prev));
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
   const runBugreportLogQuery = async (reportId: string, offset: number, append: boolean) => {
     const requestId = bugreportLogRequestRef.current + 1;
     bugreportLogRequestRef.current = requestId;
@@ -6940,6 +6999,9 @@ function App() {
               Live Mirror
             </button>
             <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working..." : "Idle"}</span>
+            <span className="app-version" title={`App version ${appVersionLabel}`}>
+              {appVersionLabel}
+            </span>
           </div>
         </header>
 
@@ -9995,6 +10057,10 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Leave blank to use <code>adb</code> from your PATH. Otherwise select the{" "}
+                            <code>adb</code> executable from Android platform-tools.
+                          </div>
                           <div className="button-row">
                             <button type="button" className="ghost" onClick={handleBrowseAdbPath} disabled={busy}>
                               Browse
@@ -10024,15 +10090,26 @@ function App() {
 	                          <label>
 	                            Default Output
 	                            <input
+                              placeholder="e.g. /Users/me/Downloads or C:\\Users\\me\\Downloads"
                               value={config.output_path}
                               onChange={(event) =>
                                 setConfig((prev) => (prev ? { ...prev, output_path: event.target.value } : prev))
                               }
                             />
                           </label>
+                          <div className="button-row">
+                            <button type="button" className="ghost" onClick={handleBrowseOutputPath} disabled={busy}>
+                              Browse
+                            </button>
+                          </div>
+                          <div className="muted settings-hint">
+                            Default folder for screenshots, bugreports, and recordings. Use an absolute local folder
+                            path.
+                          </div>
                           <label>
                             File Export
                             <input
+                              placeholder="Leave blank to use Default Output"
                               value={config.file_gen_output_path}
                               onChange={(event) =>
                                 setConfig((prev) =>
@@ -10041,6 +10118,19 @@ function App() {
                               }
                             />
 	                          </label>
+                          <div className="button-row">
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={handleBrowseFileExportPath}
+                              disabled={busy}
+                            >
+                              Browse
+                            </button>
+                          </div>
+                          <div className="muted settings-hint">
+                            Folder for generated exports (logcat, UI inspector). Leave blank to reuse Default Output.
+                          </div>
 	                        </div>
 	                        <div className="settings-group">
 	                          <h3>Devices</h3>
@@ -10061,6 +10151,9 @@ function App() {
 	                            />
 	                            Auto-refresh device list
 	                          </label>
+                            <div className="muted settings-hint">
+                              When enabled, the device list refreshes automatically in the background (no toast errors).
+                            </div>
 	                          <label>
 	                            Refresh interval (sec)
 	                            <input
@@ -10082,7 +10175,9 @@ function App() {
 	                              }
 	                            />
 	                          </label>
-	                          <p className="muted">Runs in the background and won't show toast errors.</p>
+                            <div className="muted settings-hint">
+                              How often to refresh while auto-refresh is enabled. Minimum 1 second.
+                            </div>
 	                        </div>
 	                        <div className="settings-group">
 	                          <h3>Commands</h3>
@@ -10103,6 +10198,10 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Shell Commands timeout in seconds. Increase if your <code>adb shell</code> commands are cut
+                            off.
+                          </div>
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -10120,6 +10219,10 @@ function App() {
                             />
                             Parallel execution
                           </label>
+                          <div className="muted settings-hint">
+                            Run multi-device operations in parallel (Shell Commands, APK batch installs). Disable if you
+                            see flaky ADB/USB behavior.
+                          </div>
                         </div>
                         <div className="settings-group">
                           <h3>Screenshot</h3>
@@ -10141,6 +10244,10 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Use <code>-1</code> for the default display. Use <code>0+</code> to target a specific
+                            display.
+                          </div>
                           <label>
                             Extra args
                             <input
@@ -10157,7 +10264,9 @@ function App() {
                               }
                             />
                           </label>
-                          <p className="muted">Use -1 to capture the default display.</p>
+                          <div className="muted settings-hint">
+                            Extra <code>screencap</code> flags, space-separated. Leave blank for defaults.
+                          </div>
                         </div>
                         <div className="settings-group">
                           <h3>Screenrecord</h3>
@@ -10177,6 +10286,9 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Video bit rate (bits per second). Example: <code>4000000</code>.
+                          </div>
                           <label>
                             Time limit (sec)
                             <input
@@ -10202,6 +10314,7 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">Max duration per recording, 1 to 180 seconds.</div>
                           <label>
                             Display ID
                             <input
@@ -10223,9 +10336,14 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Use <code>-1</code> for the default display. Use <code>0+</code> to target a specific
+                            display.
+                          </div>
                           <label>
                             Size
                             <input
+                              placeholder="e.g. 1280x720"
                               value={config.screen_record.size}
                               onChange={(event) =>
                                 setConfig((prev) =>
@@ -10236,6 +10354,9 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Optional size as <code>WIDTHxHEIGHT</code>. Leave blank to keep device native resolution.
+                          </div>
                           <label>
                             Extra args
                             <input
@@ -10252,6 +10373,9 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Extra <code>screenrecord</code> flags, space-separated. Leave blank for defaults.
+                          </div>
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -10269,6 +10393,9 @@ function App() {
                             />
                             Use HEVC
                           </label>
+                          <div className="muted settings-hint">
+                            Use HEVC/H.265 codec (smaller files, may not be supported on older devices).
+                          </div>
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -10286,6 +10413,9 @@ function App() {
                             />
                             Bugreport overlay
                           </label>
+                          <div className="muted settings-hint">
+                            Overlay bugreport info in the recording (Android feature).
+                          </div>
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -10300,6 +10430,9 @@ function App() {
                             />
                             Verbose output
                           </label>
+                          <div className="muted settings-hint">
+                            Enable verbose <code>screenrecord</code> output for troubleshooting.
+                          </div>
                         </div>
                         <div className="settings-group">
                           <h3>scrcpy</h3>
@@ -10317,6 +10450,7 @@ function App() {
                             />
                             Stay awake
                           </label>
+                          <div className="muted settings-hint">Keep the device awake while mirroring.</div>
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -10331,6 +10465,9 @@ function App() {
                             />
                             Turn screen off
                           </label>
+                          <div className="muted settings-hint">
+                            Turn off the device display while mirroring (stream stays on).
+                          </div>
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -10345,6 +10482,7 @@ function App() {
                             />
                             Disable screensaver
                           </label>
+                          <div className="muted settings-hint">Disable screensaver while mirroring.</div>
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -10362,9 +10500,11 @@ function App() {
                             />
                             Enable audio
                           </label>
+                          <div className="muted settings-hint">Enable audio playback (depends on scrcpy version).</div>
                           <label>
                             Bit rate
                             <input
+                              placeholder="e.g. 8M"
                               value={config.scrcpy.bitrate}
                               onChange={(event) =>
                                 setConfig((prev) =>
@@ -10373,6 +10513,9 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Video bit rate. scrcpy format, e.g. <code>8M</code> or <code>16M</code>.
+                          </div>
                           <label>
                             Max size
                             <input
@@ -10388,6 +10531,9 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Limit the max video dimension in pixels (<code>0</code> = no limit).
+                          </div>
                           <label>
                             Extra args
                             <input
@@ -10401,6 +10547,9 @@ function App() {
                               }
                             />
                           </label>
+                          <div className="muted settings-hint">
+                            Additional scrcpy CLI args, space-separated. Leave blank for defaults.
+                          </div>
                         </div>
                       </div>
                       <div className="button-row settings-actions">
