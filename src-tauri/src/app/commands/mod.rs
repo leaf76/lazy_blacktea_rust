@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -47,12 +47,16 @@ use crate::app::diagnostics;
 use crate::app::error::AppError;
 use crate::app::models::{
     AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo,
-    AppComponentsSummary, AppIcon, AppInfo, BugreportLogFilters, BugreportLogPage,
-    BugreportLogSummary, BugreportResult, CommandResponse, CommandResult, DeviceDetail,
-    DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LogcatExportResult, PerfSnapshot,
-    ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
-    UiHierarchyExportResult,
+    AppComponentsSummary, AppIcon, AppInfo, BugreportLogAroundPage, BugreportLogFilters,
+    BugreportLogPage, BugreportLogSearchResult, BugreportLogSummary, BugreportResult,
+    CommandResponse, CommandResult, DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview,
+    HostCommandResult, LogcatExportResult, NetProfilerSnapshot, PerfSnapshot, ScrcpyInfo,
+    TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
+use crate::app::net_profiler::parse::{
+    parse_cmd_package_list_u, parse_dumpsys_netstats_app_uid_stats, parse_xt_qtaguid_stats,
+};
+use crate::app::net_profiler::snapshot::build_net_usage_rows;
 use crate::app::perf::parse::{
     build_perf_script, compute_cpu_percent_x100, parse_battery_totals, parse_cpu_freq_khz,
     parse_cpu_totals, parse_mem_totals, parse_net_totals, parse_per_core_cpu_totals,
@@ -60,7 +64,7 @@ use crate::app::perf::parse::{
     MARK_MEMINFO, MARK_NETDEV, MARK_PROC_STAT,
 };
 use crate::app::state::{
-    AppState, BugreportHandle, LogcatHandle, PerfMonitorHandle, RecordingHandle,
+    AppState, BugreportHandle, LogcatHandle, NetProfilerHandle, PerfMonitorHandle, RecordingHandle,
 };
 use crate::app::terminal::{TerminalSession, TERMINAL_EVENT_NAME};
 use crate::app::ui_capture::png_bytes_to_data_url;
@@ -264,6 +268,42 @@ fn clamp_perf_interval_ms(input: Option<u64>) -> u64 {
     value.clamp(500, 5000)
 }
 
+fn clamp_net_profiler_interval_ms(input: Option<u64>) -> u64 {
+    let value = input.unwrap_or(2000);
+    value.clamp(500, 5000)
+}
+
+fn clamp_net_profiler_top_n(input: Option<u32>) -> usize {
+    let value = input.unwrap_or(20);
+    let clamped = value.clamp(5, 50);
+    clamped as usize
+}
+
+fn sanitize_net_profiler_pinned_uids(
+    input: Option<Vec<u32>>,
+    top_n: usize,
+    trace_id: &str,
+) -> Result<Vec<u32>, AppError> {
+    const MAX_PINNED_UIDS: usize = 5;
+    let mut unique: Vec<u32> = Vec::new();
+    let mut seen = std::collections::HashSet::<u32>::new();
+    for uid in input.unwrap_or_default() {
+        if seen.insert(uid) {
+            unique.push(uid);
+        }
+    }
+    if unique.len() > MAX_PINNED_UIDS {
+        return Err(AppError::validation(
+            format!("Too many pinned UIDs (max {MAX_PINNED_UIDS})"),
+            trace_id,
+        ));
+    }
+    if unique.len() > top_n {
+        unique.truncate(top_n);
+    }
+    Ok(unique)
+}
+
 fn start_perf_monitor_inner(
     serial: String,
     registry: &std::sync::Mutex<std::collections::HashMap<String, PerfMonitorHandle>>,
@@ -310,6 +350,93 @@ fn stop_perf_monitor_inner(
         .join
         .join()
         .map_err(|_| AppError::system("Perf monitor thread panicked", trace_id))?;
+    Ok(true)
+}
+
+fn start_net_profiler_inner(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, NetProfilerHandle>>,
+    trace_id: &str,
+    initial_pinned_uids: Vec<u32>,
+    spawn: impl FnOnce(Arc<AtomicBool>, Arc<RwLock<Vec<u32>>>) -> std::thread::JoinHandle<()>,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let mut guard = registry
+        .lock()
+        .map_err(|_| AppError::system("Net profiler registry locked", trace_id))?;
+    if guard.contains_key(&serial) {
+        return Err(AppError::validation(
+            "Net profiler already running",
+            trace_id,
+        ));
+    }
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let pinned_uids = Arc::new(RwLock::new(initial_pinned_uids));
+    let join = spawn(Arc::clone(&stop_flag), Arc::clone(&pinned_uids));
+    guard.insert(
+        serial,
+        NetProfilerHandle {
+            stop_flag,
+            pinned_uids,
+            join,
+        },
+    );
+    Ok(true)
+}
+
+fn stop_net_profiler_inner(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, NetProfilerHandle>>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let handle = {
+        let mut guard = registry
+            .lock()
+            .map_err(|_| AppError::system("Net profiler registry locked", trace_id))?;
+        match guard.remove(&serial) {
+            Some(handle) => handle,
+            None => return Err(AppError::validation("Net profiler not running", trace_id)),
+        }
+    };
+
+    handle.stop_flag.store(true, Ordering::Relaxed);
+    handle
+        .join
+        .join()
+        .map_err(|_| AppError::system("Net profiler thread panicked", trace_id))?;
+    Ok(true)
+}
+
+fn set_net_profiler_pinned_uids_inner(
+    serial: String,
+    pinned_uids: Option<Vec<u32>>,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, NetProfilerHandle>>,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+    let pinned_uids = sanitize_net_profiler_pinned_uids(pinned_uids, 50, trace_id)?;
+
+    let pinned_target = {
+        let guard = registry
+            .lock()
+            .map_err(|_| AppError::system("Net profiler registry locked", trace_id))?;
+        match guard.get(&serial) {
+            Some(handle) => Arc::clone(&handle.pinned_uids),
+            None => return Err(AppError::validation("Net profiler not running", trace_id)),
+        }
+    };
+
+    {
+        let mut guard = pinned_target
+            .write()
+            .map_err(|_| AppError::system("Net profiler pinned uids locked", trace_id))?;
+        *guard = pinned_uids;
+    }
+
     Ok(true)
 }
 
@@ -521,6 +648,7 @@ pub fn smoke_install_apk_batch(
         extra_args,
         state,
         trace_id,
+        None,
     )
 }
 
@@ -548,9 +676,13 @@ pub fn smoke_launch_app(
         handles.push(std::thread::spawn(move || -> Result<_, AppError> {
             let _permit = scheduler_clone.acquire_global();
             let device_lock = scheduler_clone.device_lock(&serial);
-            let _device_guard = device_lock
-                .lock()
-                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+            let _device_guard = device_lock.lock().map_err(|_| {
+                warn!(trace_id = %trace_clone, serial = %serial, "device lock poisoned");
+                AppError::system(
+                    "Failed to access the device. Please try again.",
+                    &trace_clone,
+                )
+            })?;
 
             let args = vec![
                 "-s".to_string(),
@@ -596,6 +728,17 @@ fn emit_perf_event(app: &AppHandle, event: PerfEvent) {
     let trace_id = event.trace_id.clone();
     if let Err(err) = app.emit("perf-snapshot", event) {
         warn!(trace_id = %trace_id, error = %err, "failed to emit perf snapshot");
+    }
+}
+
+fn emit_net_profiler_event(app: &AppHandle, event: NetProfilerEvent) {
+    let trace_id = event.trace_id.clone();
+    if let Err(err) = app.emit("net-profiler-snapshot", event) {
+        warn!(
+            trace_id = %trace_id,
+            error = %err,
+            "failed to emit net profiler snapshot"
+        );
     }
 }
 
@@ -710,11 +853,39 @@ pub struct PerfEvent {
 }
 
 #[derive(Clone, serde::Serialize)]
+pub struct NetProfilerEvent {
+    pub serial: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<NetProfilerSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub trace_id: String,
+}
+
+#[derive(Clone, serde::Serialize)]
 pub struct FileTransferProgressEvent {
     pub serial: String,
     pub direction: String,
     pub progress: Option<u8>,
     pub message: Option<String>,
+    pub trace_id: String,
+}
+
+const APK_INSTALL_EVENT_NAME: &str = "apk-install-event";
+const APK_INSTALL_OUTPUT_MAX_LEN: usize = 4096;
+
+#[derive(Clone, serde::Serialize)]
+pub struct ApkInstallEvent {
+    pub serial: String,
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<String>,
     pub trace_id: String,
 }
 
@@ -757,6 +928,13 @@ fn append_limited(buffer: &mut String, chunk: &str, max_len: usize) {
     } else {
         buffer.push_str(&chunk[..remaining]);
     }
+}
+
+fn truncate_for_event(value: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
+    value.chars().take(max_len).collect()
 }
 
 fn run_adb_transfer_with_progress(
@@ -1437,9 +1615,13 @@ pub fn list_devices(
                 > {
                     let _permit = scheduler_spawn.acquire_global();
                     let device_lock = scheduler_spawn.device_lock(&serial);
-                    let _device_guard = device_lock
-                        .lock()
-                        .map_err(|_| AppError::system("Device lock poisoned", &trace_spawn))?;
+                    let _device_guard = device_lock.lock().map_err(|_| {
+                        warn!(trace_id = %trace_spawn, serial = %serial, "device lock poisoned");
+                        AppError::system(
+                            "Failed to access the device. Please try again.",
+                            &trace_spawn,
+                        )
+                    })?;
                     run_command_with_timeout(&adb_program_spawn, args, timeout, &trace_spawn)
                 };
 
@@ -1603,9 +1785,13 @@ pub fn run_shell(
             handles.push(std::thread::spawn(move || -> Result<_, AppError> {
                 let _permit = scheduler_clone.acquire_global();
                 let device_lock = scheduler_clone.device_lock(&serial);
-                let _device_guard = device_lock
-                    .lock()
-                    .map_err(|_| AppError::system("Device lock poisoned", &trace_id_clone))?;
+                let _device_guard = device_lock.lock().map_err(|_| {
+                    warn!(trace_id = %trace_id_clone, serial = %serial, "device lock poisoned");
+                    AppError::system(
+                        "Failed to access the device. Please try again.",
+                        &trace_id_clone,
+                    )
+                })?;
                 let args = vec![
                     "-s".to_string(),
                     serial.clone(),
@@ -1642,9 +1828,10 @@ pub fn run_shell(
             ensure_non_empty(&serial, "serial", &trace_id)?;
             let _permit = scheduler.acquire_global();
             let device_lock = scheduler.device_lock(&serial);
-            let _device_guard = device_lock
-                .lock()
-                .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
+            let _device_guard = device_lock.lock().map_err(|_| {
+                warn!(trace_id = %trace_id, serial = %serial, "device lock poisoned");
+                AppError::system("Failed to access the device. Please try again.", &trace_id)
+            })?;
             let args = vec![
                 "-s".to_string(),
                 serial.clone(),
@@ -1894,9 +2081,13 @@ pub fn reboot_devices(
         handles.push(std::thread::spawn(move || -> Result<_, AppError> {
             let _permit = scheduler_clone.acquire_global();
             let device_lock = scheduler_clone.device_lock(&serial);
-            let _device_guard = device_lock
-                .lock()
-                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+            let _device_guard = device_lock.lock().map_err(|_| {
+                warn!(trace_id = %trace_clone, serial = %serial, "device lock poisoned");
+                AppError::system(
+                    "Failed to access the device. Please try again.",
+                    &trace_clone,
+                )
+            })?;
 
             let mut args = vec!["-s".to_string(), serial.clone(), "reboot".to_string()];
             match mode_clone.as_str() {
@@ -1962,9 +2153,13 @@ pub fn set_wifi_state(
         handles.push(std::thread::spawn(move || -> Result<_, AppError> {
             let _permit = scheduler_clone.acquire_global();
             let device_lock = scheduler_clone.device_lock(&serial);
-            let _device_guard = device_lock
-                .lock()
-                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+            let _device_guard = device_lock.lock().map_err(|_| {
+                warn!(trace_id = %trace_clone, serial = %serial, "device lock poisoned");
+                AppError::system(
+                    "Failed to access the device. Please try again.",
+                    &trace_clone,
+                )
+            })?;
 
             let args = vec![
                 "-s".to_string(),
@@ -2032,9 +2227,13 @@ pub fn set_bluetooth_state(
         handles.push(std::thread::spawn(move || -> Result<_, AppError> {
             let _permit = scheduler_clone.acquire_global();
             let device_lock = scheduler_clone.device_lock(&serial);
-            let _device_guard = device_lock
-                .lock()
-                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+            let _device_guard = device_lock.lock().map_err(|_| {
+                warn!(trace_id = %trace_clone, serial = %serial, "device lock poisoned");
+                AppError::system(
+                    "Failed to access the device. Please try again.",
+                    &trace_clone,
+                )
+            })?;
 
             let mut args = vec![
                 "-s".to_string(),
@@ -2113,6 +2312,7 @@ fn install_apk_batch_inner(
     extra_args: Option<String>,
     state: &AppState,
     trace_id: &str,
+    app: Option<AppHandle>,
 ) -> Result<ApkBatchInstallResult, AppError> {
     let trace_id = trace_id.to_string();
     ensure_non_empty(&apk_path, "apk_path", &trace_id)?;
@@ -2193,21 +2393,59 @@ fn install_apk_batch_inner(
         let apk_path_clone = apk_path.clone();
         let adb_program_clone = adb_program.clone();
         let scheduler_clone = Arc::clone(&scheduler);
+        let app_clone = app.clone();
         handles.push(std::thread::spawn(move || {
             let start_device = std::time::Instant::now();
+            if let Some(app_emit) = &app_clone {
+                if let Err(err) = app_emit.emit(
+                    APK_INSTALL_EVENT_NAME,
+                    ApkInstallEvent {
+                        serial: serial.clone(),
+                        event: "start".to_string(),
+                        success: None,
+                        message: Some("Installing...".to_string()),
+                        error_code: None,
+                        raw_output: None,
+                        trace_id: trace_clone.clone(),
+                    },
+                ) {
+                    warn!(trace_id = %trace_clone, error = %err, "failed to emit apk install event");
+                }
+            }
             let _permit = scheduler_clone.acquire_global();
             let device_lock = scheduler_clone.device_lock(&serial);
             let _device_guard = match device_lock.lock() {
                 Ok(guard) => guard,
                 Err(_) => {
-                    return ApkInstallResult {
+                    warn!(trace_id = %trace_clone, serial = %serial, "device lock poisoned");
+                    let result_item = ApkInstallResult {
                         serial,
                         success: false,
                         error_code: ApkInstallErrorCode::UnknownError,
-                        raw_output: "Device lock poisoned".to_string(),
+                        raw_output: "Failed to access the device. Please try again.".to_string(),
                         duration_seconds: start_device.elapsed().as_secs_f64(),
                         device_model: None,
                     };
+                    if let Some(app_emit) = &app_clone {
+                        if let Err(err) = app_emit.emit(
+                            APK_INSTALL_EVENT_NAME,
+                            ApkInstallEvent {
+                                serial: result_item.serial.clone(),
+                                event: "complete".to_string(),
+                                success: Some(false),
+                                message: Some("Failed to access the device. Please try again.".to_string()),
+                                error_code: Some(result_item.error_code.code().to_string()),
+                                raw_output: Some(truncate_for_event(
+                                    result_item.raw_output.trim(),
+                                    APK_INSTALL_OUTPUT_MAX_LEN,
+                                )),
+                                trace_id: trace_clone.clone(),
+                            },
+                        ) {
+                            warn!(trace_id = %trace_clone, error = %err, "failed to emit apk install event");
+                        }
+                    }
+                    return result_item;
                 }
             };
             let mut args = vec!["-s".to_string(), serial.clone()];
@@ -2251,7 +2489,7 @@ fn install_apk_batch_inner(
                 &trace_clone,
             );
             let elapsed = start_device.elapsed().as_secs_f64();
-            match output {
+            let result_item = match output {
                 Ok(output) => {
                     let raw = if output.stdout.trim().is_empty() {
                         output.stderr.clone()
@@ -2277,7 +2515,39 @@ fn install_apk_batch_inner(
                     duration_seconds: elapsed,
                     device_model: None,
                 },
+            };
+
+            if let Some(app_emit) = &app_clone {
+                let raw_trimmed = result_item.raw_output.trim();
+                let raw_output = if raw_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(truncate_for_event(raw_trimmed, APK_INSTALL_OUTPUT_MAX_LEN))
+                };
+                let message = if result_item.success {
+                    Some("Installed.".to_string())
+                } else if let Some(raw) = raw_output.clone() {
+                    Some(raw)
+                } else {
+                    Some(result_item.error_code.code().to_string())
+                };
+                if let Err(err) = app_emit.emit(
+                    APK_INSTALL_EVENT_NAME,
+                    ApkInstallEvent {
+                        serial: result_item.serial.clone(),
+                        event: "complete".to_string(),
+                        success: Some(result_item.success),
+                        message,
+                        error_code: Some(result_item.error_code.code().to_string()),
+                        raw_output,
+                        trace_id: trace_clone.clone(),
+                    },
+                ) {
+                    warn!(trace_id = %trace_clone, error = %err, "failed to emit apk install event");
+                }
             }
+
+            result_item
         }));
         if !use_parallel {
             if let Some(handle) = handles.pop() {
@@ -2315,6 +2585,7 @@ pub fn install_apk_batch(
     grant: bool,
     allow_test_packages: bool,
     extra_args: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<ApkBatchInstallResult>, AppError> {
@@ -2329,6 +2600,7 @@ pub fn install_apk_batch(
         extra_args,
         state.inner(),
         &trace_id,
+        Some(app),
     )?;
 
     Ok(CommandResponse {
@@ -3885,9 +4157,13 @@ pub fn launch_app(
         handles.push(std::thread::spawn(move || -> Result<_, AppError> {
             let _permit = scheduler_clone.acquire_global();
             let device_lock = scheduler_clone.device_lock(&serial);
-            let _device_guard = device_lock
-                .lock()
-                .map_err(|_| AppError::system("Device lock poisoned", &trace_clone))?;
+            let _device_guard = device_lock.lock().map_err(|_| {
+                warn!(trace_id = %trace_clone, serial = %serial, "device lock poisoned");
+                AppError::system(
+                    "Failed to access the device. Please try again.",
+                    &trace_clone,
+                )
+            })?;
 
             let args = vec![
                 "-s".to_string(),
@@ -3975,10 +4251,11 @@ pub fn launch_scrcpy(
         let _device_guard = match device_lock.lock() {
             Ok(guard) => guard,
             Err(_) => {
+                warn!(trace_id = %trace_id, serial = %serial, "device lock poisoned");
                 results.push(CommandResult {
                     serial,
                     stdout: String::new(),
-                    stderr: "Device lock poisoned".to_string(),
+                    stderr: "Failed to access the device. Please try again.".to_string(),
                     exit_code: Some(1),
                 });
                 continue;
@@ -4394,7 +4671,9 @@ pub fn start_perf_monitor(
                             PerfEvent {
                                 serial: serial_spawn.clone(),
                                 snapshot: None,
-                                error: Some("Device lock poisoned".to_string()),
+                                error: Some(
+                                    "Failed to access the device. Please try again.".to_string(),
+                                ),
                                 trace_id: trace_spawn.clone(),
                             },
                         );
@@ -4730,6 +5009,418 @@ pub fn start_perf_monitor(
     })
 }
 
+#[tauri::command(async)]
+pub fn start_net_profiler(
+    serial: String,
+    interval_ms: Option<u64>,
+    top_n: Option<u32>,
+    pinned_uids: Option<Vec<u32>>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let interval_ms = clamp_net_profiler_interval_ms(interval_ms);
+    let interval = Duration::from_millis(interval_ms);
+    let top_n = clamp_net_profiler_top_n(top_n);
+    let pinned_uids = sanitize_net_profiler_pinned_uids(pinned_uids, top_n, &trace_id)?;
+    let scheduler = Arc::clone(&state.scheduler);
+
+    let app_emit = app.clone();
+    let serial_spawn = serial.clone();
+    let trace_spawn = trace_id.clone();
+    let adb_program_spawn = adb_program.clone();
+
+    start_net_profiler_inner(
+        serial,
+        &state.net_profilers,
+        &trace_id,
+        pinned_uids,
+        move |stop_flag, pinned_uids| {
+            std::thread::spawn(move || {
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                enum NetStatsSource {
+                    ProcXtQtaguid,
+                    DumpsysNetstats,
+                }
+
+                let mut packages_by_uid: HashMap<u32, Vec<String>> = HashMap::new();
+                let mut prev_totals: Option<HashMap<u32, (u64, u64)>> = None;
+                let mut prev_instant: Option<Instant> = None;
+                let mut stats_source: Option<NetStatsSource> = None;
+                let mut unsupported = false;
+
+                {
+                    let args = vec![
+                        "-s".to_string(),
+                        serial_spawn.clone(),
+                        "shell".to_string(),
+                        "cmd package list packages -U".to_string(),
+                    ];
+                    let output = {
+                        let _permit = scheduler.acquire_global();
+                        let device_lock = scheduler.device_lock(&serial_spawn);
+                        let device_guard = device_lock.lock().ok();
+                        device_guard.map(|_guard| {
+                            run_command_with_timeout(
+                                &adb_program_spawn,
+                                &args,
+                                Duration::from_secs(5),
+                                &trace_spawn,
+                            )
+                        })
+                    };
+
+                    match output {
+                        Some(Ok(output)) => {
+                            if output.exit_code.unwrap_or_default() == 0 {
+                                packages_by_uid = parse_cmd_package_list_u(&output.stdout);
+                            } else {
+                                warn!(
+                                    trace_id = %trace_spawn,
+                                    exit_code = ?output.exit_code,
+                                    stderr = %output.stderr,
+                                    "cmd package list packages returned non-zero exit code"
+                                );
+                            }
+                        }
+                        Some(Err(err)) => {
+                            warn!(
+                                trace_id = %trace_spawn,
+                                error = %err,
+                                "failed to list packages for net profiler"
+                            );
+                        }
+                        None => {
+                            warn!(trace_id = %trace_spawn, "device lock poisoned");
+                        }
+                    }
+                }
+
+                loop {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    if unsupported {
+                        std::thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+
+                    let loop_started = Instant::now();
+
+                    let preferred = stats_source.unwrap_or(NetStatsSource::ProcXtQtaguid);
+                    let candidates = match preferred {
+                        NetStatsSource::ProcXtQtaguid => [
+                            NetStatsSource::ProcXtQtaguid,
+                            NetStatsSource::DumpsysNetstats,
+                        ],
+                        NetStatsSource::DumpsysNetstats => [
+                            NetStatsSource::DumpsysNetstats,
+                            NetStatsSource::ProcXtQtaguid,
+                        ],
+                    };
+                    let candidate_count = candidates.len();
+
+                    let mut totals: Option<HashMap<u32, (u64, u64)>> = None;
+                    let mut unsupported_sources = 0usize;
+                    let mut last_error: Option<String> = None;
+
+                    for source in candidates {
+                        if stop_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
+
+                        match source {
+                            NetStatsSource::ProcXtQtaguid => {
+                                let args = vec![
+                                    "-s".to_string(),
+                                    serial_spawn.clone(),
+                                    "shell".to_string(),
+                                    "cat /proc/net/xt_qtaguid/stats".to_string(),
+                                ];
+
+                                let output = {
+                                    let _permit = scheduler.acquire_global();
+                                    let device_lock = scheduler.device_lock(&serial_spawn);
+                                    let device_guard = device_lock.lock().ok();
+                                    device_guard.map(|_guard| {
+                                        run_command_with_timeout(
+                                            &adb_program_spawn,
+                                            &args,
+                                            Duration::from_secs(5),
+                                            &trace_spawn,
+                                        )
+                                    })
+                                };
+
+                                let output = match output {
+                                    Some(output) => output,
+                                    None => {
+                                        last_error = Some(
+                                            "Failed to access the device. Please try again."
+                                                .to_string(),
+                                        );
+                                        break;
+                                    }
+                                };
+
+                                let output = match output {
+                                    Ok(output) => output,
+                                    Err(err) => {
+                                        warn!(
+                                            trace_id = %trace_spawn,
+                                            error = %err,
+                                            "failed to collect net profiler output"
+                                        );
+                                        last_error = Some(
+	                                            "Failed to collect per-app network stats. Please try again."
+	                                                .to_string(),
+	                                        );
+                                        break;
+                                    }
+                                };
+
+                                if output.exit_code.unwrap_or_default() != 0 {
+                                    let stderr_lower = output.stderr.to_lowercase();
+                                    let stdout_lower = output.stdout.to_lowercase();
+                                    let is_unsupported = stderr_lower.contains("no such file")
+                                        || stderr_lower.contains("permission denied")
+                                        || stdout_lower.contains("no such file")
+                                        || stdout_lower.contains("permission denied");
+
+                                    if is_unsupported {
+                                        unsupported_sources += 1;
+                                        continue;
+                                    }
+
+                                    warn!(
+                                        trace_id = %trace_spawn,
+                                        exit_code = ?output.exit_code,
+                                        stderr = %output.stderr,
+                                        "net profiler adb shell returned non-zero exit code"
+                                    );
+                                    last_error =
+                                        Some("Failed to collect per-app network stats".to_string());
+                                    break;
+                                }
+
+                                match parse_xt_qtaguid_stats(&output.stdout) {
+                                    Ok(value) => {
+                                        totals = Some(value);
+                                        stats_source = Some(NetStatsSource::ProcXtQtaguid);
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            trace_id = %trace_spawn,
+                                            error = %err,
+                                            "failed to parse xt_qtaguid stats; falling back"
+                                        );
+                                        unsupported_sources += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            NetStatsSource::DumpsysNetstats => {
+                                let args = vec![
+                                    "-s".to_string(),
+                                    serial_spawn.clone(),
+                                    "shell".to_string(),
+                                    "dumpsys netstats".to_string(),
+                                ];
+
+                                let output = {
+                                    let _permit = scheduler.acquire_global();
+                                    let device_lock = scheduler.device_lock(&serial_spawn);
+                                    let device_guard = device_lock.lock().ok();
+                                    device_guard.map(|_guard| {
+                                        run_command_with_timeout(
+                                            &adb_program_spawn,
+                                            &args,
+                                            Duration::from_secs(5),
+                                            &trace_spawn,
+                                        )
+                                    })
+                                };
+
+                                let output = match output {
+                                    Some(output) => output,
+                                    None => {
+                                        last_error = Some(
+                                            "Failed to access the device. Please try again."
+                                                .to_string(),
+                                        );
+                                        break;
+                                    }
+                                };
+
+                                let output = match output {
+                                    Ok(output) => output,
+                                    Err(err) => {
+                                        warn!(
+                                            trace_id = %trace_spawn,
+                                            error = %err,
+                                            "failed to collect dumpsys netstats output"
+                                        );
+                                        last_error = Some(
+	                                            "Failed to collect per-app network stats. Please try again."
+	                                                .to_string(),
+	                                        );
+                                        break;
+                                    }
+                                };
+
+                                if output.exit_code.unwrap_or_default() != 0 {
+                                    let stderr_lower = output.stderr.to_lowercase();
+                                    let stdout_lower = output.stdout.to_lowercase();
+                                    let is_unsupported = stderr_lower
+                                        .contains("can't find service")
+                                        || stderr_lower.contains("not found")
+                                        || stderr_lower.contains("permission denied")
+                                        || stdout_lower.contains("can't find service")
+                                        || stdout_lower.contains("not found")
+                                        || stdout_lower.contains("permission denied");
+
+                                    if is_unsupported {
+                                        unsupported_sources += 1;
+                                        continue;
+                                    }
+
+                                    warn!(
+                                        trace_id = %trace_spawn,
+                                        exit_code = ?output.exit_code,
+                                        stderr = %output.stderr,
+                                        "dumpsys netstats returned non-zero exit code"
+                                    );
+                                    last_error =
+                                        Some("Failed to collect per-app network stats".to_string());
+                                    break;
+                                }
+
+                                match parse_dumpsys_netstats_app_uid_stats(&output.stdout) {
+                                    Ok(value) => {
+                                        totals = Some(value);
+                                        stats_source = Some(NetStatsSource::DumpsysNetstats);
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            trace_id = %trace_spawn,
+                                            error = %err,
+                                            "failed to parse dumpsys netstats uid map; falling back"
+                                        );
+                                        unsupported_sources += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let totals = match totals {
+                        Some(totals) => totals,
+                        None => {
+                            if unsupported_sources >= candidate_count {
+                                unsupported = true;
+                                let snapshot = NetProfilerSnapshot {
+                                    ts_ms: Utc::now().timestamp_millis(),
+                                    dt_ms: None,
+                                    rows: vec![],
+                                    unsupported: true,
+                                };
+                                emit_net_profiler_event(
+                                &app_emit,
+                                NetProfilerEvent {
+                                    serial: serial_spawn.clone(),
+                                    snapshot: Some(snapshot),
+                                    error: Some(
+                                        "Per-app network profiler is not supported on this device."
+                                            .to_string(),
+                                    ),
+                                    trace_id: trace_spawn.clone(),
+                                },
+                            );
+                                std::thread::sleep(Duration::from_millis(200));
+                                continue;
+                            }
+
+                            emit_net_profiler_event(
+                                &app_emit,
+                                NetProfilerEvent {
+                                    serial: serial_spawn.clone(),
+                                    snapshot: None,
+                                    error: Some(last_error.unwrap_or_else(|| {
+                                        "Failed to collect per-app network stats".to_string()
+                                    })),
+                                    trace_id: trace_spawn.clone(),
+                                },
+                            );
+                            sleep_with_stop(interval, &stop_flag);
+                            continue;
+                        }
+                    };
+
+                    let sample_instant = Instant::now();
+                    let dt_ms_u128 = prev_instant
+                        .map(|prev| sample_instant.duration_since(prev).as_millis())
+                        .filter(|value| *value > 0);
+                    let dt_ms_u64 = dt_ms_u128.map(|value| value.min(u64::MAX as u128) as u64);
+
+                    let pinned = match pinned_uids.read() {
+                        Ok(guard) => guard.clone(),
+                        Err(_) => {
+                            warn!(trace_id = %trace_spawn, "net profiler pinned uids lock poisoned");
+                            vec![]
+                        }
+                    };
+
+                    let rows = build_net_usage_rows(
+                        &totals,
+                        prev_totals.as_ref(),
+                        dt_ms_u128,
+                        &packages_by_uid,
+                        &pinned,
+                        top_n,
+                    );
+
+                    let snapshot = NetProfilerSnapshot {
+                        ts_ms: Utc::now().timestamp_millis(),
+                        dt_ms: dt_ms_u64,
+                        rows,
+                        unsupported: false,
+                    };
+                    emit_net_profiler_event(
+                        &app_emit,
+                        NetProfilerEvent {
+                            serial: serial_spawn.clone(),
+                            snapshot: Some(snapshot),
+                            error: None,
+                            trace_id: trace_spawn.clone(),
+                        },
+                    );
+
+                    prev_totals = Some(totals);
+                    prev_instant = Some(sample_instant);
+
+                    let elapsed = loop_started.elapsed();
+                    if elapsed < interval {
+                        sleep_with_stop(interval - elapsed, &stop_flag);
+                    }
+                }
+            })
+        },
+    )?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
 fn sleep_with_stop(duration: Duration, stop_flag: &Arc<AtomicBool>) {
     let mut remaining = duration;
     let chunk = Duration::from_millis(50);
@@ -4774,6 +5465,35 @@ pub fn stop_perf_monitor(
 ) -> Result<CommandResponse<bool>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     stop_perf_monitor_inner(serial, &state.perf_monitors, &trace_id)?;
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub fn stop_net_profiler(
+    serial: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    stop_net_profiler_inner(serial, &state.net_profilers, &trace_id)?;
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub fn set_net_profiler_pinned_uids(
+    serial: String,
+    pinned_uids: Option<Vec<u32>>,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    set_net_profiler_pinned_uids_inner(serial, pinned_uids, &state.net_profilers, &trace_id)?;
     Ok(CommandResponse {
         trace_id,
         data: true,
@@ -5166,6 +5886,104 @@ pub async fn query_bugreport_logcat(
     .await
     .map_err(|_| AppError::system("Bugreport log query thread failed", &trace_id))?
     .map_err(|err| map_bugreport_log_query_error(err, &trace_id))?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: result,
+    })
+}
+
+fn search_bugreport_logcat_inner(
+    report_id: &str,
+    query: &str,
+    filters: BugreportLogFilters,
+    limit: usize,
+    trace_id: &str,
+) -> Result<BugreportLogSearchResult, AppError> {
+    ensure_non_empty(report_id, "report_id", trace_id)?;
+    ensure_non_empty(query, "query", trace_id)?;
+    bugreport_logcat::search_bugreport_logcat(report_id, query, filters, limit)
+        .map_err(|err| map_bugreport_log_query_error(err, trace_id))
+}
+
+#[tauri::command(async)]
+pub async fn search_bugreport_logcat(
+    report_id: String,
+    query: String,
+    filters: BugreportLogFilters,
+    limit: Option<usize>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<BugreportLogSearchResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let limit = limit.unwrap_or(0);
+    let trace_for_worker = trace_id.clone();
+    let report_for_worker = report_id.clone();
+    let query_for_worker = query.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        search_bugreport_logcat_inner(
+            &report_for_worker,
+            &query_for_worker,
+            filters,
+            limit,
+            &trace_for_worker,
+        )
+    })
+    .await
+    .map_err(|_| AppError::system("Bugreport log search thread failed", &trace_id))??;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: result,
+    })
+}
+
+fn query_bugreport_logcat_around_inner(
+    report_id: &str,
+    anchor_id: i64,
+    before: usize,
+    after: usize,
+    filters: BugreportLogFilters,
+    trace_id: &str,
+) -> Result<BugreportLogAroundPage, AppError> {
+    ensure_non_empty(report_id, "report_id", trace_id)?;
+    if anchor_id <= 0 {
+        return Err(AppError::validation(
+            "anchor_id must be a positive integer",
+            trace_id,
+        ));
+    }
+    bugreport_logcat::query_bugreport_logcat_around(report_id, anchor_id, before, after, filters)
+        .map_err(|err| map_bugreport_log_query_error(err, trace_id))
+}
+
+#[tauri::command(async)]
+pub async fn query_bugreport_logcat_around(
+    report_id: String,
+    anchor_id: i64,
+    before: Option<usize>,
+    after: Option<usize>,
+    filters: BugreportLogFilters,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<BugreportLogAroundPage>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let before = before.unwrap_or(200);
+    let after = after.unwrap_or(200);
+    let trace_for_worker = trace_id.clone();
+    let report_for_worker = report_id.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        query_bugreport_logcat_around_inner(
+            &report_for_worker,
+            anchor_id,
+            before,
+            after,
+            filters,
+            &trace_for_worker,
+        )
+    })
+    .await
+    .map_err(|_| AppError::system("Bugreport log around thread failed", &trace_id))??;
 
     Ok(CommandResponse {
         trace_id,

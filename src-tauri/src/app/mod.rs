@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod logging;
 pub mod models;
+pub mod net_profiler;
 pub mod perf;
 pub mod scheduler;
 pub mod state;

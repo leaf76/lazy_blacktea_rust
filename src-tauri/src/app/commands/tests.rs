@@ -2,7 +2,7 @@ use super::*;
 
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -71,6 +71,24 @@ fn start_perf_monitor_inner_rejects_empty_serial() {
 }
 
 #[test]
+fn start_net_profiler_inner_rejects_empty_serial() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+    let err = start_net_profiler_inner(
+        " ".to_string(),
+        &registry,
+        "trace-net-1",
+        vec![],
+        |_stop, _pinned| {
+            panic!("spawn should not be called");
+        },
+    )
+    .expect_err("expected error");
+
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-net-1");
+}
+
+#[test]
 fn start_perf_monitor_inner_rejects_when_already_running() {
     let registry = Mutex::new(std::collections::HashMap::<String, PerfMonitorHandle>::new());
 
@@ -97,10 +115,50 @@ fn start_perf_monitor_inner_rejects_when_already_running() {
 }
 
 #[test]
+fn start_net_profiler_inner_rejects_when_already_running() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            NetProfilerHandle {
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                pinned_uids: Arc::new(RwLock::new(vec![])),
+                join: std::thread::spawn(|| {}),
+            },
+        );
+    }
+
+    let err = start_net_profiler_inner(
+        "ABC".to_string(),
+        &registry,
+        "trace-net-2",
+        vec![],
+        |_stop, _pinned| std::thread::spawn(|| {}),
+    )
+    .expect_err("expected already running");
+
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert!(err.error.to_lowercase().contains("already running"));
+
+    stop_net_profiler_inner("ABC".to_string(), &registry, "trace-net-2-stop").expect("stop ok");
+}
+
+#[test]
 fn stop_perf_monitor_inner_errors_when_not_running() {
     let registry = Mutex::new(std::collections::HashMap::<String, PerfMonitorHandle>::new());
     let err =
         stop_perf_monitor_inner("ABC".to_string(), &registry, "trace-perf-3").expect_err("err");
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert!(err.error.to_lowercase().contains("not running"));
+}
+
+#[test]
+fn stop_net_profiler_inner_errors_when_not_running() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+    let err =
+        stop_net_profiler_inner("ABC".to_string(), &registry, "trace-net-3").expect_err("err");
     assert_eq!(err.code, "ERR_VALIDATION");
     assert!(err.error.to_lowercase().contains("not running"));
 }
@@ -127,6 +185,120 @@ fn stop_perf_monitor_inner_stops_and_removes_handle() {
 
     let guard = registry.lock().expect("registry");
     assert!(!guard.contains_key("ABC"));
+}
+
+#[test]
+fn stop_net_profiler_inner_stops_and_removes_handle() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let join = spawn_perf_stop_waiter(Arc::clone(&stop_flag));
+
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            NetProfilerHandle {
+                stop_flag: Arc::clone(&stop_flag),
+                pinned_uids: Arc::new(RwLock::new(vec![])),
+                join,
+            },
+        );
+    }
+
+    stop_net_profiler_inner("ABC".to_string(), &registry, "trace-net-4").expect("stop ok");
+    assert!(stop_flag.load(Ordering::Relaxed));
+
+    let guard = registry.lock().expect("registry");
+    assert!(!guard.contains_key("ABC"));
+}
+
+#[test]
+fn set_net_profiler_pinned_uids_inner_rejects_empty_serial() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+    let err = set_net_profiler_pinned_uids_inner(
+        " ".to_string(),
+        Some(vec![123]),
+        &registry,
+        "trace-net-pin-1",
+    )
+    .expect_err("expected validation error");
+
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-net-pin-1");
+}
+
+#[test]
+fn set_net_profiler_pinned_uids_inner_errors_when_not_running() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+    let err = set_net_profiler_pinned_uids_inner(
+        "ABC".to_string(),
+        Some(vec![123]),
+        &registry,
+        "trace-net-pin-2",
+    )
+    .expect_err("expected not running error");
+
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert!(err.error.to_lowercase().contains("not running"));
+}
+
+#[test]
+fn set_net_profiler_pinned_uids_inner_updates_handle() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let pinned = Arc::new(RwLock::new(vec![]));
+
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            NetProfilerHandle {
+                stop_flag,
+                pinned_uids: Arc::clone(&pinned),
+                join: std::thread::spawn(|| {}),
+            },
+        );
+    }
+
+    set_net_profiler_pinned_uids_inner(
+        "ABC".to_string(),
+        Some(vec![200, 200, 201]),
+        &registry,
+        "trace-net-pin-3",
+    )
+    .expect("set pinned ok");
+
+    let values = pinned.read().expect("read pinned");
+    assert_eq!(*values, vec![200, 201]);
+}
+
+#[test]
+fn set_net_profiler_pinned_uids_inner_rejects_too_many() {
+    let registry = Mutex::new(std::collections::HashMap::<String, NetProfilerHandle>::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let pinned = Arc::new(RwLock::new(vec![]));
+
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            NetProfilerHandle {
+                stop_flag,
+                pinned_uids: Arc::clone(&pinned),
+                join: std::thread::spawn(|| {}),
+            },
+        );
+    }
+
+    let err = set_net_profiler_pinned_uids_inner(
+        "ABC".to_string(),
+        Some(vec![1, 2, 3, 4, 5, 6]),
+        &registry,
+        "trace-net-pin-4",
+    )
+    .expect_err("expected too many");
+
+    assert_eq!(err.code, "ERR_VALIDATION");
 }
 
 #[test]
@@ -224,6 +396,35 @@ fn prepare_bugreport_logcat_inner_errors_for_missing_file() {
 }
 
 #[test]
+fn search_bugreport_logcat_inner_rejects_empty_query() {
+    let err = search_bugreport_logcat_inner(
+        "report",
+        "   ",
+        BugreportLogFilters::default(),
+        0,
+        "trace-9a",
+    )
+    .expect_err("err");
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-9a");
+}
+
+#[test]
+fn query_bugreport_logcat_around_inner_rejects_non_positive_anchor_id() {
+    let err = query_bugreport_logcat_around_inner(
+        "report",
+        0,
+        10,
+        10,
+        BugreportLogFilters::default(),
+        "trace-9b",
+    )
+    .expect_err("err");
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-9b");
+}
+
+#[test]
 fn install_apk_batch_inner_returns_invalid_apk_result_without_running_adb() {
     let _guard = env_lock();
     let tmp = tempfile::TempDir::new().expect("tmp");
@@ -241,6 +442,7 @@ fn install_apk_batch_inner_returns_invalid_apk_result_without_running_adb() {
         None,
         &state,
         "trace-10",
+        None,
     )
     .expect("result");
 

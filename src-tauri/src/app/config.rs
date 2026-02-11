@@ -274,6 +274,35 @@ impl Default for LogcatViewerSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotificationsSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub desktop_enabled: bool,
+    #[serde(default = "default_true")]
+    pub desktop_only_when_unfocused: bool,
+    #[serde(default)]
+    pub desktop_on_success: bool,
+    #[serde(default = "default_true")]
+    pub desktop_on_error: bool,
+    #[serde(default)]
+    pub desktop_on_cancelled: bool,
+}
+
+impl Default for NotificationsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            desktop_enabled: false,
+            desktop_only_when_unfocused: true,
+            desktop_on_success: false,
+            desktop_on_error: true,
+            desktop_on_cancelled: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TerminalSettings {
     #[serde(default)]
@@ -322,6 +351,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub logcat_viewer: LogcatViewerSettings,
     #[serde(default)]
+    pub notifications: NotificationsSettings,
+    #[serde(default)]
     pub terminal: TerminalSettings,
     #[serde(default)]
     pub command_history: Vec<String>,
@@ -350,6 +381,7 @@ impl Default for AppConfig {
             screenshot: ScreenshotSettings::default(),
             screen_record: ScreenRecordSettings::default(),
             logcat_viewer: LogcatViewerSettings::default(),
+            notifications: NotificationsSettings::default(),
             terminal: TerminalSettings::default(),
             command_history: Vec::new(),
             device_groups: HashMap::new(),
@@ -612,6 +644,18 @@ mod tests {
         let parsed: AppConfig = serde_json::from_value(value).expect("config should deserialize");
         assert_eq!(parsed.device.refresh_interval, 15);
         assert!(parsed.device.auto_refresh_enabled);
+    }
+
+    #[test]
+    fn loads_notifications_settings_without_new_fields() {
+        let value = serde_json::json!({});
+        let parsed: AppConfig = serde_json::from_value(value).expect("config should deserialize");
+        assert!(parsed.notifications.enabled);
+        assert!(!parsed.notifications.desktop_enabled);
+        assert!(parsed.notifications.desktop_only_when_unfocused);
+        assert!(!parsed.notifications.desktop_on_success);
+        assert!(parsed.notifications.desktop_on_error);
+        assert!(!parsed.notifications.desktop_on_cancelled);
     }
 
     #[test]

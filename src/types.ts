@@ -204,6 +204,29 @@ export type PerfEvent = {
   trace_id: string;
 };
 
+export type NetUsageRow = {
+  uid: number;
+  packages?: string[] | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_bps?: number | null;
+  tx_bps?: number | null;
+};
+
+export type NetProfilerSnapshot = {
+  ts_ms: number;
+  dt_ms?: number | null;
+  rows: NetUsageRow[];
+  unsupported: boolean;
+};
+
+export type NetProfilerEvent = {
+  serial: string;
+  snapshot?: NetProfilerSnapshot | null;
+  error?: string | null;
+  trace_id: string;
+};
+
 export type TerminalSessionInfo = {
   serial: string;
   session_id: string;
@@ -343,10 +366,12 @@ export type BugreportLogSummary = {
   min_ts?: string | null;
   max_ts?: string | null;
   levels: Record<string, number>;
+  buffers: Record<string, number>;
 };
 
 export type BugreportLogFilters = {
   levels: string[];
+  buffer?: string | null;
   tag?: string | null;
   pid?: number | null;
   text_terms?: string[];
@@ -363,6 +388,7 @@ export type BugreportLogRow = {
   ts: string;
   level: string;
   tag: string;
+  buffer: string;
   pid: number;
   tid: number;
   msg: string;
@@ -373,6 +399,29 @@ export type BugreportLogPage = {
   rows: BugreportLogRow[];
   has_more: boolean;
   next_offset: number;
+};
+
+export type BugreportLogMatch = {
+  id: number;
+  ts: string;
+  level: string;
+  tag: string;
+  buffer: string;
+  pid: number;
+  tid: number;
+  msg: string;
+};
+
+export type BugreportLogSearchResult = {
+  matches: BugreportLogMatch[];
+  truncated: boolean;
+};
+
+export type BugreportLogAroundPage = {
+  rows: BugreportLogRow[];
+  anchor_id: number;
+  has_before: boolean;
+  has_after: boolean;
 };
 
 export type FilePreview = {
@@ -481,6 +530,15 @@ export type LogcatViewerSettings = {
   auto_scroll_enabled: boolean;
 };
 
+export type NotificationsSettings = {
+  enabled: boolean;
+  desktop_enabled: boolean;
+  desktop_only_when_unfocused: boolean;
+  desktop_on_success: boolean;
+  desktop_on_error: boolean;
+  desktop_on_cancelled: boolean;
+};
+
 export type AppConfig = {
   ui: UiSettings;
   device: DeviceSettings;
@@ -493,6 +551,7 @@ export type AppConfig = {
   screenshot: ScreenshotSettings;
   screen_record: ScreenRecordSettings;
   logcat_viewer: LogcatViewerSettings;
+  notifications: NotificationsSettings;
   terminal: TerminalSettings;
   command_history: string[];
   device_groups: Record<string, string[]>;

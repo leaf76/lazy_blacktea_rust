@@ -7,11 +7,13 @@ use app::commands::{
     get_app_icon, get_config, install_apk_batch, launch_app, launch_scrcpy, list_apps,
     list_device_files, list_devices, mkdir_device_dir, open_app_info, persist_terminal_state,
     prepare_bugreport_logcat, preview_local_file, pull_device_file, push_device_file,
-    query_bugreport_logcat, reboot_devices, rename_device_path, reset_config, run_shell,
-    save_app_config, set_app_enabled, set_bluetooth_state, set_wifi_state, start_bluetooth_monitor,
-    start_logcat, start_perf_monitor, start_screen_record, start_terminal_session,
-    stop_bluetooth_monitor, stop_logcat, stop_perf_monitor, stop_screen_record,
-    stop_terminal_session, uninstall_app, write_terminal_session,
+    query_bugreport_logcat, query_bugreport_logcat_around, reboot_devices, rename_device_path,
+    reset_config, run_shell, save_app_config, search_bugreport_logcat, set_app_enabled,
+    set_bluetooth_state, set_net_profiler_pinned_uids, set_wifi_state, start_bluetooth_monitor,
+    start_logcat, start_net_profiler, start_perf_monitor, start_screen_record,
+    start_terminal_session, stop_bluetooth_monitor, stop_logcat, stop_net_profiler,
+    stop_perf_monitor, stop_screen_record, stop_terminal_session, uninstall_app,
+    write_terminal_session,
 };
 use app::logging::init_logging;
 use app::state::AppState;
@@ -20,9 +22,12 @@ use app::state::AppState;
 pub fn run() {
     init_logging();
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -56,6 +61,9 @@ pub fn run() {
             export_ui_hierarchy,
             start_perf_monitor,
             stop_perf_monitor,
+            start_net_profiler,
+            stop_net_profiler,
+            set_net_profiler_pinned_uids,
             start_logcat,
             stop_logcat,
             clear_logcat,
@@ -76,7 +84,9 @@ pub fn run() {
             generate_bugreport,
             cancel_bugreport,
             prepare_bugreport_logcat,
-            query_bugreport_logcat
+            query_bugreport_logcat,
+            search_bugreport_logcat,
+            query_bugreport_logcat_around
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

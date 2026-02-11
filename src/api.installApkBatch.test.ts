@@ -59,4 +59,32 @@ describe("api.installApkBatch", () => {
       }),
     );
   });
+
+  it("uses provided trace id override when specified", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-999", data: null });
+
+    const { installApkBatch } = await import("./api");
+    await installApkBatch(
+      ["emulator-5554"],
+      "/tmp/app-debug.apk",
+      true,
+      false,
+      true,
+      false,
+      "--foo bar",
+      "trace-999",
+    );
+
+    expect(invoke).toHaveBeenCalledWith(
+      "install_apk_batch",
+      expect.objectContaining({
+        serials: ["emulator-5554"],
+        trace_id: "trace-999",
+        traceId: "trace-999",
+      }),
+    );
+  });
 });

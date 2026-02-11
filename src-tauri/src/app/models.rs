@@ -114,6 +114,26 @@ pub struct PerfSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetUsageRow {
+    pub uid: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_bps: Option<u64>,
+    pub tx_bps: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetProfilerSnapshot {
+    pub ts_ms: i64,
+    pub dt_ms: Option<u64>,
+    #[serde(default)]
+    pub rows: Vec<NetUsageRow>,
+    pub unsupported: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandResponse<T> {
     pub trace_id: String,
     pub data: T,
@@ -204,11 +224,13 @@ pub struct BugreportLogSummary {
     pub min_ts: Option<String>,
     pub max_ts: Option<String>,
     pub levels: HashMap<String, usize>,
+    pub buffers: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct BugreportLogFilters {
     pub levels: Vec<String>,
+    pub buffer: Option<String>,
     pub tag: Option<String>,
     pub pid: Option<i64>,
     /// Deprecated: legacy single text filter.
@@ -231,6 +253,7 @@ pub struct BugreportLogRow {
     pub ts: String,
     pub level: String,
     pub tag: String,
+    pub buffer: String,
     pub pid: i64,
     pub tid: i64,
     pub msg: String,
@@ -242,6 +265,32 @@ pub struct BugreportLogPage {
     pub rows: Vec<BugreportLogRow>,
     pub has_more: bool,
     pub next_offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportLogMatch {
+    pub id: i64,
+    pub ts: String,
+    pub level: String,
+    pub tag: String,
+    pub buffer: String,
+    pub pid: i64,
+    pub tid: i64,
+    pub msg: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportLogSearchResult {
+    pub matches: Vec<BugreportLogMatch>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportLogAroundPage {
+    pub rows: Vec<BugreportLogRow>,
+    pub anchor_id: i64,
+    pub has_before: bool,
+    pub has_after: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -476,5 +525,17 @@ mod tests {
         let output = "Failure [INSTALL_FAILED_VERSION_DOWNGRADE]";
         let code = ApkInstallErrorCode::from_output(output);
         assert_eq!(code, ApkInstallErrorCode::InstallFailedVersionDowngrade);
+    }
+
+    #[test]
+    fn net_profiler_snapshot_serializes_rows_even_when_empty() {
+        let snapshot = NetProfilerSnapshot {
+            ts_ms: 0,
+            dt_ms: None,
+            rows: vec![],
+            unsupported: false,
+        };
+        let value = serde_json::to_value(snapshot).expect("serialize");
+        assert!(value.get("rows").is_some());
     }
 }

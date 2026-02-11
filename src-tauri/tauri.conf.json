@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lazy Blacktea",
-  "version": "0.0.53",
+  "version": "0.0.54",
   "identifier": "com.lazyblacktea.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -23,7 +23,7 @@
   },
   "bundle": {
     "active": true,
-      "targets": "all",
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -31,5 +31,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/leaf76/lazy_blacktea_rust/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
+    }
   }
 }

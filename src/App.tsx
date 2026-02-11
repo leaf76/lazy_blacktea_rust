@@ -8,6 +8,9 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
+  type ReactNode,
   type RefObject,
 } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -18,6 +21,13 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { isTauriRuntime } from "./tauriEnv";
+import {
+  getDesktopNotificationPermission,
+  isAppUnfocused,
+  requestDesktopNotificationPermission,
+  sendDesktopNotification,
+  type DesktopNotificationPermissionState,
+} from "./desktopNotifications";
 import { BluetoothMonitorPage } from "./BluetoothMonitorPage";
 import type {
   AdbInfo,
@@ -25,6 +35,7 @@ import type {
   AppBasicInfo,
   AppInfo,
   BugreportLogFilters,
+  BugreportLogMatch,
   BugreportLogRow,
   BugreportLogSummary,
   BugreportResult,
@@ -32,6 +43,8 @@ import type {
   DeviceInfo,
   FilePreview,
   LogcatEvent,
+  NetProfilerEvent,
+  NetProfilerSnapshot,
   PerfEvent,
   PerfSnapshot,
   TerminalEvent,
@@ -72,12 +85,17 @@ import {
   resetConfig,
   runShell,
   startPerfMonitor,
+  startNetProfiler,
+  setNetProfilerPinnedUids,
   startTerminalSession,
   stopTerminalSession,
   stopPerfMonitor,
+  stopNetProfiler,
   writeTerminalSession,
   persistTerminalState,
   queryBugreportLogcat,
+  queryBugreportLogcatAround,
+  searchBugreportLogcat,
   saveConfig,
   setAppEnabled,
   setBluetoothState,
@@ -115,6 +133,7 @@ import {
   formatKhz,
   formatPerSecX100,
 } from "./perf";
+import { buildLinePath, extractNetSeries, sliceSnapshotsByWindowMs } from "./netProfiler";
 import {
   initialPairingState,
   pairingReducer,
@@ -129,9 +148,11 @@ import {
   sanitizeTaskStateForStorage,
   summarizeTask,
   tasksReducer,
+  type TaskItem,
   type TaskKind,
   type TaskStatus,
 } from "./tasks";
+import { buildDesktopNotificationForTask, detectNewlyCompletedTasks } from "./taskNotificationRules";
 import {
   applyDeviceDetailPatch,
   filterDevicesBySearch,
@@ -149,6 +170,13 @@ import {
   sanitizeMultiPathsForStorage,
   sanitizeStoredState,
 } from "./apkInstallerState";
+import {
+  checkForUpdate,
+  installUpdateAndRelaunch,
+  readUpdateLastCheckedMs,
+  shouldAutoCheck,
+  type UpdaterUpdateLike,
+} from "./updater";
 import appPackage from "../package.json";
 import "./App.css";
 
@@ -161,11 +189,26 @@ type FileTransferProgress = {
   message?: string | null;
   trace_id: string;
 };
+type ApkInstallEvent = {
+  serial: string;
+  event: "start" | "complete";
+  success?: boolean | null;
+  message?: string | null;
+  error_code?: string | null;
+  raw_output?: string | null;
+  trace_id: string;
+};
 type LogcatLineEntry = { id: number; text: string };
 type PerfMonitorState = {
   running: boolean;
   traceId: string | null;
   samples: PerfSnapshot[];
+  lastError: string | null;
+};
+type NetProfilerState = {
+  running: boolean;
+  traceId: string | null;
+  samples: NetProfilerSnapshot[];
   lastError: string | null;
 };
 type TerminalDeviceState = {
@@ -185,6 +228,7 @@ type RebootMode = "normal" | "recovery" | "bootloader";
 type DashboardActionId = QuickActionId | "apk-installer";
 
 const TERMINAL_MAX_LINES = 500;
+const NET_PROFILER_MAX_SAMPLES = 180;
 const APK_INSTALLER_STORAGE_KEY = "lazy_blacktea_apk_installer_v1";
 const SHARED_LOG_FILTERS_STORAGE_KEY = "lazy_blacktea_shared_log_filters_v1";
 
@@ -412,6 +456,7 @@ type BugreportLogOutputProps = {
   onNearBottom: () => void;
   canLoadMore: boolean;
   busy: boolean;
+  activeRowId?: number | null;
 };
 
 const BUGREPORT_LOG_LINE_HEIGHT_PX = 16;
@@ -422,6 +467,7 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
   onNearBottom,
   canLoadMore,
   busy,
+  activeRowId = null,
 }: BugreportLogOutputProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -596,6 +642,17 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
     setScrollTop(target);
   };
 
+  useEffect(() => {
+    if (activeRowId == null) {
+      return;
+    }
+    const index = rows.findIndex((row) => row.id === activeRowId);
+    if (index < 0) {
+      return;
+    }
+    scrollToRowIndex(index);
+  }, [activeRowId, rows]);
+
   const goToMatch = (nextIndex: number) => {
     if (findMatchRowIndices.length === 0) {
       return;
@@ -713,7 +770,7 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
           {slice.map((row, index) => {
             const rowIndex = start + index;
             const isMatch = findMatchIndexSet.has(rowIndex);
-            const isActive = activeMatchRowIndex === rowIndex;
+            const isActive = activeMatchRowIndex === rowIndex || (activeRowId != null && row.id === activeRowId);
             return (
               <div
                 key={row.id}
@@ -845,6 +902,278 @@ const DeviceTerminalPanel = memo(function DeviceTerminalPanel({
   );
 });
 
+function AdvancedToggleButton({
+  open,
+  onClick,
+  disabled,
+  className,
+}: {
+  open: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`ghost${open ? " active" : ""}${className ? ` ${className}` : ""}`}
+      onClick={onClick}
+      disabled={disabled}
+      aria-expanded={open}
+    >
+      {open ? "Hide Advanced" : "Advanced"}
+    </button>
+  );
+}
+
+function LogLiveFilterBar({
+  kind,
+  onKindChange,
+  value,
+  onValueChange,
+  onAdd,
+  disabled,
+  filtersCount,
+  headerActions,
+}: {
+  kind: LogTextChipKind;
+  onKindChange: (next: LogTextChipKind) => void;
+  value: string;
+  onValueChange: (next: string) => void;
+  onAdd: () => void;
+  disabled: boolean;
+  filtersCount: number;
+  headerActions?: ReactNode;
+}) {
+  return (
+    <div className="logcat-filter-grid logcat-live-filter-grid">
+      <div className="panel-sub logcat-filter-bar logcat-live-filter-bar">
+        <div className="logcat-filter-combined">
+          <div className="logcat-filter-section">
+            <div className="logcat-filter-header">
+              <h3 title="Use regex to refine logs. Shared with Logcat and Bugreport Log Viewer.">Live Filter</h3>
+              <div className="logcat-filter-header-actions">
+                <span className="muted">{filtersCount ? `${filtersCount} filters` : "No filters"}</span>
+                {headerActions}
+              </div>
+            </div>
+            <div className="form-row">
+              <label>Pattern</label>
+              <select
+                aria-label="Filter mode"
+                value={kind}
+                onChange={(event) => onKindChange(event.target.value as LogTextChipKind)}
+                disabled={disabled}
+                title="Prefix with - or ! to exclude, + to include."
+              >
+                <option value="include">Include</option>
+                <option value="exclude">Exclude</option>
+              </select>
+              <input
+                value={value}
+                onChange={(event) => onValueChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    onAdd();
+                  }
+                }}
+                placeholder="e.g. ActivityManager|AndroidRuntime or -DEBUG"
+                title="Regex patterns are case-insensitive."
+                disabled={disabled}
+              />
+              <button type="button" onClick={onAdd} disabled={disabled || !value.trim()}>
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InlineAdvancedPanel({
+  title,
+  onClose,
+  children,
+  className,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={`output-block logcat-advanced-inline${className ? ` ${className}` : ""}`} aria-label="Advanced filters">
+      <div className="logcat-advanced-inline-header">
+        <span className="logcat-advanced-inline-title">{title}</span>
+        <button type="button" className="ghost" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <div className="logcat-advanced-body">{children}</div>
+    </div>
+  );
+}
+
+function SharedRegexFiltersAndPresetsPanel({
+  chips,
+  expanded,
+  onToggleExpanded,
+  onRemoveChip,
+  onClearChips,
+  disabled,
+  appliedTitle,
+  gridClassName,
+  presets,
+  presetSelected,
+  onPresetSelectedChange,
+  presetName,
+  onPresetNameChange,
+  hasSelectedPreset,
+  onApplyPreset,
+  onDeletePreset,
+  onSavePreset,
+  children,
+}: {
+  chips: LogTextChip[];
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onRemoveChip: (chipId: string) => void;
+  onClearChips: () => void;
+  disabled: boolean;
+  appliedTitle: string;
+  gridClassName?: string;
+  presets: Array<{ name: string }>;
+  presetSelected: string;
+  onPresetSelectedChange: (next: string) => void;
+  presetName: string;
+  onPresetNameChange: (next: string) => void;
+  hasSelectedPreset: boolean;
+  onApplyPreset: (name: string) => void;
+  onDeletePreset: (name: string) => void;
+  onSavePreset: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className={`logcat-filter-grid${gridClassName ? ` ${gridClassName}` : ""}`}>
+      <div className="panel-sub logcat-filter-bar">
+        <div className="logcat-filter-combined">
+          <div className="logcat-filter-section">
+            <div className="logcat-filter-header">
+              <h3 title={appliedTitle}>Active Filters</h3>
+              <div className="logcat-filter-header-actions">
+                <span className="muted">{chips.length ? `${chips.length} filters` : "No filters"}</span>
+                <button type="button" className="ghost" onClick={onToggleExpanded}>
+                  {expanded ? "Hide" : "Expand"}
+                </button>
+              </div>
+            </div>
+            {expanded && (
+              <>
+                {chips.length === 0 ? (
+                  <p className="muted">No active filters</p>
+                ) : (
+                  <div className="bugreport-log-chip-list" role="list">
+                    {chips.map((chip) => (
+                      <span
+                        key={chip.id}
+                        className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
+                        role="listitem"
+                      >
+                        <span className="bugreport-log-chip-label" title={chip.value}>
+                          {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
+                        </span>
+                        <button
+                          type="button"
+                          className="bugreport-log-chip-remove"
+                          aria-label={`Remove ${chip.kind === "exclude" ? "NOT " : ""}${chip.value}`}
+                          onClick={() => onRemoveChip(chip.id)}
+                          disabled={disabled}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="button-row compact">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={onClearChips}
+                    disabled={disabled || chips.length === 0}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="logcat-presets">
+          <div className="logcat-preset-row single">
+            <div className="logcat-preset-group left">
+              <label>Preset</label>
+              <select
+                value={presetSelected}
+                onChange={(event) => onPresetSelectedChange(event.target.value)}
+                disabled={disabled}
+              >
+                <option value="">Select preset</option>
+                {presets.map((preset) => (
+                  <option key={preset.name} value={preset.name}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => {
+                  if (presetSelected) {
+                    onApplyPreset(presetSelected);
+                  }
+                }}
+                disabled={disabled || !hasSelectedPreset}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  if (presetSelected) {
+                    onDeletePreset(presetSelected);
+                  }
+                }}
+                disabled={disabled || !hasSelectedPreset}
+              >
+                Delete
+              </button>
+            </div>
+            <div className="logcat-preset-group right">
+              <label>New</label>
+              <input
+                value={presetName}
+                onChange={(event) => onPresetNameChange(event.target.value)}
+                placeholder="e.g. Crash Only"
+                disabled={disabled}
+              />
+              <button type="button" onClick={onSavePreset} disabled={disabled}>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   type LogcatFilterPreset = {
     name: string;
@@ -882,6 +1211,22 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [appVersion, setAppVersion] = useState(appPackage.version);
   const appVersionLabel = appVersion.trim() || "--";
+  type UpdateUiStatus =
+    | "idle"
+    | "checking"
+    | "up_to_date"
+    | "update_available"
+    | "installing"
+    | "installed"
+    | "installed_needs_restart"
+    | "error";
+  const UPDATE_AUTO_CHECK_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const [updateStatus, setUpdateStatus] = useState<UpdateUiStatus>("idle");
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateAvailable, setUpdateAvailable] = useState<UpdaterUpdateLike | null>(null);
+  const [updateLastCheckedMs, setUpdateLastCheckedMs] = useState<number | null>(() => readUpdateLastCheckedMs());
+  const [updateLastCheckSource, setUpdateLastCheckSource] = useState<"auto" | "manual" | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
   const [logcatSourceValue, setLogcatSourceValue] = useState("");
@@ -906,6 +1251,16 @@ function App() {
   );
   const [perfBySerial, setPerfBySerial] = useState<Record<string, PerfMonitorState>>({});
   const perfBySerialRef = useRef<Record<string, PerfMonitorState>>({});
+  const [netBySerial, setNetBySerial] = useState<Record<string, NetProfilerState>>({});
+  const netBySerialRef = useRef<Record<string, NetProfilerState>>({});
+  const [netProfilerIntervalMs, setNetProfilerIntervalMs] = useState(2000);
+  const [netProfilerTopN, setNetProfilerTopN] = useState(20);
+  const [netProfilerSearch, setNetProfilerSearch] = useState("");
+  const [netProfilerWindowMs, setNetProfilerWindowMs] = useState(60_000);
+  const [netProfilerFocusUidBySerial, setNetProfilerFocusUidBySerial] = useState<Record<string, number | null>>(
+    {},
+  );
+  const [netProfilerPinnedUidsBySerial, setNetProfilerPinnedUidsBySerial] = useState<Record<string, number[]>>({});
   const [filesViewMode, setFilesViewMode] = useState<"list" | "grid">(() => {
     try {
       const raw = localStorage.getItem("lazy_blacktea_files_view_mode_v1");
@@ -942,6 +1297,115 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    const lastCheckedMs = readUpdateLastCheckedMs();
+    setUpdateLastCheckedMs(lastCheckedMs);
+
+    if (!shouldAutoCheck(nowMs, lastCheckedMs, UPDATE_AUTO_CHECK_MIN_INTERVAL_MS)) {
+      return;
+    }
+
+    setUpdateLastCheckSource("auto");
+    setUpdateStatus("checking");
+    setUpdateError(null);
+
+    void (async () => {
+      const result = await checkForUpdate({ nowMs });
+      if (cancelled) {
+        return;
+      }
+      setUpdateLastCheckedMs(nowMs);
+      if (result.status === "update_available") {
+        setUpdateAvailable(result.update);
+        setUpdateStatus("update_available");
+        return;
+      }
+      if (result.status === "error") {
+        setUpdateStatus("error");
+        setUpdateError(result.message);
+        return;
+      }
+      // Keep startup checks quiet unless an update is available.
+      setUpdateAvailable(null);
+      setUpdateStatus("idle");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const closeUpdateModal = () => {
+    if (updateStatus === "installing") {
+      return;
+    }
+    setUpdateModalOpen(false);
+  };
+
+  const runUpdateCheck = async (source: "auto" | "manual") => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    if (updateStatus === "checking" || updateStatus === "installing") {
+      return;
+    }
+    const nowMs = Date.now();
+    setUpdateLastCheckSource(source);
+    setUpdateStatus("checking");
+    setUpdateError(null);
+
+    const result = await checkForUpdate({ nowMs });
+    setUpdateLastCheckedMs(nowMs);
+    if (result.status === "update_available") {
+      setUpdateAvailable(result.update);
+      setUpdateStatus("update_available");
+      return;
+    }
+    if (result.status === "error") {
+      setUpdateStatus("error");
+      setUpdateError(result.message);
+      return;
+    }
+    setUpdateAvailable(null);
+    setUpdateStatus(source === "manual" ? "up_to_date" : "idle");
+  };
+
+  const handleManualUpdateCheck = () => {
+    void runUpdateCheck("manual");
+  };
+
+  const handleInstallUpdate = () => {
+    if (!updateAvailable) {
+      return;
+    }
+    if (updateStatus === "installing") {
+      return;
+    }
+    setUpdateStatus("installing");
+    setUpdateError(null);
+
+    void (async () => {
+      const result = await installUpdateAndRelaunch(updateAvailable);
+      if (result.status === "error") {
+        setUpdateStatus("error");
+        setUpdateError(result.message);
+        return;
+      }
+      if (result.status === "installed_needs_restart") {
+        setUpdateStatus("installed_needs_restart");
+        return;
+      }
+      setUpdateStatus("installed");
+    })();
+  };
 
   useEffect(() => {
     try {
@@ -1018,6 +1482,8 @@ function App() {
 
   const [uiScreenshotSize, setUiScreenshotSize] = useState({ width: 0, height: 0 });
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [desktopNotificationPermission, setDesktopNotificationPermission] =
+    useState<DesktopNotificationPermissionState>("unknown");
   const tauriUnavailableToastShownRef = useRef(false);
   const [groupMap, setGroupMap] = useState<Record<string, string>>({});
   const [groupName, setGroupName] = useState("");
@@ -1045,6 +1511,7 @@ function App() {
   const [apkLaunchAfterInstall, setApkLaunchAfterInstall] = useState(false);
   const [apkLaunchPackage, setApkLaunchPackage] = useState("");
   const [apkInstallSummary, setApkInstallSummary] = useState<string[]>([]);
+  const [latestApkInstallTaskId, setLatestApkInstallTaskId] = useState<string | null>(null);
   const [screenRecordRemote, setScreenRecordRemote] = useState<string | null>(null);
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [appsFilter, setAppsFilter] = useState("");
@@ -1077,6 +1544,7 @@ function App() {
   const [bugreportLogBusy, setBugreportLogBusy] = useState(false);
   const [bugreportLogError, setBugreportLogError] = useState<string | null>(null);
   const [bugreportLogLoadAllRunning, setBugreportLogLoadAllRunning] = useState(false);
+  const [bugreportLogBuffer, setBugreportLogBuffer] = useState("");
   const [bugreportLogTag, setBugreportLogTag] = useState("");
   const [bugreportLogPid, setBugreportLogPid] = useState("");
   const [bugreportLogLiveFilter, setBugreportLogLiveFilter] = useState("");
@@ -1084,6 +1552,14 @@ function App() {
   const [bugreportLogFiltersExpanded, setBugreportLogFiltersExpanded] = useState(false);
   const [bugreportLogStart, setBugreportLogStart] = useState("");
   const [bugreportLogEnd, setBugreportLogEnd] = useState("");
+  const [bugreportLogSearchTerm, setBugreportLogSearchTerm] = useState("");
+  const [bugreportLogLastSearchTerm, setBugreportLogLastSearchTerm] = useState("");
+  const [bugreportLogMatches, setBugreportLogMatches] = useState<BugreportLogMatch[]>([]);
+  const [bugreportLogMatchesTruncated, setBugreportLogMatchesTruncated] = useState(false);
+  const [bugreportLogMatchIndex, setBugreportLogMatchIndex] = useState(-1);
+  const [bugreportLogMatchesOpen, setBugreportLogMatchesOpen] = useState(false);
+  const [bugreportLogAdvancedOpen, setBugreportLogAdvancedOpen] = useState(false);
+  const [bugreportLogContextAnchorId, setBugreportLogContextAnchorId] = useState<number | null>(null);
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
   const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
   const [devicePopoverSearch, setDevicePopoverSearch] = useState("");
@@ -1106,6 +1582,9 @@ function App() {
   const devicePopoverSearchRef = useRef<HTMLInputElement | null>(null);
   const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
+  const apkInstallTaskByTraceIdRef = useRef<Record<string, string>>({});
+  const prevTaskItemsRef = useRef<TaskItem[] | null>(null);
+  const notifiedTaskIdsRef = useRef<Set<string>>(new Set());
   const appsDetailsSeqRef = useRef(0);
   const refreshSeqRef = useRef(0);
   const detailRefreshSeqRef = useRef(0);
@@ -1118,10 +1597,12 @@ function App() {
   const devicesRef = useRef<DeviceInfo[]>([]);
   const configRef = useRef<AppConfig | null>(null);
   const bugreportLogRequestRef = useRef(0);
+  const bugreportLogSearchRequestRef = useRef(0);
   const logcatPendingRef = useRef<Record<string, string[]>>({});
   const logcatNextIdRef = useRef<Record<string, number>>({});
   const logcatFlushTimerRef = useRef<number | null>(null);
   const perfLastSerialRef = useRef<string | null>(null);
+  const netLastSerialRef = useRef<string | null>(null);
   const filesDragContextRef = useRef<{
     pathname: string;
     serial: string;
@@ -1145,12 +1626,21 @@ function App() {
   const navigate = useNavigate();
   const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
   const isPerformanceView = location.pathname === "/performance";
+  const isNetworkView = location.pathname === "/network";
   const isUiInspectorView = location.pathname === "/ui-inspector";
+  useEffect(() => {
+    if (!isBugreportLogViewer) {
+      setBugreportLogAdvancedOpen(false);
+    }
+  }, [isBugreportLogViewer]);
   const activeSerial = selectedSerials[0];
   const activeDevice = useMemo(
     () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
     [devices, activeSerial],
   );
+  const latestApkInstallTask = latestApkInstallTaskId
+    ? taskState.items.find((task) => task.id === latestApkInstallTaskId) ?? null
+    : null;
   const hasDevices = devices.length > 0;
   const selectedCount = selectedSerials.length;
   const selectedConnectedCount = selectedSerials.reduce(
@@ -1169,14 +1659,19 @@ function App() {
     ? `${filesSelectedPaths.length} items selected`
     : "Select files to enable bulk actions.";
   const requiresSingleSelection = useMemo(
-    () => ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat", "/performance"].includes(location.pathname),
+    () =>
+      ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat", "/performance", "/network"].includes(
+        location.pathname,
+      ),
     [location.pathname],
   );
   const singleSelectionWarning = requiresSingleSelection && selectedCount > 1;
   useEffect(() => {
     const prevSerial = perfLastSerialRef.current;
-    const nextSerial = isPerformanceView ? activeSerial ?? null : null;
-    if (prevSerial && prevSerial !== nextSerial) {
+    const prevNetSerial = netLastSerialRef.current;
+    const nextPerfSerial = isPerformanceView ? activeSerial ?? null : null;
+    const nextNetSerial = isPerformanceView || isNetworkView ? activeSerial ?? null : null;
+    if (prevSerial && prevSerial !== nextPerfSerial) {
       const running = perfBySerialRef.current[prevSerial]?.running ?? false;
       if (running) {
         void stopPerfMonitor(prevSerial)
@@ -1198,8 +1693,33 @@ function App() {
           .catch((error) => pushToast(formatError(error), "error"));
       }
     }
-    perfLastSerialRef.current = nextSerial;
-  }, [isPerformanceView, activeSerial]);
+
+    if (prevNetSerial && prevNetSerial !== nextNetSerial) {
+      const running = netBySerialRef.current[prevNetSerial]?.running ?? false;
+      if (running) {
+        void stopNetProfiler(prevNetSerial)
+          .then(() => {
+            setNetBySerial((prev) => {
+              const existing = prev[prevNetSerial];
+              if (!existing) {
+                return prev;
+              }
+              return {
+                ...prev,
+                [prevNetSerial]: {
+                  ...existing,
+                  running: false,
+                },
+              };
+            });
+          })
+          .catch((error) => pushToast(formatError(error), "error"));
+      }
+    }
+
+    perfLastSerialRef.current = nextPerfSerial;
+    netLastSerialRef.current = nextNetSerial;
+  }, [isPerformanceView, isNetworkView, activeSerial]);
   const groupedDevices = useMemo(() => {
     const filtered = filterDevicesBySearch(devices, devicePopoverSearch);
     const filteredBySerial = new Map(filtered.map((device) => [device.summary.serial, device]));
@@ -1290,6 +1810,7 @@ function App() {
     const regex_excludes = normalizeRegexPatterns([...sharedFilters.text_excludes, liveExclude]);
     return {
       levels: enabledLevels,
+      buffer: bugreportLogBuffer.trim() || null,
       tag: bugreportLogTag.trim() || null,
       pid: Number.isNaN(pidValue) ? null : pidValue,
       text_terms: [],
@@ -1301,6 +1822,7 @@ function App() {
       end_ts: normalizeBugreportTimestamp(bugreportLogEnd),
     };
   }, [
+    bugreportLogBuffer,
     bugreportLogPid,
     bugreportLogTag,
     bugreportLogStart,
@@ -2050,6 +2572,44 @@ function App() {
     }, 4000);
   };
 
+  const refreshDesktopNotificationsPermission = async () => {
+    const state = await getDesktopNotificationPermission();
+    setDesktopNotificationPermission(state);
+    return state;
+  };
+
+  const handleRequestDesktopNotificationsPermission = async () => {
+    const requested = await requestDesktopNotificationPermission();
+    setDesktopNotificationPermission(requested);
+    if (requested !== "granted") {
+      pushToast("Desktop notification permission was not granted.", "error");
+    } else {
+      pushToast("Desktop notification permission granted.", "info");
+    }
+  };
+
+  const handleSendTestDesktopNotification = async () => {
+    const permission = await refreshDesktopNotificationsPermission();
+    if (permission !== "granted") {
+      const requested = await requestDesktopNotificationPermission();
+      setDesktopNotificationPermission(requested);
+      if (requested !== "granted") {
+        pushToast("Desktop notification permission is required to send notifications.", "error");
+        return;
+      }
+    }
+
+    const ok = await sendDesktopNotification({
+      title: "Lazy Blacktea",
+      body: "Desktop notifications are enabled.",
+    });
+    pushToast(ok ? "Test notification sent." : "Failed to send desktop notification.", ok ? "info" : "error");
+  };
+
+  useEffect(() => {
+    void refreshDesktopNotificationsPermission();
+  }, []);
+
   const beginTask = (params: { kind: TaskKind; title: string; serials: string[] }) => {
     const id = crypto.randomUUID();
     dispatchTasks({
@@ -2063,6 +2623,62 @@ function App() {
     });
     return id;
   };
+
+  const maybeNotifyTaskCompletion = async (task: TaskItem) => {
+    const settings = config?.notifications;
+    if (!settings?.enabled || !settings.desktop_enabled) {
+      return;
+    }
+
+    if (settings.desktop_only_when_unfocused && !isAppUnfocused()) {
+      return;
+    }
+
+    if (task.status === "success" && !settings.desktop_on_success) {
+      return;
+    }
+    if (task.status === "error" && !settings.desktop_on_error) {
+      return;
+    }
+    if (task.status === "cancelled" && !settings.desktop_on_cancelled) {
+      return;
+    }
+
+    const payload = buildDesktopNotificationForTask(task);
+    if (!payload) {
+      return;
+    }
+
+    const permission = await getDesktopNotificationPermission();
+    if (permission !== "granted") {
+      return;
+    }
+
+    await sendDesktopNotification({
+      title: payload.title,
+      body: payload.body,
+    });
+  };
+
+  useEffect(() => {
+    const prev = prevTaskItemsRef.current;
+    const next = taskState.items;
+    if (!prev) {
+      prevTaskItemsRef.current = next;
+      return;
+    }
+
+    const newlyCompleted = detectNewlyCompletedTasks(prev, next);
+    newlyCompleted.forEach((task) => {
+      if (notifiedTaskIdsRef.current.has(task.id)) {
+        return;
+      }
+      notifiedTaskIdsRef.current.add(task.id);
+      void maybeNotifyTaskCompletion(task);
+    });
+
+    prevTaskItemsRef.current = next;
+  }, [taskState.items]);
 
   const refreshDeviceDetails = async (options: { notifyOnError?: boolean } = {}) => {
     const refreshId = ++detailRefreshSeqRef.current;
@@ -2235,6 +2851,10 @@ function App() {
   useEffect(() => {
     perfBySerialRef.current = perfBySerial;
   }, [perfBySerial]);
+
+  useEffect(() => {
+    netBySerialRef.current = netBySerial;
+  }, [netBySerial]);
 
   useEffect(() => {
     const intervalMs = getAutoRefreshIntervalMs(config);
@@ -2572,6 +3192,68 @@ function App() {
       });
     });
 
+    const unlistenNetProfiler = listen<NetProfilerEvent>("net-profiler-snapshot", (event) => {
+      const payload = event.payload;
+      const unsupported = payload.snapshot?.unsupported === true;
+      if (payload.error) {
+        const prevError = netBySerialRef.current[payload.serial]?.lastError ?? null;
+        if (payload.error !== prevError) {
+          pushToast(payload.error, "error");
+        }
+      }
+
+      if (unsupported) {
+        const running = netBySerialRef.current[payload.serial]?.running ?? false;
+        if (running) {
+          void stopNetProfiler(payload.serial)
+            .then(() => {
+              setNetBySerial((prev) => {
+                const existing = prev[payload.serial];
+                if (!existing) {
+                  return prev;
+                }
+                return {
+                  ...prev,
+                  [payload.serial]: {
+                    ...existing,
+                    running: false,
+                  },
+                };
+              });
+            })
+            .catch((error) => pushToast(formatError(error), "error"));
+        }
+      }
+
+      setNetBySerial((prev) => {
+        const existing =
+          prev[payload.serial] ??
+          ({
+            running: false,
+            traceId: null,
+            samples: [],
+            lastError: null,
+          } satisfies NetProfilerState);
+
+        const nextSamples = unsupported
+          ? []
+          : payload.snapshot
+            ? [...existing.samples, payload.snapshot].slice(-NET_PROFILER_MAX_SAMPLES)
+            : existing.samples;
+
+        return {
+          ...prev,
+          [payload.serial]: {
+            ...existing,
+            running: unsupported ? false : existing.running,
+            traceId: payload.trace_id || existing.traceId,
+            samples: nextSamples,
+            lastError: payload.error ?? (payload.snapshot ? null : existing.lastError),
+          },
+        };
+      });
+    });
+
     const flushTerminalPending = () => {
       terminalFlushTimerRef.current = null;
       const pending = terminalPendingRef.current;
@@ -2690,6 +3372,43 @@ function App() {
         patch,
       });
     });
+    const unlistenApkInstallEvent = listen<ApkInstallEvent>("apk-install-event", (event) => {
+      const payload = event.payload;
+      const taskId = apkInstallTaskByTraceIdRef.current[payload.trace_id];
+      if (!taskId) {
+        return;
+      }
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: payload.trace_id });
+
+      const serial = payload.serial;
+      if (!serial) {
+        return;
+      }
+
+      if (payload.event === "start") {
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: { status: "running", progress: null, message: payload.message ?? "Installing..." },
+        });
+        return;
+      }
+
+      if (payload.event === "complete") {
+        const status: TaskStatus = payload.success === true ? "success" : "error";
+        const message =
+          payload.success === true
+            ? payload.message ?? "Installed."
+            : payload.raw_output ?? payload.message ?? payload.error_code ?? "Install failed.";
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: { status, progress: null, message },
+        });
+      }
+    });
     const unlistenBugreportProgress = listen<BugreportProgress>("bugreport-progress", (event) => {
       const payload = event.payload;
       if (!activeSerial || payload.serial === activeSerial) {
@@ -2778,6 +3497,7 @@ function App() {
       }
       logcatPendingRef.current = {};
       void unlistenPerf.then((unlisten) => unlisten());
+      void unlistenNetProfiler.then((unlisten) => unlisten());
       void unlistenTerminal.then((unlisten) => unlisten());
       if (terminalFlushTimerRef.current != null) {
         window.clearTimeout(terminalFlushTimerRef.current);
@@ -2785,6 +3505,7 @@ function App() {
       }
       terminalPendingRef.current = {};
       void unlistenFileTransferProgress.then((unlisten) => unlisten());
+      void unlistenApkInstallEvent.then((unlisten) => unlisten());
       void unlistenBugreportProgress.then((unlisten) => unlisten());
       void unlistenBugreportComplete.then((unlisten) => unlisten());
     };
@@ -3359,66 +4080,84 @@ function App() {
       return;
     }
 
-	    setApkInstallSummary([]);
-	    setBusy(true);
-	    try {
-	      const summaries: string[] = [];
-	      for (const path of paths) {
-	        const name = path.split(/[/\\\\]/).pop() ?? path;
-	        const taskId = beginTask({
-	          kind: "apk_install",
-	          title: `APK Install: ${name}`,
-	          serials: selectedSerials,
-	        });
-	        try {
-	          const response = await installApkBatch(
-	            selectedSerials,
-	            path,
-	            apkReplace,
-	            apkAllowDowngrade,
-	            apkGrant,
-	            apkAllowTest,
-	            apkExtraArgs,
-	          );
-	          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-	          const results = Object.values(response.data.results || {});
-	          const successCount = results.filter((item) => item.success).length;
-	          summaries.push(`${path}: Installed ${successCount}/${results.length} device(s)`);
-	          results.forEach((item) => {
-	            dispatchTasks({
-	              type: "TASK_UPDATE_DEVICE",
-	              id: taskId,
-	              serial: item.serial,
-	              patch: {
-	                status: item.success ? "success" : "error",
-	                message: item.success ? "Installed." : item.raw_output || item.error_code,
-	              },
-	            });
-	          });
-	          const hasError = results.some((item) => !item.success);
-	          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
-	        } catch (error) {
-	          selectedSerials.forEach((serial) => {
-	            dispatchTasks({
-	              type: "TASK_UPDATE_DEVICE",
-	              id: taskId,
-	              serial,
-	              patch: { status: "error", message: formatError(error) },
-	            });
-	          });
-	          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-	          throw error;
-	        }
-	      }
-	      setApkInstallSummary(summaries);
-	      pushToast("APK install completed.", "info");
+    const serials = Array.from(new Set(selectedSerials));
+
+    setApkInstallSummary([]);
+    setBusy(true);
+    try {
+      const summaries: string[] = [];
+      for (const path of paths) {
+        const name = path.split(/[/\\\\]/).pop() ?? path;
+        const taskId = beginTask({
+          kind: "apk_install",
+          title: `APK Install: ${name}`,
+          serials,
+        });
+        setLatestApkInstallTaskId(taskId);
+        const traceId = crypto.randomUUID();
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
+        apkInstallTaskByTraceIdRef.current[traceId] = taskId;
+        serials.forEach((serial) => {
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial,
+            patch: { status: "running", progress: null, message: "Installing..." },
+          });
+        });
+        try {
+          const response = await installApkBatch(
+            serials,
+            path,
+            apkReplace,
+            apkAllowDowngrade,
+            apkGrant,
+            apkAllowTest,
+            apkExtraArgs,
+            traceId,
+          );
+          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+          const results = Object.values(response.data.results || {});
+          const successCount = results.filter((item) => item.success).length;
+          summaries.push(`${path}: Installed ${successCount}/${results.length} device(s)`);
+          results.forEach((item) => {
+            dispatchTasks({
+              type: "TASK_UPDATE_DEVICE",
+              id: taskId,
+              serial: item.serial,
+              patch: {
+                status: item.success ? "success" : "error",
+                progress: null,
+                message: item.success ? "Installed." : item.raw_output || item.error_code,
+              },
+            });
+          });
+          const hasError = results.some((item) => !item.success);
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
+        } catch (error) {
+          serials.forEach((serial) => {
+            dispatchTasks({
+              type: "TASK_UPDATE_DEVICE",
+              id: taskId,
+              serial,
+              patch: { status: "error", progress: null, message: formatError(error) },
+            });
+          });
+          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+          throw error;
+        } finally {
+          delete apkInstallTaskByTraceIdRef.current[traceId];
+        }
+      }
+      setApkInstallSummary(summaries);
+      pushToast("APK install completed.", "info");
 
       if (apkLaunchAfterInstall) {
         const error = validatePackageName(apkLaunchPackage);
         if (error) {
           pushToast(error, "error");
         } else {
-          const response = await launchApp(selectedSerials, apkLaunchPackage.trim());
+          const response = await launchApp(serials, apkLaunchPackage.trim());
           const successCount = response.data.filter((item) => item.exit_code === 0).length;
           pushToast(`Launch requested (${successCount}/${response.data.length}).`, "info");
         }
@@ -3867,6 +4606,81 @@ function App() {
         };
       });
       pushToast("Performance monitor stopped.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleNetProfilerStart = async () => {
+    const serial = ensureSingleSelection("network profiler");
+    if (!serial) {
+      return;
+    }
+    if (netBySerialRef.current[serial]?.running) {
+      pushToast("Network profiler already running.", "info");
+      return;
+    }
+    setBusy(true);
+    try {
+      const pinnedUidsRaw = netProfilerPinnedUidsBySerial[serial] ?? [];
+      const pinnedUids = pinnedUidsRaw.length ? pinnedUidsRaw : undefined;
+      const response = await startNetProfiler(serial, netProfilerIntervalMs, netProfilerTopN, pinnedUids);
+      setNetBySerial((prev) => {
+        const existing =
+          prev[serial] ??
+          ({
+            running: false,
+            traceId: null,
+            samples: [],
+            lastError: null,
+          } satisfies NetProfilerState);
+        return {
+          ...prev,
+          [serial]: {
+            ...existing,
+            running: true,
+            traceId: response.trace_id,
+            samples: [],
+            lastError: null,
+          },
+        };
+      });
+      pushToast("Network profiler started.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleNetProfilerStop = async () => {
+    const serial = ensureSingleSelection("network profiler");
+    if (!serial) {
+      return;
+    }
+    if (!netBySerialRef.current[serial]?.running) {
+      pushToast("Network profiler is not running.", "info");
+      return;
+    }
+    setBusy(true);
+    try {
+      await stopNetProfiler(serial);
+      setNetBySerial((prev) => {
+        const existing = prev[serial];
+        if (!existing) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [serial]: {
+            ...existing,
+            running: false,
+          },
+        };
+      });
+      pushToast("Network profiler stopped.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -5658,6 +6472,9 @@ function App() {
       setBugreportLogRows((prev) => (append ? [...prev, ...response.data.rows] : response.data.rows));
       setBugreportLogHasMore(response.data.has_more);
       setBugreportLogOffset(response.data.next_offset);
+      if (!append) {
+        setBugreportLogContextAnchorId(null);
+      }
     } catch (error) {
       if (bugreportLogRequestRef.current !== requestId) {
         return;
@@ -5670,6 +6487,113 @@ function App() {
         setBugreportLogBusy(false);
       }
     }
+  };
+
+  const runBugreportLogAround = async (reportId: string, anchorId: number) => {
+    const requestId = bugreportLogRequestRef.current + 1;
+    bugreportLogRequestRef.current = requestId;
+    bugreportLogLoadAllTokenRef.current += 1;
+    setBugreportLogLoadAllRunning(false);
+    setBugreportLogBusy(true);
+    setBugreportLogError(null);
+    try {
+      const response = await queryBugreportLogcatAround(reportId, anchorId, bugreportLogFilters, 200, 200);
+      if (bugreportLogRequestRef.current !== requestId) {
+        return;
+      }
+      setBugreportLogRows(response.data.rows);
+      setBugreportLogHasMore(false);
+      setBugreportLogOffset(0);
+      setBugreportLogContextAnchorId(anchorId);
+    } catch (error) {
+      if (bugreportLogRequestRef.current !== requestId) {
+        return;
+      }
+      const message = formatError(error);
+      setBugreportLogError(message);
+      pushToast(message, "error");
+    } finally {
+      if (bugreportLogRequestRef.current === requestId) {
+        setBugreportLogBusy(false);
+      }
+    }
+  };
+
+  const handleBugreportLogBackToList = () => {
+    setBugreportLogContextAnchorId(null);
+    if (bugreportLogSummary) {
+      void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
+    }
+  };
+
+  const handleBugreportLogSearch = async () => {
+    if (!bugreportLogSummary) {
+      pushToast("Load a bugreport first.", "error");
+      return;
+    }
+    const term = bugreportLogSearchTerm.trim();
+    if (!term) {
+      pushToast("Enter a search query.", "error");
+      return;
+    }
+
+    const requestId = bugreportLogSearchRequestRef.current + 1;
+    bugreportLogSearchRequestRef.current = requestId;
+    setBugreportLogLastSearchTerm(term);
+    setBugreportLogMatches([]);
+    setBugreportLogMatchesTruncated(false);
+    setBugreportLogMatchIndex(-1);
+    setBugreportLogMatchesOpen(false);
+    setBugreportLogBusy(true);
+    setBugreportLogError(null);
+    try {
+      const response = await searchBugreportLogcat(bugreportLogSummary.report_id, term, bugreportLogFilters, 200);
+      if (bugreportLogSearchRequestRef.current !== requestId) {
+        return;
+      }
+      setBugreportLogMatches(response.data.matches);
+      setBugreportLogMatchesTruncated(response.data.truncated);
+      setBugreportLogMatchIndex(response.data.matches.length ? 0 : -1);
+    } catch (error) {
+      if (bugreportLogSearchRequestRef.current !== requestId) {
+        return;
+      }
+      const message = formatError(error);
+      setBugreportLogError(message);
+      pushToast(message, "error");
+    } finally {
+      if (bugreportLogSearchRequestRef.current === requestId) {
+        setBugreportLogBusy(false);
+      }
+    }
+  };
+
+  const openBugreportLogMatch = (index: number) => {
+    if (!bugreportLogSummary) {
+      return;
+    }
+    if (bugreportLogMatches.length === 0) {
+      return;
+    }
+    const normalized =
+      ((index % bugreportLogMatches.length) + bugreportLogMatches.length) % bugreportLogMatches.length;
+    const match = bugreportLogMatches[normalized];
+    if (!match) {
+      return;
+    }
+    setBugreportLogMatchIndex(normalized);
+    void runBugreportLogAround(bugreportLogSummary.report_id, match.id);
+  };
+
+  const moveBugreportLogMatch = (delta: number) => {
+    if (bugreportLogMatches.length === 0) {
+      return;
+    }
+    if (bugreportLogMatchIndex < 0) {
+      openBugreportLogMatch(delta < 0 ? bugreportLogMatches.length - 1 : 0);
+      return;
+    }
+    openBugreportLogMatch(bugreportLogMatchIndex + delta);
   };
 
   const loadBugreportLogFromPath = async (path: string) => {
@@ -5687,6 +6611,14 @@ function App() {
     setBugreportLogRows([]);
     setBugreportLogHasMore(false);
     setBugreportLogOffset(0);
+    setBugreportLogBuffer("");
+    setBugreportLogSearchTerm("");
+    setBugreportLogLastSearchTerm("");
+    setBugreportLogMatches([]);
+    setBugreportLogMatchesTruncated(false);
+    setBugreportLogMatchIndex(-1);
+    setBugreportLogMatchesOpen(false);
+    setBugreportLogContextAnchorId(null);
 
     setBugreportLogBusy(true);
     setBugreportLogError(null);
@@ -5721,6 +6653,9 @@ function App() {
     if (!isBugreportLogViewer) {
       return;
     }
+    if (bugreportLogContextAnchorId != null) {
+      return;
+    }
     if (bugreportLogLoadAllRunningRef.current) {
       bugreportLogLoadAllTokenRef.current += 1;
       setBugreportLogLoadAllRunning(false);
@@ -5734,10 +6669,18 @@ function App() {
       void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
     }, delayMs);
     return () => window.clearTimeout(handle);
-  }, [bugreportLogSummary, bugreportLogFilters]);
+  }, [bugreportLogContextAnchorId, bugreportLogSummary, bugreportLogFilters]);
+
+  useEffect(() => {
+    if (bugreportLogContextAnchorId == null) {
+      return;
+    }
+    // Changing filters should return the viewer back to the main list mode to avoid surprising output.
+    setBugreportLogContextAnchorId(null);
+  }, [bugreportLogFilters]);
 
   const handleBugreportLogLoadAll = async () => {
-    if (!bugreportLogSummary || bugreportLogBusy) {
+    if (!bugreportLogSummary || bugreportLogBusy || bugreportLogContextAnchorId != null) {
       return;
     }
 
@@ -6472,6 +7415,949 @@ function App() {
     );
   };
 
+  const renderNetTrendSparkline = (values: number[]) => {
+    const width = 220;
+    const height = 44;
+    const points = buildSparklinePoints(values, width, height);
+    return (
+      <svg
+        className="sparkline net-profiler-sparkline"
+        viewBox={`0 0 ${width} ${height}`}
+        aria-hidden="true"
+      >
+        <polyline points={points} fill="none" />
+      </svg>
+    );
+  };
+
+  const NetProfilerLineChart = ({
+    samples,
+    focusUid,
+    windowMs,
+    pinnedUids,
+    pinnedLabels,
+  }: {
+    samples: NetProfilerSnapshot[];
+    focusUid: number | null;
+    windowMs: number | null;
+    pinnedUids: number[];
+    pinnedLabels: Record<number, string>;
+  }) => {
+    const svgRef = useRef<SVGSVGElement | null>(null);
+    const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+    const [hoverLeftPx, setHoverLeftPx] = useState<number>(0);
+    const [zoomDomain, setZoomDomain] = useState<{ startTs: number; endTs: number } | null>(null);
+    const [brushRange, setBrushRange] = useState<{ x0: number; x1: number } | null>(null);
+    const [isDragging, setIsDragging] = useState(false);
+    const dragRef = useRef<{
+      pointerId: number;
+      mode: "brush" | "pan";
+      startXPx: number;
+      lastXPx: number;
+      startDomain: { startTs: number; endTs: number };
+      rectWidth: number;
+    } | null>(null);
+
+    useEffect(() => {
+      setZoomDomain(null);
+      setBrushRange(null);
+      dragRef.current = null;
+      setIsDragging(false);
+      setHoverIndex(null);
+    }, [windowMs]);
+
+    useEffect(() => {
+      if (samples.length > 0) {
+        return;
+      }
+      setZoomDomain(null);
+      setBrushRange(null);
+      dragRef.current = null;
+      setIsDragging(false);
+      setHoverIndex(null);
+    }, [samples.length]);
+
+    const liveSamples = useMemo(
+      () => sliceSnapshotsByWindowMs(samples, windowMs),
+      [samples, windowMs],
+    );
+    const chartSamples = useMemo(() => {
+      if (!zoomDomain) {
+        return liveSamples;
+      }
+      const start = Math.min(zoomDomain.startTs, zoomDomain.endTs);
+      const end = Math.max(zoomDomain.startTs, zoomDomain.endTs);
+      return liveSamples.filter((sample) => sample.ts_ms >= start && sample.ts_ms <= end);
+    }, [liveSamples, zoomDomain]);
+    const series = useMemo(
+      () => extractNetSeries(chartSamples, focusUid),
+      [chartSamples, focusUid],
+    );
+
+    const width = 720;
+    const height = 180;
+    const n = series.tsMs.length;
+    const hasSeries = n >= 2;
+
+    const pinnedTotalsSeries = useMemo(
+      () =>
+        pinnedUids.map((uid) =>
+          chartSamples.map((sample) => {
+            const row = sample.rows.find((candidate) => candidate.uid === uid) ?? null;
+            const rx = row?.rx_bps ?? null;
+            const tx = row?.tx_bps ?? null;
+            return rx == null && tx == null ? null : (rx ?? 0) + (tx ?? 0);
+          }),
+        ),
+      [chartSamples, pinnedUids],
+    );
+
+    const yMax = useMemo(() => {
+      const values: number[] = [];
+      series.rxBps.forEach((value) => {
+        if (value != null && Number.isFinite(value)) {
+          values.push(value);
+        }
+      });
+      series.txBps.forEach((value) => {
+        if (value != null && Number.isFinite(value)) {
+          values.push(value);
+        }
+      });
+      pinnedTotalsSeries.forEach((series) => {
+        series.forEach((value) => {
+          if (value != null && Number.isFinite(value)) {
+            values.push(value);
+          }
+        });
+      });
+      return values.length ? Math.max(1, ...values) : 1;
+    }, [pinnedTotalsSeries, series.rxBps, series.txBps]);
+
+    const rxPath = useMemo(
+      () => buildLinePath(series.rxBps, width, height, yMax),
+      [series.rxBps, width, height, yMax],
+    );
+    const txPath = useMemo(
+      () => buildLinePath(series.txBps, width, height, yMax),
+      [series.txBps, width, height, yMax],
+    );
+    const pinnedPaths = useMemo(
+      () =>
+        pinnedTotalsSeries.map((values) => buildLinePath(values, width, height, yMax)),
+      [pinnedTotalsSeries, width, height, yMax],
+    );
+
+    const hoverX = useMemo(() => {
+      if (!hasSeries || hoverIndex == null || n <= 1) {
+        return null;
+      }
+      const x = (hoverIndex / (n - 1)) * width;
+      return Number.isFinite(x) ? x : null;
+    }, [hasSeries, hoverIndex, n, width]);
+
+    const hovered = useMemo(() => {
+      if (!hasSeries || hoverIndex == null) {
+        return null;
+      }
+      const tsMs = series.tsMs[hoverIndex] ?? null;
+      const endTs = series.tsMs[n - 1] ?? null;
+      const ageSeconds =
+        tsMs != null && endTs != null
+          ? Math.max(0, (endTs - tsMs) / 1000)
+          : null;
+      const rxBps = series.rxBps[hoverIndex] ?? null;
+      const txBps = series.txBps[hoverIndex] ?? null;
+      const totalBps =
+        rxBps == null && txBps == null ? null : (rxBps ?? 0) + (txBps ?? 0);
+      return { ageSeconds, rxBps, txBps, totalBps };
+    }, [hasSeries, hoverIndex, n, series.rxBps, series.tsMs, series.txBps]);
+
+    const globalMinTs = liveSamples[0]?.ts_ms ?? null;
+    const globalMaxTs = liveSamples[liveSamples.length - 1]?.ts_ms ?? null;
+
+    const clampDomain = (startTs: number, endTs: number) => {
+      const minSpanMs = 1000;
+      if (globalMinTs == null || globalMaxTs == null || globalMaxTs <= globalMinTs) {
+        return { startTs, endTs };
+      }
+
+      let start = Math.min(startTs, endTs);
+      let end = Math.max(startTs, endTs);
+      const fullSpan = globalMaxTs - globalMinTs;
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {
+        return { startTs: globalMinTs, endTs: globalMaxTs };
+      }
+
+      if (end - start < minSpanMs) {
+        const center = (start + end) / 2;
+        start = center - minSpanMs / 2;
+        end = center + minSpanMs / 2;
+      }
+
+      const span = Math.min(end - start, fullSpan);
+      if (span <= 0) {
+        return { startTs: globalMinTs, endTs: globalMaxTs };
+      }
+
+      if (start < globalMinTs) {
+        start = globalMinTs;
+        end = globalMinTs + span;
+      }
+      if (end > globalMaxTs) {
+        end = globalMaxTs;
+        start = globalMaxTs - span;
+      }
+
+      start = Math.max(globalMinTs, start);
+      end = Math.min(globalMaxTs, end);
+      return { startTs: Math.round(start), endTs: Math.round(end) };
+    };
+
+    const updateHoverFromClientX = (clientX: number) => {
+      if (!svgRef.current || !hasSeries) {
+        return;
+      }
+      const rect = svgRef.current.getBoundingClientRect();
+      if (!rect.width) {
+        return;
+      }
+      const xPx = clientX - rect.left;
+      const ratio = Math.max(0, Math.min(1, xPx / rect.width));
+      const nextIndex = Math.max(0, Math.min(n - 1, Math.round(ratio * (n - 1))));
+      setHoverIndex(nextIndex);
+      const nextLeft = Math.min(Math.max(8, xPx + 12), rect.width - 190);
+      setHoverLeftPx(Number.isFinite(nextLeft) ? nextLeft : 0);
+    };
+
+    const handlePointerDown = (event: ReactPointerEvent) => {
+      if (!svgRef.current) {
+        return;
+      }
+      if (event.button !== 0) {
+        return;
+      }
+      const rect = svgRef.current.getBoundingClientRect();
+      if (!rect.width) {
+        return;
+      }
+
+      const xPx = event.clientX - rect.left;
+      const ratio = Math.max(0, Math.min(1, xPx / rect.width));
+      const xSvg = ratio * width;
+
+      const canPan = zoomDomain != null;
+      const mode: "brush" | "pan" = event.shiftKey && canPan ? "pan" : "brush";
+
+      const baseStartTs = series.tsMs[0] ?? null;
+      const baseEndTs = series.tsMs[n - 1] ?? null;
+      const startDomain =
+        zoomDomain ?? (baseStartTs != null && baseEndTs != null ? { startTs: baseStartTs, endTs: baseEndTs } : null);
+
+      if (!startDomain) {
+        return;
+      }
+
+      event.currentTarget.setPointerCapture(event.pointerId);
+      dragRef.current = {
+        pointerId: event.pointerId,
+        mode,
+        startXPx: xPx,
+        lastXPx: xPx,
+        startDomain,
+        rectWidth: rect.width,
+      };
+      setIsDragging(true);
+      setHoverIndex(null);
+      if (mode === "brush") {
+        setBrushRange({ x0: xSvg, x1: xSvg });
+      } else {
+        setBrushRange(null);
+      }
+    };
+
+    const handlePointerMove = (event: ReactPointerEvent) => {
+      const dragging = dragRef.current;
+      if (!dragging || dragging.pointerId !== event.pointerId) {
+        if (!isDragging) {
+          updateHoverFromClientX(event.clientX);
+        }
+        return;
+      }
+
+      if (!svgRef.current) {
+        return;
+      }
+      const rect = svgRef.current.getBoundingClientRect();
+      if (!rect.width) {
+        return;
+      }
+
+      const xPx = event.clientX - rect.left;
+      dragging.lastXPx = xPx;
+      const ratio = Math.max(0, Math.min(1, xPx / rect.width));
+      const xSvg = ratio * width;
+
+      if (dragging.mode === "brush") {
+        setBrushRange((prev) => {
+          const x0 = prev?.x0 ?? xSvg;
+          return { x0, x1: xSvg };
+        });
+        return;
+      }
+
+      const start = dragging.startDomain.startTs;
+      const end = dragging.startDomain.endTs;
+      const span = Math.abs(end - start);
+      if (span <= 0) {
+        return;
+      }
+      const dxPx = xPx - dragging.startXPx;
+      const dtMs = (dxPx / dragging.rectWidth) * span;
+      const next = clampDomain(start - dtMs, end - dtMs);
+      setZoomDomain(next);
+    };
+
+    const finishDrag = (event: ReactPointerEvent) => {
+      const dragging = dragRef.current;
+      if (!dragging || dragging.pointerId !== event.pointerId) {
+        return;
+      }
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      dragRef.current = null;
+      setIsDragging(false);
+
+      if (!svgRef.current) {
+        setBrushRange(null);
+        return;
+      }
+      const rect = svgRef.current.getBoundingClientRect();
+      if (!rect.width) {
+        setBrushRange(null);
+        return;
+      }
+
+      const selectionPx = Math.abs(dragging.lastXPx - dragging.startXPx);
+      if (dragging.mode !== "brush" || selectionPx < 8 || !hasSeries) {
+        setBrushRange(null);
+        updateHoverFromClientX(event.clientX);
+        return;
+      }
+
+      const startPx = Math.min(dragging.startXPx, dragging.lastXPx);
+      const endPx = Math.max(dragging.startXPx, dragging.lastXPx);
+      const startRatio = Math.max(0, Math.min(1, startPx / rect.width));
+      const endRatio = Math.max(0, Math.min(1, endPx / rect.width));
+      const startIndex = Math.max(0, Math.min(n - 1, Math.floor(startRatio * (n - 1))));
+      const endIndex = Math.max(0, Math.min(n - 1, Math.ceil(endRatio * (n - 1))));
+      if (endIndex <= startIndex) {
+        setBrushRange(null);
+        return;
+      }
+
+      const startTs = series.tsMs[startIndex] ?? null;
+      const endTs = series.tsMs[endIndex] ?? null;
+      if (startTs == null || endTs == null || startTs === endTs) {
+        setBrushRange(null);
+        return;
+      }
+
+      setZoomDomain(clampDomain(startTs, endTs));
+      setBrushRange(null);
+      setHoverIndex(null);
+    };
+
+    const handlePointerLeave = () => {
+      if (isDragging) {
+        return;
+      }
+      setHoverIndex(null);
+    };
+
+    const handleWheel = (event: ReactWheelEvent) => {
+      if (!svgRef.current || !hasSeries) {
+        return;
+      }
+      const rect = svgRef.current.getBoundingClientRect();
+      if (!rect.width) {
+        return;
+      }
+
+      event.preventDefault();
+
+      const xPx = event.clientX - rect.left;
+      const ratio = Math.max(0, Math.min(1, xPx / rect.width));
+      const centerIndex = Math.max(0, Math.min(n - 1, Math.round(ratio * (n - 1))));
+      const centerTs = series.tsMs[centerIndex] ?? null;
+      const baseStartTs = series.tsMs[0] ?? null;
+      const baseEndTs = series.tsMs[n - 1] ?? null;
+      if (centerTs == null || baseStartTs == null || baseEndTs == null) {
+        return;
+      }
+
+      const domain = zoomDomain ?? { startTs: baseStartTs, endTs: baseEndTs };
+      const start = Math.min(domain.startTs, domain.endTs);
+      const end = Math.max(domain.startTs, domain.endTs);
+      const span = end - start;
+      if (span <= 0) {
+        return;
+      }
+
+      const factor = event.deltaY > 0 ? 1.2 : 0.85;
+      const nextSpan = Math.max(1000, span * factor);
+      const centerRatio = Math.max(0, Math.min(1, (centerTs - start) / span));
+      const nextStart = centerTs - nextSpan * centerRatio;
+      const nextEnd = nextStart + nextSpan;
+      setZoomDomain(clampDomain(nextStart, nextEnd));
+      setBrushRange(null);
+      setHoverIndex(null);
+    };
+
+    const hoveredPins = useMemo(() => {
+      if (!hasSeries || hoverIndex == null || pinnedUids.length === 0) {
+        return [];
+      }
+      return pinnedUids.map((uid, index) => ({
+        uid,
+        index,
+        label: pinnedLabels[uid] ?? `UID ${uid}`,
+        totalBps: pinnedTotalsSeries[index]?.[hoverIndex] ?? null,
+      }));
+    }, [
+      hasSeries,
+      hoverIndex,
+      pinnedLabels,
+      pinnedTotalsSeries,
+      pinnedUids,
+    ]);
+
+    return (
+      <div className="net-profiler-chart-body">
+        {zoomDomain && (
+          <div className="net-profiler-chart-overlay">
+            <button
+              className="ghost"
+              onClick={() => {
+                setZoomDomain(null);
+                setBrushRange(null);
+                setHoverIndex(null);
+              }}
+            >
+              Reset zoom
+            </button>
+            <span className="badge">
+              Zoom {((Math.abs(zoomDomain.endTs - zoomDomain.startTs) || 0) / 1000).toFixed(1)}s
+            </span>
+          </div>
+        )}
+        <svg
+          ref={svgRef}
+          className="net-profiler-chart-svg"
+          viewBox={`0 0 ${width} ${height}`}
+          aria-label="Network throughput timeline"
+          role="img"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={finishDrag}
+          onPointerCancel={finishDrag}
+          onPointerLeave={handlePointerLeave}
+          onWheel={handleWheel}
+        >
+          <g className="net-profiler-grid" aria-hidden="true">
+            {[0.25, 0.5, 0.75].map((ratio) => {
+              const y = ratio * height;
+              return <line key={ratio} x1="0" y1={y} x2={width} y2={y} />;
+            })}
+          </g>
+
+          {brushRange && (
+            <rect
+              className="net-profiler-brush"
+              x={Math.min(brushRange.x0, brushRange.x1)}
+              y="0"
+              width={Math.abs(brushRange.x1 - brushRange.x0)}
+              height={height}
+            />
+          )}
+
+          {pinnedPaths.map((d, index) =>
+            d ? (
+              <path
+                key={`pin-${pinnedUids[index] ?? index}`}
+                d={d}
+                className={`net-profiler-line net-profiler-line-pin pin-${index}`}
+                fill="none"
+              />
+            ) : null,
+          )}
+
+          {rxPath && (
+            <path d={rxPath} className="net-profiler-line net-profiler-line-rx" fill="none" />
+          )}
+          {txPath && (
+            <path d={txPath} className="net-profiler-line net-profiler-line-tx" fill="none" />
+          )}
+
+          {hoverX != null && (
+            <g className="net-profiler-hover" aria-hidden="true">
+              <line className="net-profiler-marker" x1={hoverX} y1="0" x2={hoverX} y2={height} />
+              {hoverIndex != null &&
+                series.rxBps[hoverIndex] != null &&
+                Number.isFinite(series.rxBps[hoverIndex] ?? Number.NaN) && (
+                <circle
+                  className="net-profiler-dot net-profiler-dot-rx"
+                  cx={hoverX}
+                  cy={height - Math.min(1, Math.max(0, (series.rxBps[hoverIndex] ?? 0) / yMax)) * height}
+                  r="3"
+                />
+              )}
+              {hoverIndex != null &&
+                series.txBps[hoverIndex] != null &&
+                Number.isFinite(series.txBps[hoverIndex] ?? Number.NaN) && (
+                <circle
+                  className="net-profiler-dot net-profiler-dot-tx"
+                  cx={hoverX}
+                  cy={height - Math.min(1, Math.max(0, (series.txBps[hoverIndex] ?? 0) / yMax)) * height}
+                  r="3"
+                />
+              )}
+            </g>
+          )}
+        </svg>
+
+        {!hasSeries && (
+          <div className="net-profiler-chart-empty">
+            <p className="muted">{samples.length ? "Waiting for data…" : "Start the network profiler to see a timeline."}</p>
+          </div>
+        )}
+
+        <div className="net-profiler-legend" aria-label="Network chart legend">
+          <span className="net-profiler-legend-item">
+            <span className="net-profiler-legend-swatch rx" aria-hidden="true" />
+            Rx
+          </span>
+          <span className="net-profiler-legend-item">
+            <span className="net-profiler-legend-swatch tx" aria-hidden="true" />
+            Tx
+          </span>
+          <span className="muted net-profiler-legend-cap">
+            Max {formatBps(yMax)}
+          </span>
+        </div>
+
+        {hovered && !isDragging && (
+          <div className="net-profiler-tooltip" style={{ left: hoverLeftPx }}>
+            <div className="net-profiler-tooltip-title">
+              {hovered.ageSeconds == null ? "t" : `t -${hovered.ageSeconds.toFixed(1)}s`}
+            </div>
+            <div className="net-profiler-tooltip-row">
+              <span>Rx</span>
+              <span>{formatBps(hovered.rxBps ?? null)}</span>
+            </div>
+            <div className="net-profiler-tooltip-row">
+              <span>Tx</span>
+              <span>{formatBps(hovered.txBps ?? null)}</span>
+            </div>
+            <div className="net-profiler-tooltip-row">
+              <span>Total</span>
+              <span>{formatBps(hovered.totalBps)}</span>
+            </div>
+            {hoveredPins.length > 0 && (
+              <>
+                <div className="net-profiler-tooltip-sep" aria-hidden="true" />
+                {hoveredPins.map((pin) => (
+                  <div key={pin.uid} className="net-profiler-tooltip-row net-profiler-tooltip-row-pin">
+                    <span className="net-profiler-tooltip-pin">
+                      <span className={`net-profiler-color-swatch pin-${pin.index}`} aria-hidden="true" />
+                      <span className="net-profiler-tooltip-pin-label">{pin.label}</span>
+                    </span>
+                    <span>{formatBps(pin.totalBps)}</span>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const NetworkBreakdownPanel = () => {
+    const serial = activeSerial;
+    const MAX_PINNED_UIDS = 5;
+
+    const netState =
+      (serial ? netBySerial[serial] : null) ??
+      ({
+        running: false,
+        traceId: null,
+        samples: [],
+        lastError: null,
+      } satisfies NetProfilerState);
+    const netSnapshot: NetProfilerSnapshot | null =
+      netState.samples[netState.samples.length - 1] ?? null;
+    const netRows = netSnapshot?.rows ?? [];
+    const netQuery = netProfilerSearch.trim().toLowerCase();
+    const netRowsFiltered = netQuery
+      ? netRows.filter((row) => {
+          const label =
+            row.packages && row.packages.length ? row.packages.join(", ") : `uid:${row.uid}`;
+          return label.toLowerCase().includes(netQuery);
+        })
+      : netRows;
+
+    const canStartNet =
+      !!serial && !busy && selectedSerials.length === 1 && deviceStatus === "device" && !netState.running;
+    const canStopNet = !!serial && !busy && selectedSerials.length === 1 && netState.running;
+    const netIntervalBadge =
+      netProfilerIntervalMs >= 1000
+        ? `Interval ${Math.round(netProfilerIntervalMs / 1000)}s`
+        : `Interval ${netProfilerIntervalMs}ms`;
+
+    const focusUid = serial ? netProfilerFocusUidBySerial[serial] ?? null : null;
+    const focusedRow = focusUid != null ? netRows.find((row) => row.uid === focusUid) ?? null : null;
+    const pinnedUids = serial ? netProfilerPinnedUidsBySerial[serial] ?? [] : [];
+    const pinnedSet = useMemo(() => new Set(pinnedUids), [pinnedUids]);
+    const pinnedLabels = useMemo(() => {
+      const map: Record<number, string> = {};
+      pinnedUids.forEach((uid) => {
+        const row = netRows.find((candidate) => candidate.uid === uid) ?? null;
+        if (row?.packages?.length) {
+          const first = row.packages[0] ?? "";
+          const extra = row.packages.length > 1 ? ` (+${row.packages.length - 1})` : "";
+          map[uid] = `${first}${extra}`.trim() || `UID ${uid}`;
+          return;
+        }
+        map[uid] = `UID ${uid}`;
+      });
+      return map;
+    }, [pinnedUids, netRows]);
+
+    const applyPinnedUids = (nextPinnedUids: number[], toastMessage: string) => {
+      if (!serial) {
+        return;
+      }
+      const prevPinned = pinnedUids;
+      setNetProfilerPinnedUidsBySerial((prev) => ({
+        ...prev,
+        [serial]: nextPinnedUids,
+      }));
+
+      if (!netState.running) {
+        pushToast(toastMessage, "info");
+        return;
+      }
+
+      void setNetProfilerPinnedUids(serial, nextPinnedUids)
+        .then(() => {
+          pushToast(toastMessage, "info");
+        })
+        .catch((error) => {
+          setNetProfilerPinnedUidsBySerial((prev) => ({
+            ...prev,
+            [serial]: prevPinned,
+          }));
+          pushToast(formatError(error), "error");
+        });
+    };
+
+    if (!serial) {
+      return null;
+    }
+
+    const focusLabel =
+      focusUid == null
+        ? `Top ${netProfilerTopN} total`
+        : focusedRow?.packages && focusedRow.packages.length
+          ? focusedRow.packages.join(", ")
+          : `UID ${focusUid}`;
+
+    return (
+      <section className="panel net-profiler-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Network Breakdown</h2>
+            <span>Per-app throughput (best-effort).</span>
+          </div>
+          <div className="button-row compact">
+            <select
+              aria-label="Network profiler interval"
+              value={netProfilerIntervalMs}
+              onChange={(event) => setNetProfilerIntervalMs(Number(event.target.value))}
+              disabled={busy || netState.running}
+            >
+              <option value={1000}>1s</option>
+              <option value={2000}>2s</option>
+              <option value={5000}>5s</option>
+            </select>
+            <select
+              aria-label="Network profiler top N"
+              value={netProfilerTopN}
+              onChange={(event) => setNetProfilerTopN(Number(event.target.value))}
+              disabled={busy || netState.running}
+            >
+              <option value={10}>Top 10</option>
+              <option value={20}>Top 20</option>
+              <option value={50}>Top 50</option>
+            </select>
+            <button onClick={handleNetProfilerStart} disabled={!canStartNet}>
+              Start
+            </button>
+            <button onClick={handleNetProfilerStop} disabled={!canStopNet}>
+              Stop
+            </button>
+          </div>
+        </div>
+
+        <div className="net-profiler-toolbar">
+          <div className="net-profiler-search">
+            <label htmlFor="net-profiler-search">Search</label>
+            <input
+              id="net-profiler-search"
+              value={netProfilerSearch}
+              onChange={(event) => setNetProfilerSearch(event.target.value)}
+              disabled={busy}
+              placeholder="Filter by package or UID"
+            />
+          </div>
+          <div className="net-profiler-meta">
+            <span className={`status-pill ${netState.running ? "busy" : "idle"}`}>
+              {netState.running ? "Running" : "Stopped"}
+            </span>
+            <span className="badge">{netIntervalBadge}</span>
+            <span className="badge">Top {netProfilerTopN}</span>
+            {netSnapshot?.dt_ms != null && netSnapshot.dt_ms > 0 && (
+              <span className="badge">Δ {netSnapshot.dt_ms}ms</span>
+            )}
+          </div>
+        </div>
+
+        <div className="net-profiler-chart" aria-label="Network throughput timeline">
+          <div className="net-profiler-chart-header">
+            <div className="net-profiler-chart-title">
+              <div className="net-profiler-chart-eyebrow">Timeline</div>
+              <div className="net-profiler-chart-focus">{focusLabel}</div>
+              <div className="muted net-profiler-chart-hint">
+                Click an app row to focus its Rx/Tx. Drag to zoom; Shift+drag to pan; Scroll to zoom.
+              </div>
+            </div>
+            <div className="net-profiler-chart-controls">
+              <select
+                aria-label="Network profiler time window"
+                value={netProfilerWindowMs}
+                onChange={(event) => setNetProfilerWindowMs(Number(event.target.value))}
+                disabled={busy}
+              >
+                <option value={15_000}>15s</option>
+                <option value={30_000}>30s</option>
+                <option value={60_000}>1m</option>
+                <option value={120_000}>2m</option>
+                <option value={300_000}>5m</option>
+                <option value={0}>All</option>
+              </select>
+              {focusUid != null && (
+                <button
+                  className="ghost"
+                  onClick={() =>
+                    setNetProfilerFocusUidBySerial((prev) => ({
+                      ...prev,
+                      [serial]: null,
+                    }))
+                  }
+                  disabled={busy}
+                >
+                  Clear focus
+                </button>
+              )}
+              {focusUid != null && (
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    if (pinnedSet.has(focusUid)) {
+                      const nextPinnedUids = pinnedUids.filter((uid) => uid !== focusUid);
+                      applyPinnedUids(nextPinnedUids, "Unpinned focus app.");
+                      return;
+                    }
+
+                    if (pinnedUids.length >= MAX_PINNED_UIDS) {
+                      pushToast(`You can pin up to ${MAX_PINNED_UIDS} apps.`, "info");
+                      return;
+                    }
+
+                    applyPinnedUids([...pinnedUids, focusUid], "Pinned focus app.");
+                  }}
+                  disabled={busy}
+                >
+                  {pinnedSet.has(focusUid) ? "Unpin focus" : "Pin focus"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {pinnedUids.length > 0 && (
+            <div className="net-profiler-pins" aria-label="Pinned apps">
+              <span className="muted net-profiler-pins-caption">
+                Pinned (Total/s)
+              </span>
+                  {pinnedUids.map((uid, index) => {
+                    const label = pinnedLabels[uid] ?? `UID ${uid}`;
+                    return (
+                      <div key={uid} className="net-profiler-pin-chip">
+                        <button
+                          className="net-profiler-pin-main"
+                          onClick={() =>
+                            setNetProfilerFocusUidBySerial((prev) => ({
+                              ...prev,
+                              [serial]: uid,
+                            }))
+                          }
+                          disabled={busy}
+                          title={`Focus ${label}`}
+                        >
+                      <span className={`net-profiler-color-swatch pin-${index}`} aria-hidden="true" />
+                      <span className="net-profiler-pin-label">{label}</span>
+                    </button>
+                    <button
+                      className="net-profiler-pin-remove"
+                      onClick={() => {
+                        const nextPinnedUids = pinnedUids.filter((pinned) => pinned !== uid);
+                        applyPinnedUids(nextPinnedUids, `Unpinned ${label}.`);
+                      }}
+                      disabled={busy}
+                      aria-label={`Unpin ${label}`}
+                      title={`Unpin ${label}`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <NetProfilerLineChart
+            samples={netState.samples}
+            focusUid={focusUid}
+            windowMs={netProfilerWindowMs > 0 ? netProfilerWindowMs : null}
+            pinnedUids={pinnedUids}
+            pinnedLabels={pinnedLabels}
+          />
+
+          {focusUid != null && focusedRow == null && netState.running && (
+            <div className="net-profiler-chart-note muted">
+              Focused app is not in the current Top {netProfilerTopN}. Try increasing Top N or pin the focus.
+            </div>
+          )}
+        </div>
+
+        {netState.traceId && (
+          <div className="inline-alert info">
+            <strong>Trace</strong>
+            <span className="muted">{netState.traceId}</span>
+          </div>
+        )}
+
+        {netState.lastError && (
+          <div className="inline-alert error">
+            <strong>Profiler error</strong>
+            <span className="muted">{netState.lastError}</span>
+          </div>
+        )}
+
+        {netRowsFiltered.length ? (
+          <div className="net-profiler-table" role="table" aria-label="Per-app network usage">
+            <div className="net-profiler-row net-profiler-head" role="row">
+              <div className="net-profiler-cell net-profiler-app" role="columnheader">
+                App
+              </div>
+              <div className="net-profiler-cell net-profiler-trend" role="columnheader">
+                Trend
+              </div>
+              <div className="net-profiler-cell net-profiler-number" role="columnheader">
+                Rx/s
+              </div>
+              <div className="net-profiler-cell net-profiler-number" role="columnheader">
+                Tx/s
+              </div>
+              <div className="net-profiler-cell net-profiler-number" role="columnheader">
+                Total/s
+              </div>
+            </div>
+            {netRowsFiltered.map((row) => {
+              const appLabel =
+                row.packages && row.packages.length ? row.packages.join(", ") : `UID ${row.uid}`;
+              const total =
+                row.rx_bps == null && row.tx_bps == null ? null : (row.rx_bps ?? 0) + (row.tx_bps ?? 0);
+              const isFocused = focusUid === row.uid;
+              const isPinned = pinnedSet.has(row.uid);
+              return (
+                <div
+                  key={`${row.uid}-${appLabel}`}
+                  className={`net-profiler-row ${isFocused ? "is-focused" : ""} ${isPinned ? "is-pinned" : ""}`}
+                  role="row"
+                  tabIndex={0}
+                  onClick={() => {
+                    setNetProfilerFocusUidBySerial((prev) => ({
+                      ...prev,
+                      [serial]: prev[serial] === row.uid ? null : row.uid,
+                    }));
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setNetProfilerFocusUidBySerial((prev) => ({
+                        ...prev,
+                        [serial]: prev[serial] === row.uid ? null : row.uid,
+                      }));
+                    }
+                  }}
+                  aria-label={`Focus ${appLabel}`}
+                >
+                  <div className="net-profiler-cell net-profiler-app" role="cell">
+                    <div className="net-profiler-app-title">{appLabel}</div>
+                    <div className="muted net-profiler-app-sub">
+                      Rx {formatBytes(row.rx_bytes)} • Tx {formatBytes(row.tx_bytes)}
+                      {isPinned ? " • Pinned" : ""}
+                    </div>
+                  </div>
+                  <div className="net-profiler-cell net-profiler-trend" role="cell">
+                    {renderNetTrendSparkline(
+                      netState.samples.map((sample) => {
+                        const sampleRow = sample.rows.find((candidate) => candidate.uid === row.uid) ?? null;
+                        const totalSample =
+                          sampleRow && (sampleRow.rx_bps != null || sampleRow.tx_bps != null)
+                            ? (sampleRow.rx_bps ?? 0) + (sampleRow.tx_bps ?? 0)
+                            : 0;
+                        return totalSample;
+                      }),
+                    )}
+                  </div>
+                  <div className="net-profiler-cell net-profiler-number" role="cell">
+                    {formatBps(row.rx_bps ?? null)}
+                  </div>
+                  <div className="net-profiler-cell net-profiler-number" role="cell">
+                    {formatBps(row.tx_bps ?? null)}
+                  </div>
+                  <div className="net-profiler-cell net-profiler-number" role="cell">
+                    {formatBps(total)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="net-profiler-empty">
+            <p className="muted">
+              {netState.running ? "Waiting for data…" : "Start the network profiler to see per-app throughput."}
+            </p>
+          </div>
+        )}
+      </section>
+    );
+  };
+
   const PerformanceView = () => {
     if (!activeSerial) {
       return (
@@ -6691,6 +8577,54 @@ function App() {
             </div>
           </div>
         </section>
+
+        <NetworkBreakdownPanel />
+      </div>
+    );
+  };
+
+  const NetworkView = () => {
+    if (!activeSerial) {
+      return (
+        <div className="page-section">
+          <div className="page-header">
+            <div>
+              <h1>Network</h1>
+              <p className="muted">Per-app network throughput snapshots.</p>
+            </div>
+          </div>
+          <section className="panel empty-state">
+            <div>
+              <h2>Select a device</h2>
+              <p className="muted">Choose a single online device to start profiling.</p>
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+                Go to Device Manager
+              </button>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    return (
+      <div className="page-section">
+        <div className="page-header">
+          <div>
+            <h1>Network</h1>
+            <p className="muted">Per-app network throughput snapshots.</p>
+          </div>
+        </div>
+
+        {singleSelectionWarning && (
+          <div className="inline-alert info">
+            <strong>Single device required</strong>
+            <span>Keep only one device selected (Device Context: Single) to start or stop profiling.</span>
+          </div>
+        )}
+
+        <NetworkBreakdownPanel />
       </div>
     );
   };
@@ -6714,6 +8648,7 @@ function App() {
           <div className="nav-group">
             <span className="nav-title">Debug</span>
             <NavLink to="/logcat">Logcat</NavLink>
+            <NavLink to="/network">Network</NavLink>
             <NavLink to="/ui-inspector">UI Inspector</NavLink>
             <NavLink to="/bugreport">Bugreport</NavLink>
             <NavLink to="/bugreport-logviewer">Bugreport Logs</NavLink>
@@ -6999,16 +8934,28 @@ function App() {
               Live Mirror
             </button>
             <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working..." : "Idle"}</span>
+            <button
+              type="button"
+              className={`ghost update-indicator ${updateAvailable ? "visible" : "hidden"}`}
+              onClick={() => setUpdateModalOpen(true)}
+              disabled={!updateAvailable || updateStatus === "installing"}
+              aria-hidden={!updateAvailable}
+              tabIndex={updateAvailable ? 0 : -1}
+              title={updateAvailable ? `Update to ${updateAvailable.version}` : ""}
+            >
+              Update
+            </button>
             <span className="app-version" title={`App version ${appVersionLabel}`}>
               {appVersionLabel}
             </span>
           </div>
         </header>
 
-        <main className={isBugreportLogViewer ? "page page-fixed" : "page"}>
+        <main className="page">
           <Routes>
             <Route path="/" element={<DashboardView />} />
             <Route path="/performance" element={<PerformanceView />} />
+            <Route path="/network" element={<NetworkView />} />
             <Route
               path="/tasks"
               element={
@@ -7933,10 +9880,64 @@ function App() {
                     <section className="panel">
                       <div className="panel-header">
                         <h2>Latest Results</h2>
-                        <span>{apkInstallSummary.length ? "Completed" : "Idle"}</span>
+                        <span>
+                          {latestApkInstallTask
+                            ? latestApkInstallTask.status === "running"
+                              ? "Running"
+                              : "Completed"
+                            : apkInstallSummary.length
+                              ? "Completed"
+                              : "Idle"}
+                        </span>
                       </div>
                       <div className="output-block">
-                        {apkInstallSummary.length === 0 ? (
+                        {latestApkInstallTask ? (
+                          (() => {
+                            const summary = summarizeTask(latestApkInstallTask);
+                            return (
+                              <>
+                                <div className="task-summary">
+                                  <span className="badge">{summary.serials.length} devices</span>
+                                  {summary.counts.running > 0 && (
+                                    <span className="badge">{summary.counts.running} running</span>
+                                  )}
+                                  {summary.counts.success > 0 && (
+                                    <span className="badge">{summary.counts.success} success</span>
+                                  )}
+                                  {summary.counts.error > 0 && (
+                                    <span className="badge">{summary.counts.error} error</span>
+                                  )}
+                                  {summary.counts.cancelled > 0 && (
+                                    <span className="badge">{summary.counts.cancelled} cancelled</span>
+                                  )}
+                                </div>
+                                <div className="task-devices">
+                                  {summary.serials.map((serial) => {
+                                    const entry = latestApkInstallTask.devices[serial];
+                                    const entryTone =
+                                      entry.status === "running"
+                                        ? "busy"
+                                        : entry.status === "success"
+                                          ? "ok"
+                                          : entry.status === "cancelled"
+                                            ? "warn"
+                                            : "error";
+                                    return (
+                                      <div key={serial} className="task-device-row">
+                                        <div className="task-device-main">
+                                          <strong>{serial}</strong>
+                                          <span className={`status-pill ${entryTone}`}>{entry.status}</span>
+                                          {entry.message && <span className="muted">{entry.message}</span>}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                {apkInstallSummary.length > 0 && <pre>{apkInstallSummary.join("\n")}</pre>}
+                              </>
+                            );
+                          })()
+                        ) : apkInstallSummary.length === 0 ? (
                           <p className="muted">No installs yet.</p>
                         ) : (
                           <pre>{apkInstallSummary.join("\n")}</pre>
@@ -8531,9 +10532,7 @@ function App() {
                               Export
                             </button>
                           </div>
-                          <button className="ghost" onClick={toggleLogcatAdvanced}>
-                            {logcatAdvancedOpen ? "Hide Advanced" : "Advanced"}
-                          </button>
+                          <AdvancedToggleButton open={logcatAdvancedOpen} onClick={toggleLogcatAdvanced} />
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -8576,15 +10575,25 @@ function App() {
                             />
                           </div>
                         </div>
-                      </div>
-                    </div>
+	                      </div>
+	                    </div>
+                      <LogLiveFilterBar
+                        kind={logcatTextKind}
+                        onKindChange={setLogcatTextKind}
+                        value={logcatLiveFilter}
+                        onValueChange={setLogcatLiveFilter}
+                        onAdd={addLogcatLiveFilter}
+                        disabled={busy}
+                        filtersCount={sharedLogTextChips.length}
+                      />
                     {logcatAdvancedOpen && (
-                      <div className="logcat-advanced">
-                        <div className="panel-sub">
-                          <h3>Levels</h3>
-                          <div className="toggle-group">
-                            {LOG_LEVELS.map((level) => (
-                              <label key={level} className="toggle">
+                      <InlineAdvancedPanel title="Advanced" onClose={() => setLogcatAdvancedOpen(false)}>
+                        <div className="logcat-advanced-options">
+                          <div className="panel-sub">
+                            <h3>Levels</h3>
+                            <div className="toggle-group">
+                              {LOG_LEVELS.map((level) => (
+                                <label key={level} className="toggle">
                                 <input
                                   type="checkbox"
                                   checked={logLevels[level]}
@@ -8627,165 +10636,32 @@ function App() {
                               />
                               Matches only
                             </label>
+                            </div>
                           </div>
                         </div>
-                      </div>
+
+                        <SharedRegexFiltersAndPresetsPanel
+                          chips={sharedLogTextChips}
+                          expanded={logcatFiltersExpanded}
+                          onToggleExpanded={() => setLogcatFiltersExpanded((prev) => !prev)}
+                          onRemoveChip={(chipId) =>
+                            setSharedLogTextChips((prev) => removeLogTextChip(prev, chipId))
+                          }
+                          onClearChips={clearSharedLogFilters}
+                          disabled={busy}
+                          appliedTitle="Applied in real time."
+                          presets={logcatPresets}
+                          presetSelected={logcatPresetSelected}
+                          onPresetSelectedChange={setLogcatPresetSelected}
+                          presetName={logcatPresetName}
+                          onPresetNameChange={setLogcatPresetName}
+                          hasSelectedPreset={Boolean(selectedLogcatPreset)}
+                          onApplyPreset={applyLogcatPreset}
+                          onDeletePreset={deleteLogcatPreset}
+                          onSavePreset={saveLogcatPreset}
+                        />
+                      </InlineAdvancedPanel>
                     )}
-                    <div className="logcat-filter-grid">
-                      <div className="panel-sub logcat-filter-bar">
-                        <div className="logcat-filter-combined">
-                          <div className="logcat-filter-split">
-                            <div className="logcat-filter-section">
-                              <h3 title="Use regex to refine the stream. Shared with Bugreport Log Viewer.">
-                                Live Filter
-                              </h3>
-                              <div className="form-row">
-                                <label>Pattern</label>
-                                <select
-                                  aria-label="Filter mode"
-                                  value={logcatTextKind}
-                                  onChange={(event) => setLogcatTextKind(event.target.value as LogTextChipKind)}
-                                  disabled={busy}
-                                  title="Prefix with - or ! to exclude, + to include."
-                                >
-                                  <option value="include">Include</option>
-                                  <option value="exclude">Exclude</option>
-                                </select>
-                                <input
-                                  value={logcatLiveFilter}
-                                  onChange={(event) => setLogcatLiveFilter(event.target.value)}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter") {
-                                      event.preventDefault();
-                                      addLogcatLiveFilter();
-                                    }
-                                  }}
-                                  placeholder="e.g. ActivityManager|AndroidRuntime or -DEBUG"
-                                  title="Regex patterns are case-insensitive."
-                                />
-                                <button
-                                  type="button"
-                                  onClick={addLogcatLiveFilter}
-                                  disabled={busy || !logcatLiveFilter.trim()}
-                                >
-                                  Add
-                                </button>
-                              </div>
-                            </div>
-                            <div className="logcat-filter-section">
-                              <div className="logcat-filter-header">
-                                <h3 title="Applied in real time.">Active Filters</h3>
-                                <div className="logcat-filter-header-actions">
-                                  <span className="muted">
-                                    {sharedLogTextChips.length
-                                      ? `${sharedLogTextChips.length} filters`
-                                      : "No filters"}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    className="ghost"
-                                    onClick={() => setLogcatFiltersExpanded((prev) => !prev)}
-                                  >
-                                    {logcatFiltersExpanded ? "Hide" : "Expand"}
-                                  </button>
-                                </div>
-                              </div>
-                              {logcatFiltersExpanded && (
-                                <>
-                                  {sharedLogTextChips.length === 0 ? (
-                                    <p className="muted">No active filters</p>
-                                  ) : (
-                                    <div className="bugreport-log-chip-list" role="list">
-                                      {sharedLogTextChips.map((chip) => (
-                                        <span
-                                          key={chip.id}
-                                          className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
-                                          role="listitem"
-                                        >
-                                          <span className="bugreport-log-chip-label" title={chip.value}>
-                                            {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
-                                          </span>
-                                          <button
-                                            className="bugreport-log-chip-remove"
-                                            aria-label={`Remove ${chip.kind === "exclude" ? "NOT " : ""}${chip.value}`}
-                                            onClick={() =>
-                                              setSharedLogTextChips((prev) => removeLogTextChip(prev, chip.id))
-                                            }
-                                            disabled={busy}
-                                          >
-                                            ×
-                                          </button>
-                                        </span>
-                                      ))}
-                                    </div>
-                                  )}
-                                  <div className="button-row compact">
-                                    <button
-                                      type="button"
-                                      className="ghost"
-                                      onClick={clearSharedLogFilters}
-                                      disabled={busy || sharedLogTextChips.length === 0}
-                                    >
-                                      Clear
-                                    </button>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="logcat-presets">
-                          <div className="logcat-preset-row single">
-                            <label>Preset</label>
-                            <select
-                              value={logcatPresetSelected}
-                              onChange={(event) => setLogcatPresetSelected(event.target.value)}
-                              disabled={busy}
-                            >
-                              <option value="">Select preset</option>
-                              {logcatPresets.map((preset) => (
-                                <option key={preset.name} value={preset.name}>
-                                  {preset.name}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (logcatPresetSelected) {
-                                  applyLogcatPreset(logcatPresetSelected);
-                                }
-                              }}
-                              disabled={busy || !selectedLogcatPreset}
-                            >
-                              Apply
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost"
-                              onClick={() => {
-                                if (logcatPresetSelected) {
-                                  deleteLogcatPreset(logcatPresetSelected);
-                                }
-                              }}
-                              disabled={busy || !selectedLogcatPreset}
-                            >
-                              Delete
-                            </button>
-                            <label>New</label>
-                            <input
-                              value={logcatPresetName}
-                              onChange={(event) => setLogcatPresetName(event.target.value)}
-                              placeholder="e.g. Crash Only"
-                              disabled={busy}
-                            />
-                            <button type="button" onClick={saveLogcatPreset} disabled={busy}>
-                              Save
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
                     {logcatLastExport && (
                       <div className="inline-alert info">
                         <strong>Exported</strong>
@@ -9649,41 +11525,56 @@ function App() {
                         </span>
                       </div>
                       <div className="button-row compact">
-                        <button
-                          className="ghost"
-                          onClick={() => {
-                            if (bugreportLogSummary) {
-                              void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
-                            }
-                          }}
-                          disabled={!bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning}
-                        >
-                          Refresh
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (bugreportLogSummary) {
-                              void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
-                            }
-                          }}
-                          disabled={
-                            !bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning || !bugreportLogHasMore
-                          }
-                        >
-                          Load more
-                        </button>
-                        {bugreportLogLoadAllRunning ? (
-                          <button className="ghost" onClick={handleBugreportLogStopLoadAll}>
-                            Stop
-                          </button>
+                        {bugreportLogContextAnchorId != null ? (
+                          <>
+                            <span className="badge">Context view</span>
+                            <button
+                              className="ghost"
+                              onClick={handleBugreportLogBackToList}
+                              disabled={bugreportLogBusy}
+                            >
+                              Back to list
+                            </button>
+                          </>
                         ) : (
-                          <button
-                            className="ghost"
-                            onClick={() => void handleBugreportLogLoadAll()}
-                            disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
-                          >
-                            Load all
-                          </button>
+                          <>
+                            <button
+                              className="ghost"
+                              onClick={() => {
+                                if (bugreportLogSummary) {
+                                  void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
+                                }
+                              }}
+                              disabled={!bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning}
+                            >
+                              Refresh
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (bugreportLogSummary) {
+                                  void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+                                }
+                              }}
+                              disabled={
+                                !bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning || !bugreportLogHasMore
+                              }
+                            >
+                              Load more
+                            </button>
+                            {bugreportLogLoadAllRunning ? (
+                              <button className="ghost" onClick={handleBugreportLogStopLoadAll}>
+                                Stop
+                              </button>
+                            ) : (
+                              <button
+                                className="ghost"
+                                onClick={() => void handleBugreportLogLoadAll()}
+                                disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
+                              >
+                                Load all
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -9749,263 +11640,417 @@ function App() {
                     )}
 
                     <div className="bugreport-log-toolbar">
-                      <div className="logcat-filter-grid bugreport-log-filter-grid">
-                        <div className="panel-sub logcat-filter-bar">
-                          <div className="logcat-filter-combined">
-                            <div className="logcat-filter-split">
-                              <div className="logcat-filter-section">
-                                <h3 title="Use regex to refine the log output. Shared with Logcat Stream.">
-                                  Live Filter
-                                </h3>
-                                <div className="form-row">
-                                  <label>Pattern</label>
-                                  <select
-                                    aria-label="Filter mode"
-                                    value={bugreportLogFilterKind}
-                                    onChange={(event) =>
-                                      setBugreportLogFilterKind(event.target.value as LogTextChipKind)
+                      <div className="panel-sub bugreport-log-topbar">
+                        <div className="form-row">
+                          <label>Buffer</label>
+                          <select
+                            value={bugreportLogBuffer}
+                            onChange={(event) => {
+                              setBugreportLogBuffer(event.target.value);
+                              setBugreportLogLastSearchTerm("");
+                              setBugreportLogMatches([]);
+                              setBugreportLogMatchesTruncated(false);
+                              setBugreportLogMatchIndex(-1);
+                              setBugreportLogMatchesOpen(false);
+                            }}
+                            disabled={!bugreportLogSummary || bugreportLogBusy}
+                          >
+                            <option value="">All</option>
+                            {(() => {
+                              const summary = bugreportLogSummary;
+                              if (!summary) {
+                                return null;
+                              }
+                              const order = ["main", "system", "crash", "events", "radio"];
+                              const seen = new Set(order);
+                              const extra = Object.keys(summary.buffers ?? {})
+                                .filter((key) => !seen.has(key))
+                                .sort((a, b) => a.localeCompare(b));
+                              return (
+                                <>
+                                  {order.map((key) => {
+                                    const count = summary.buffers?.[key] ?? 0;
+                                    if (!count) {
+                                      return null;
                                     }
-                                    disabled={bugreportLogBusy}
-                                    title="Prefix with - or ! to exclude, + to include."
-                                  >
-                                    <option value="include">Include</option>
-                                    <option value="exclude">Exclude</option>
-                                  </select>
-                                  <input
-                                    value={bugreportLogLiveFilter}
-                                    onChange={(event) => setBugreportLogLiveFilter(event.target.value)}
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Enter") {
-                                        event.preventDefault();
-                                        addBugreportLogLiveFilter();
-                                      }
-                                    }}
-                                    placeholder="e.g. ActivityManager|AndroidRuntime or -DEBUG"
-                                    title="Regex patterns are case-insensitive."
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={addBugreportLogLiveFilter}
-                                    disabled={bugreportLogBusy || !bugreportLogLiveFilter.trim()}
-                                  >
-                                    Add
-                                  </button>
-                                </div>
-                              </div>
-                              <div className="logcat-filter-section">
-                                <div className="logcat-filter-header">
-                                  <h3 title="Applied to bugreport queries.">Active Filters</h3>
-                                  <div className="logcat-filter-header-actions">
-                                    <span className="muted">
-                                      {sharedLogTextChips.length
-                                        ? `${sharedLogTextChips.length} filters`
-                                        : "No filters"}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      className="ghost"
-                                      onClick={() => setBugreportLogFiltersExpanded((prev) => !prev)}
-                                    >
-                                      {bugreportLogFiltersExpanded ? "Hide" : "Expand"}
-                                    </button>
-                                  </div>
-                                </div>
-                                {bugreportLogFiltersExpanded && (
-                                  <>
-                                    {sharedLogTextChips.length === 0 ? (
-                                      <p className="muted">No active filters</p>
-                                    ) : (
-                                      <div className="bugreport-log-chip-list" role="list">
-                                        {sharedLogTextChips.map((chip) => (
-                                          <span
-                                            key={chip.id}
-                                            className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
-                                            role="listitem"
-                                          >
-                                            <span className="bugreport-log-chip-label" title={chip.value}>
-                                              {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
-                                            </span>
-                                            <button
-                                              className="bugreport-log-chip-remove"
-                                              aria-label={`Remove ${chip.kind === "exclude" ? "NOT " : ""}${chip.value}`}
-                                              onClick={() =>
-                                                setSharedLogTextChips((prev) => removeLogTextChip(prev, chip.id))
-                                              }
-                                              disabled={bugreportLogBusy}
-                                            >
-                                              ×
-                                            </button>
-                                          </span>
-                                        ))}
-                                      </div>
-                                    )}
-                                    <div className="button-row compact">
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={clearSharedLogFilters}
-                                        disabled={bugreportLogBusy || sharedLogTextChips.length === 0}
-                                      >
-                                        Clear
-                                      </button>
-                                    </div>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="logcat-presets">
-                            <div className="logcat-preset-row single">
-                              <label>Preset</label>
-                              <select
-                                value={logcatPresetSelected}
-                                onChange={(event) => setLogcatPresetSelected(event.target.value)}
-                                disabled={bugreportLogBusy}
-                              >
-                                <option value="">Select preset</option>
-                                {logcatPresets.map((preset) => (
-                                  <option key={preset.name} value={preset.name}>
-                                    {preset.name}
-                                  </option>
-                                ))}
-                              </select>
+                                    return (
+                                      <option key={key} value={key}>
+                                        {key} ({count.toLocaleString()})
+                                      </option>
+                                    );
+                                  })}
+                                  {extra.map((key) => (
+                                    <option key={key} value={key}>
+                                      {key} ({(summary.buffers?.[key] ?? 0).toLocaleString()})
+                                    </option>
+                                  ))}
+                                </>
+                              );
+                            })()}
+                          </select>
+                          <label>Search (FTS)</label>
+                          <input
+                            value={bugreportLogSearchTerm}
+                            onChange={(event) => {
+                              const next = event.target.value;
+                              setBugreportLogSearchTerm(next);
+                              if (bugreportLogLastSearchTerm && bugreportLogLastSearchTerm !== next.trim()) {
+                                setBugreportLogLastSearchTerm("");
+                                setBugreportLogMatches([]);
+                                setBugreportLogMatchesTruncated(false);
+                                setBugreportLogMatchIndex(-1);
+                                setBugreportLogMatchesOpen(false);
+                              }
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void handleBugreportLogSearch();
+                              }
+                            }}
+                            placeholder="e.g. AndroidRuntime FATAL EXCEPTION"
+                            disabled={!bugreportLogSummary || bugreportLogBusy}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleBugreportLogSearch()}
+                            disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogSearchTerm.trim()}
+                          >
+                            Search
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              setBugreportLogSearchTerm("");
+                              setBugreportLogLastSearchTerm("");
+                              setBugreportLogMatches([]);
+                              setBugreportLogMatchesTruncated(false);
+                              setBugreportLogMatchIndex(-1);
+                              setBugreportLogMatchesOpen(false);
+                            }}
+                            disabled={bugreportLogBusy || (!bugreportLogSearchTerm.trim() && bugreportLogMatches.length === 0)}
+                          >
+                            Clear
+                          </button>
+                          <AdvancedToggleButton
+                            open={bugreportLogAdvancedOpen}
+                            onClick={() => setBugreportLogAdvancedOpen((prev) => !prev)}
+                            className="bugreport-log-advanced-toggle"
+                          />
+                        </div>
+                      </div>
+
+	                      {(() => {
+	                        const chips: Array<{ key: string; label: string; tone?: "exclude" | "info" }> = [];
+                          const buffer = bugreportLogBuffer.trim();
+                          if (buffer) {
+                            chips.push({ key: "buffer", label: `Buffer: ${buffer}` });
+                          }
+
+                          const enabledLevels = LOG_LEVELS.filter((level) => logLevels[level]);
+                          if (enabledLevels.length !== LOG_LEVELS.length) {
+                            chips.push({ key: "levels", label: `Levels: ${enabledLevels.join("")}` });
+                          }
+
+                          const tag = bugreportLogTag.trim();
+                          if (tag) {
+                            chips.push({ key: "tag", label: `Tag: ${tag}` });
+                          }
+
+                          const pid = bugreportLogPid.trim();
+                          if (pid) {
+                            chips.push({ key: "pid", label: `PID: ${pid}` });
+                          }
+
+                          const start = bugreportLogStart.trim();
+                          if (start) {
+                            chips.push({ key: "start", label: `Start: ${start}` });
+                          }
+
+                          const end = bugreportLogEnd.trim();
+                          if (end) {
+                            chips.push({ key: "end", label: `End: ${end}` });
+                          }
+
+                          const live = bugreportLogLiveFilter.trim();
+                          if (live) {
+                            chips.push({
+                              key: "live",
+                              label: `Live ${bugreportLogFilterKind === "exclude" ? "NOT " : ""}${live}`,
+                              tone: bugreportLogFilterKind === "exclude" ? "exclude" : "info",
+                            });
+                          }
+
+                          const maxRegexPreview = 3;
+                          const regexPreview = sharedLogTextChips.slice(0, maxRegexPreview);
+                          regexPreview.forEach((chip, index) => {
+                            chips.push({
+                              key: `re-${chip.id}-${index}`,
+                              label: chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value,
+                              tone: chip.kind === "exclude" ? "exclude" : undefined,
+                            });
+                          });
+	                          if (sharedLogTextChips.length > maxRegexPreview) {
+	                            chips.push({
+	                              key: "re-more",
+	                              label: `Regex +${sharedLogTextChips.length - maxRegexPreview}`,
+	                            });
+	                          }
+
+	                        if (chips.length === 0) {
+	                          return null;
+	                        }
+
+	                        return (
+	                          <div className="panel-sub bugreport-log-summarybar">
+	                            <div className="bugreport-log-summarybar-row">
+	                              <div className="bugreport-log-summarybar-main">
+	                                <div className="bugreport-log-summary-chip-list" role="list">
+	                                  {chips.map((chip) => (
+	                                    <span
+	                                      key={chip.key}
+	                                      className={`bugreport-log-summary-chip${chip.tone ? ` ${chip.tone}` : ""}`}
+	                                      title={chip.label}
+	                                      role="listitem"
+	                                    >
+	                                      {chip.label}
+	                                    </span>
+	                                  ))}
+	                                </div>
+	                              </div>
+	                            </div>
+	                          </div>
+	                        );
+	                      })()}
+
+                      <LogLiveFilterBar
+                        kind={bugreportLogFilterKind}
+                        onKindChange={setBugreportLogFilterKind}
+                        value={bugreportLogLiveFilter}
+                        onValueChange={setBugreportLogLiveFilter}
+                        onAdd={addBugreportLogLiveFilter}
+                        disabled={bugreportLogBusy}
+                        filtersCount={sharedLogTextChips.length}
+                      />
+
+	                      {bugreportLogMatches.length > 0 ? (
+	                        <div className="panel-sub bugreport-log-matchesbar">
+	                          <div className="bugreport-log-matchesbar-row">
+                            <span className="muted">
+                              Matches{" "}
+                              {bugreportLogMatchesTruncated
+                                ? `${bugreportLogMatches.length.toLocaleString()}+`
+                                : bugreportLogMatches.length.toLocaleString()}
+                              {bugreportLogMatchIndex >= 0 && bugreportLogMatches.length
+                                ? ` · ${Math.min(bugreportLogMatchIndex + 1, bugreportLogMatches.length)}/${bugreportLogMatches.length}`
+                                : ""}
+                            </span>
+                            <div className="button-row compact bugreport-log-matchesbar-actions">
                               <button
                                 type="button"
-                                onClick={() => {
-                                  if (logcatPresetSelected) {
-                                    applyLogcatPreset(logcatPresetSelected);
-                                  }
-                                }}
-                                disabled={bugreportLogBusy || !selectedLogcatPreset}
+                                className="ghost"
+                                onClick={() => moveBugreportLogMatch(-1)}
+                                disabled={bugreportLogBusy || bugreportLogMatches.length === 0}
                               >
-                                Apply
+                                Prev
                               </button>
                               <button
                                 type="button"
                                 className="ghost"
-                                onClick={() => {
-                                  if (logcatPresetSelected) {
-                                    deleteLogcatPreset(logcatPresetSelected);
-                                  }
-                                }}
-                                disabled={bugreportLogBusy || !selectedLogcatPreset}
+                                onClick={() => moveBugreportLogMatch(1)}
+                                disabled={bugreportLogBusy || bugreportLogMatches.length === 0}
                               >
-                                Delete
+                                Next
                               </button>
-                              <label>New</label>
-                              <input
-                                value={logcatPresetName}
-                                onChange={(event) => setLogcatPresetName(event.target.value)}
-                                placeholder="e.g. Crash Only"
-                                disabled={bugreportLogBusy}
-                              />
                               <button
                                 type="button"
-                                onClick={saveLogcatPreset}
+                                className="ghost"
+                                onClick={() => setBugreportLogMatchesOpen((prev) => !prev)}
                                 disabled={bugreportLogBusy}
                               >
-                                Save
+                                {bugreportLogMatchesOpen ? "Hide list" : "Show list"}
                               </button>
                             </div>
                           </div>
                         </div>
-                      </div>
+                      ) : bugreportLogLastSearchTerm &&
+                        bugreportLogLastSearchTerm === bugreportLogSearchTerm.trim() &&
+                        bugreportLogSummary &&
+                        !bugreportLogBusy &&
+                        !bugreportLogError ? (
+                        <p className="muted">No matches.</p>
+                      ) : null}
 
-                      <div className="bugreport-log-toolbar-row">
-                        <div className="bugreport-log-filter-field">
-                          <label htmlFor="bugreport-log-tag">Tag</label>
-                          <input
-                            id="bugreport-log-tag"
-                            value={bugreportLogTag}
-                            onChange={(event) => setBugreportLogTag(event.target.value)}
-                            placeholder="Tag"
-                          />
-                        </div>
-                        <div className="bugreport-log-filter-field">
-                          <label htmlFor="bugreport-log-pid">PID</label>
-                          <input
-                            id="bugreport-log-pid"
-                            value={bugreportLogPid}
-                            onChange={(event) => setBugreportLogPid(event.target.value)}
-                            placeholder="PID"
-                          />
-                        </div>
-                        <div className="bugreport-log-filter-field">
-                          <label htmlFor="bugreport-log-start">Start</label>
-                          <input
-                            id="bugreport-log-start"
-                            value={bugreportLogStart}
-                            onChange={(event) => setBugreportLogStart(event.target.value)}
-                            placeholder="MM-DD HH:MM:SS.mmm"
-                          />
-                        </div>
-                        <div className="bugreport-log-filter-field">
-                          <label htmlFor="bugreport-log-end">End</label>
-                          <input
-                            id="bugreport-log-end"
-                            value={bugreportLogEnd}
-                            onChange={(event) => setBugreportLogEnd(event.target.value)}
-                            placeholder="MM-DD HH:MM:SS.mmm"
-                          />
-                        </div>
-                      </div>
+	                      {bugreportLogMatchesOpen && bugreportLogMatches.length > 0 && (
+	                        <div className="output-block bugreport-log-matches">
+	                          <div className="bugreport-log-match-list" role="list">
+	                            {bugreportLogMatches.map((match, index) => (
+                              <button
+                                key={`${match.id}-${match.ts}`}
+                                type="button"
+                                className={`bugreport-log-match-row${index === bugreportLogMatchIndex ? " active" : ""}`}
+                                onClick={() => openBugreportLogMatch(index)}
+                                disabled={bugreportLogBusy}
+                                role="listitem"
+                              >
+                                <div className="bugreport-log-match-row-top">
+                                  <span className="muted bugreport-log-match-meta">
+                                    {match.ts} · {match.level} · {match.tag} · pid {match.pid}
+                                  </span>
+                                  <span className="badge bugreport-log-match-buffer">{match.buffer}</span>
+                                </div>
+                                <div className="bugreport-log-match-msg">{match.msg}</div>
+                              </button>
+                            ))}
+	                          </div>
+	                        </div>
+	                      )}
+	                    </div>
 
-                      <div className="bugreport-log-toolbar-actions">
-                        <div className="toggle-group">
-                          {LOG_LEVELS.map((level) => (
-                            <label key={level} className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={logLevels[level]}
-                                onChange={(event) => {
-                                  setLogLevels((prev) => ({ ...prev, [level]: event.target.checked }));
-                                }}
-                              />
-                              {level}
-                            </label>
-                          ))}
-                        </div>
-                        <button
-                          className="ghost"
-                          onClick={() => {
-                            setBugreportLogLiveFilter("");
-                            setBugreportLogFilterKind("include");
-                            setBugreportLogFiltersExpanded(false);
-                            clearSharedLogFilters();
-                            setBugreportLogTag("");
-                            setBugreportLogPid("");
-                            setBugreportLogStart("");
-                            setBugreportLogEnd("");
-                            setLogLevels(defaultLogcatLevels);
-                          }}
-                          disabled={bugreportLogBusy}
-                        >
-                          Reset Filters
-                        </button>
-                      </div>
-                    </div>
-                    {bugreportLogRows.length ? (
-                      <BugreportLogOutput
-                        rows={bugreportLogRows}
-                        highlightPattern={bugreportLogSearchPattern}
-                        canLoadMore={Boolean(bugreportLogSummary) && bugreportLogHasMore && !bugreportLogLoadAllRunning}
-                        busy={bugreportLogBusy || bugreportLogLoadAllRunning}
-                        onNearBottom={() => {
-                          if (!bugreportLogSummary) {
-                            return;
-                          }
-                          void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
-                        }}
-                      />
-                    ) : (
-                      <div className="logcat-output bugreport-log-output bugreport-log-output-empty">
-                        <p className="muted">Load a bugreport to view logcat output.</p>
-                      </div>
-                    )}
-                  </section>
-                </div>
-              }
-            />
+		                    {bugreportLogAdvancedOpen && (
+		                      <InlineAdvancedPanel title="Advanced" onClose={() => setBugreportLogAdvancedOpen(false)}>
+		                        <div className="muted bugreport-log-search-hint">
+		                          Search uses levels, buffer, tag, PID, time range, and regex filters.
+		                        </div>
+		                        <SharedRegexFiltersAndPresetsPanel
+		                          chips={sharedLogTextChips}
+		                          expanded={bugreportLogFiltersExpanded}
+		                          onToggleExpanded={() => setBugreportLogFiltersExpanded((prev) => !prev)}
+		                          onRemoveChip={(chipId) =>
+		                            setSharedLogTextChips((prev) => removeLogTextChip(prev, chipId))
+		                          }
+		                          onClearChips={clearSharedLogFilters}
+		                          disabled={bugreportLogBusy}
+		                          appliedTitle="Applied to bugreport queries."
+		                          gridClassName="bugreport-log-filter-grid"
+		                          presets={logcatPresets}
+		                          presetSelected={logcatPresetSelected}
+		                          onPresetSelectedChange={setLogcatPresetSelected}
+		                          presetName={logcatPresetName}
+		                          onPresetNameChange={setLogcatPresetName}
+		                          hasSelectedPreset={Boolean(selectedLogcatPreset)}
+		                          onApplyPreset={applyLogcatPreset}
+		                          onDeletePreset={deleteLogcatPreset}
+		                          onSavePreset={saveLogcatPreset}
+		                        >
+		                          <div className="bugreport-log-advanced-fields">
+		                            <div className="bugreport-log-advanced-controls">
+		                              <div className="bugreport-log-toolbar-row">
+		                                    <div className="bugreport-log-filter-field">
+		                                      <label htmlFor="bugreport-log-tag">Tag</label>
+		                                      <input
+		                                        id="bugreport-log-tag"
+		                                        value={bugreportLogTag}
+			                                        onChange={(event) => setBugreportLogTag(event.target.value)}
+			                                        placeholder="Tag"
+			                                      />
+			                                    </div>
+			                                    <div className="bugreport-log-filter-field">
+			                                      <label htmlFor="bugreport-log-pid">PID</label>
+			                                      <input
+			                                        id="bugreport-log-pid"
+			                                        value={bugreportLogPid}
+			                                        onChange={(event) => setBugreportLogPid(event.target.value)}
+			                                        placeholder="PID"
+			                                      />
+			                                    </div>
+			                                    <div className="bugreport-log-filter-field">
+			                                      <label htmlFor="bugreport-log-start">Start</label>
+			                                      <input
+			                                        id="bugreport-log-start"
+			                                        value={bugreportLogStart}
+			                                        onChange={(event) => setBugreportLogStart(event.target.value)}
+			                                        placeholder="MM-DD HH:MM:SS.mmm"
+			                                      />
+			                                    </div>
+			                                    <div className="bugreport-log-filter-field">
+			                                      <label htmlFor="bugreport-log-end">End</label>
+			                                      <input
+			                                        id="bugreport-log-end"
+			                                        value={bugreportLogEnd}
+			                                        onChange={(event) => setBugreportLogEnd(event.target.value)}
+			                                        placeholder="MM-DD HH:MM:SS.mmm"
+			                                      />
+			                                    </div>
+			                                  </div>
+
+			                                  <div className="bugreport-log-advanced-levels">
+			                                    <div className="toggle-group">
+			                                      {LOG_LEVELS.map((level) => (
+			                                        <label key={level} className="toggle">
+			                                          <input
+			                                            type="checkbox"
+			                                            checked={logLevels[level]}
+			                                            onChange={(event) => {
+			                                              setLogLevels((prev) => ({
+			                                                ...prev,
+			                                                [level]: event.target.checked,
+			                                              }));
+			                                            }}
+			                                          />
+			                                          {level}
+			                                        </label>
+			                                      ))}
+			                                    </div>
+			                                  </div>
+
+			                                  <div className="bugreport-log-advanced-reset">
+			                                    <button
+			                                      className="ghost"
+			                                      onClick={() => {
+			                                        setBugreportLogLiveFilter("");
+			                                        setBugreportLogFilterKind("include");
+			                                        setBugreportLogFiltersExpanded(false);
+			                                        clearSharedLogFilters();
+			                                        setBugreportLogBuffer("");
+			                                        setBugreportLogTag("");
+			                                        setBugreportLogPid("");
+			                                        setBugreportLogStart("");
+			                                        setBugreportLogEnd("");
+			                                        setLogLevels(defaultLogcatLevels);
+			                                        setBugreportLogSearchTerm("");
+			                                        setBugreportLogLastSearchTerm("");
+			                                        setBugreportLogMatches([]);
+			                                        setBugreportLogMatchesTruncated(false);
+			                                        setBugreportLogMatchIndex(-1);
+			                                        setBugreportLogMatchesOpen(false);
+			                                        setBugreportLogContextAnchorId(null);
+			                                      }}
+			                                      disabled={bugreportLogBusy}
+			                                    >
+			                                      Reset Filters
+			                                    </button>
+			                                  </div>
+		                            </div>
+		                          </div>
+		                        </SharedRegexFiltersAndPresetsPanel>
+		                      </InlineAdvancedPanel>
+		                    )}
+
+		                    {bugreportLogRows.length ? (
+		                      <BugreportLogOutput
+		                        rows={bugreportLogRows}
+		                        highlightPattern={bugreportLogSearchPattern}
+		                        canLoadMore={Boolean(bugreportLogSummary) && bugreportLogHasMore && !bugreportLogLoadAllRunning}
+		                        busy={bugreportLogBusy || bugreportLogLoadAllRunning}
+		                        activeRowId={bugreportLogContextAnchorId}
+		                        onNearBottom={() => {
+		                          if (!bugreportLogSummary) {
+		                            return;
+		                          }
+		                          void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+		                        }}
+		                      />
+		                    ) : (
+		                      <div className="logcat-output bugreport-log-output bugreport-log-output-empty">
+		                        <p className="muted">Load a bugreport to view logcat output.</p>
+		                      </div>
+		                    )}
+	                  </section>
+	                </div>
+	              }
+	            />
             <Route
               path="/bluetooth"
               element={
@@ -10132,6 +12177,248 @@ function App() {
                             Folder for generated exports (logcat, UI inspector). Leave blank to reuse Default Output.
                           </div>
 	                        </div>
+                          <div className="settings-group">
+                            <h3>Updates</h3>
+                            <div className="muted settings-hint">
+                              Check for new versions from GitHub Releases. Installing updates will restart the app.
+                            </div>
+                            <div className="stack">
+                              <div className="inline-row">
+                                <span className="muted">Current version</span>
+                                <code>{appVersionLabel}</code>
+                              </div>
+                              <div className="inline-row">
+                                <span className="muted">Last checked</span>
+                                <span>{updateLastCheckedMs ? new Date(updateLastCheckedMs).toLocaleString() : "--"}</span>
+                              </div>
+                            </div>
+
+                            {!isTauriRuntime() && (
+                              <div className="inline-alert info">
+                                Updates are available in the desktop app build.
+                              </div>
+                            )}
+
+                            <div className="button-row">
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={handleManualUpdateCheck}
+                                disabled={
+                                  !isTauriRuntime() ||
+                                  busy ||
+                                  updateStatus === "checking" ||
+                                  updateStatus === "installing"
+                                }
+                              >
+                                {updateStatus === "checking" && updateLastCheckSource === "manual"
+                                  ? "Checking..."
+                                  : "Check for updates"}
+                              </button>
+                              {updateAvailable &&
+                                updateStatus !== "installed" &&
+                                updateStatus !== "installed_needs_restart" && (
+                                <button
+                                  type="button"
+                                  onClick={() => setUpdateModalOpen(true)}
+                                  disabled={busy || updateStatus === "installing"}
+                                >
+                                  Install and restart
+                                </button>
+                              )}
+                            </div>
+
+                            {updateStatus === "update_available" && updateAvailable && (
+                              <div className="inline-alert info">
+                                <strong>Update available</strong>
+                                <span className="muted">Latest: {updateAvailable.version}</span>
+                              </div>
+                            )}
+                            {updateStatus === "installed_needs_restart" && (
+                              <div className="inline-alert info">
+                                <strong>Update installed</strong>
+                                <span className="muted">Please restart the app manually.</span>
+                              </div>
+                            )}
+                            {updateStatus === "up_to_date" && updateLastCheckSource === "manual" && (
+                              <div className="inline-alert info">You are up to date.</div>
+                            )}
+                            {updateStatus === "error" && updateError && (
+                              <div className="inline-alert error">{updateError}</div>
+                            )}
+                          </div>
+
+                          <div className="settings-group">
+                            <h3>Notifications</h3>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.notifications.enabled}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          notifications: { ...prev.notifications, enabled: event.target.checked },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Enable notifications
+                            </label>
+                            <div className="muted settings-hint">
+                              Controls desktop notifications for task completion.
+                            </div>
+
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.notifications.desktop_enabled}
+                                disabled={!config.notifications.enabled}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          notifications: {
+                                            ...prev.notifications,
+                                            desktop_enabled: event.target.checked,
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Desktop notifications
+                            </label>
+                            <div className="muted settings-hint">Show OS notifications when tasks complete.</div>
+
+                            {!isTauriRuntime() && (
+                              <div className="inline-alert info">
+                                Desktop notifications are available in the desktop app build.
+                              </div>
+                            )}
+
+                            <div className="stack">
+                              <div className="inline-row">
+                                <span className="muted">Permission</span>
+                                <code>{isTauriRuntime() ? desktopNotificationPermission : "browser"}</code>
+                              </div>
+                            </div>
+
+                            <div className="button-row">
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => void refreshDesktopNotificationsPermission()}
+                                disabled={!isTauriRuntime() || busy}
+                              >
+                                Refresh
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => void handleRequestDesktopNotificationsPermission()}
+                                disabled={!isTauriRuntime() || busy}
+                              >
+                                Request permission
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleSendTestDesktopNotification()}
+                                disabled={!isTauriRuntime() || busy}
+                              >
+                                Send test
+                              </button>
+                            </div>
+
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.notifications.desktop_only_when_unfocused}
+                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          notifications: {
+                                            ...prev.notifications,
+                                            desktop_only_when_unfocused: event.target.checked,
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Only when unfocused
+                            </label>
+                            <div className="muted settings-hint">
+                              When enabled, notifications are sent only when the app window is not focused.
+                            </div>
+
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.notifications.desktop_on_error}
+                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          notifications: { ...prev.notifications, desktop_on_error: event.target.checked },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Notify on errors
+                            </label>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.notifications.desktop_on_success}
+                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          notifications: {
+                                            ...prev.notifications,
+                                            desktop_on_success: event.target.checked,
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Notify on success
+                            </label>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.notifications.desktop_on_cancelled}
+                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          notifications: {
+                                            ...prev.notifications,
+                                            desktop_on_cancelled: event.target.checked,
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Notify on cancelled
+                            </label>
+                          </div>
 	                        <div className="settings-group">
 	                          <h3>Devices</h3>
 	                          <label className="toggle">
@@ -10943,6 +13230,86 @@ function App() {
               )}
               <button className="ghost" onClick={closeFilesModal} disabled={busy}>
                 Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {updateModalOpen && (
+        <div className="modal-backdrop" onClick={closeUpdateModal}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Update</h3>
+                <p className="muted">Download and install the latest version.</p>
+              </div>
+              <button className="ghost" onClick={closeUpdateModal} disabled={updateStatus === "installing"}>
+                Close
+              </button>
+            </div>
+
+            <div className="stack">
+              <div className="inline-row">
+                <span className="muted">Current</span>
+                <code>{appVersionLabel}</code>
+              </div>
+              <div className="inline-row">
+                <span className="muted">Latest</span>
+                <code>{updateAvailable?.version ?? "--"}</code>
+              </div>
+
+              <div className="inline-alert info">
+                <strong>Heads up</strong>
+                <span className="muted">Installing will restart the app and interrupt ongoing tasks.</span>
+              </div>
+
+              {updateStatus === "installing" && (
+                <div className="inline-alert info">
+                  <strong>Installing...</strong>
+                  <span className="muted">Downloading and applying the update.</span>
+                </div>
+              )}
+
+              {updateStatus === "installed" && (
+                <div className="inline-alert info">
+                  <strong>Update installed</strong>
+                  <span className="muted">Restarting the app.</span>
+                </div>
+              )}
+
+              {updateStatus === "installed_needs_restart" && (
+                <div className="inline-alert info">
+                  <strong>Update installed</strong>
+                  <span className="muted">Please restart the app manually.</span>
+                </div>
+              )}
+
+              {updateStatus === "error" && updateError && <div className="inline-alert error">{updateError}</div>}
+
+              {updateAvailable?.body ? (
+                <div className="stack">
+                  <div className="muted">Release notes</div>
+                  <pre className="update-notes">{updateAvailable.body.slice(0, 8000)}</pre>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="button-row">
+              <button
+                onClick={handleInstallUpdate}
+                disabled={
+                  !updateAvailable ||
+                  updateStatus === "installing" ||
+                  updateStatus === "installed" ||
+                  updateStatus === "installed_needs_restart" ||
+                  busy
+                }
+              >
+                Install and restart
+              </button>
+              <button className="ghost" onClick={closeUpdateModal} disabled={updateStatus === "installing"}>
+                Later
               </button>
             </div>
           </div>

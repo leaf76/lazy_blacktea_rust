@@ -19,8 +19,12 @@ jobs:
         include:
           - os: macos-latest
             bundles: dmg,app
+            target: universal-apple-darwin
+            meta_os: macos
           - os: ubuntu-24.04
             bundles: appimage,deb
+            target: ""
+            meta_os: linux
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -37,6 +41,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install macOS targets (universal build)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -60,19 +69,209 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Validate updater pubkey is configured
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import binascii
+          import json
+
+          cfg = json.load(open("src-tauri/tauri.conf.json", "r", encoding="utf-8"))
+          pubkey = (cfg.get("plugins", {}) or {}).get("updater", {}).get("pubkey", "") or ""
+          if pubkey.strip() == "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY":
+            raise SystemExit(
+              "Updater pubkey is still a placeholder. Update src-tauri/tauri.conf.json before enabling signed updater builds."
+            )
+          try:
+            base64.b64decode(pubkey.strip(), validate=True)
+          except (binascii.Error, ValueError):
+            raise SystemExit(
+              "Updater pubkey is not valid base64. Update src-tauri/tauri.conf.json before enabling signed updater builds."
+            )
+          PY
+
+      - name: Build Tauri bundles (signed updater)
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target }}" ]; then
+            npm run tauri build -- --config src-tauri/tauri.updater.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
+          else
+            npm run tauri build -- --config src-tauri/tauri.updater.conf.json --bundles "${{ matrix.bundles }}"
+          fi
+
       - name: Build Tauri bundles (unsigned)
-        run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY == '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target }}" ]; then
+            npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
+          else
+            npm run tauri build -- --bundles "${{ matrix.bundles }}"
+          fi
 
       - name: Zip macOS .app bundle(s)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          for app in src-tauri/target/release/bundle/macos/*.app; do
+          for app in src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app; do
             if [ -d "$app" ]; then
               echo "Zipping: $app"
               ditto -c -k --sequesterRsrc --keepParent "$app" "${app}.zip"
             fi
           done
+
+      - name: Collect updater metadata
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          META_OS="${{ matrix.meta_os }}"
+          BUNDLE_DIR="src-tauri/target/release/bundle"
+          if [ -n "${{ matrix.target }}" ]; then
+            BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          fi
+          export META_OS BUNDLE_DIR
+
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import shutil
+
+          meta_os = os.environ.get("META_OS", "").strip()
+          bundle_dir = pathlib.Path(os.environ["BUNDLE_DIR"]).resolve()
+          if not bundle_dir.exists():
+            raise SystemExit(f"Bundle dir not found: {bundle_dir}")
+
+          required_installers = {
+            "macos": ["app"],
+            "linux": ["appimage", "deb"],
+          }.get(meta_os, [])
+          if not required_installers:
+            raise SystemExit(f"Unsupported META_OS: {meta_os}")
+
+          def detect_installer(asset_name_lower: str) -> str | None:
+            if asset_name_lower.endswith(".app.tar.gz"):
+              return "app"
+            if asset_name_lower.endswith(".appimage") or asset_name_lower.endswith(".appimage.tar.gz"):
+              return "appimage"
+            if asset_name_lower.endswith(".deb"):
+              return "deb"
+            if asset_name_lower.endswith(".rpm"):
+              return "rpm"
+            return None
+
+          items_by_installer: dict[str, list[dict]] = {}
+          for sig in bundle_dir.rglob("*.sig"):
+            asset = sig.with_suffix("")
+            if not asset.exists():
+              continue
+            name = asset.name
+            low_name = name.lower()
+            low_path = str(asset).lower()
+
+            installer = detect_installer(low_name)
+            if not installer:
+              continue
+
+            items_by_installer.setdefault(installer, []).append({
+              "asset_path": str(asset),
+              "sig_path": str(sig),
+              "asset_name": name,
+              "sig_name": sig.name,
+              "signature": sig.read_text(encoding="utf-8").strip(),
+              "path_hint": low_path,
+              "installer": installer,
+            })
+
+          missing = [name for name in required_installers if name not in items_by_installer]
+          if missing:
+            raise SystemExit(f"Missing updater artifacts for installer(s): {', '.join(missing)}")
+
+          def score(item):
+            p = item["path_hint"]
+            n = item["asset_name"].lower()
+            installer = item["installer"]
+            s = 0
+            if meta_os == "macos":
+              if "/macos/" in p:
+                s += 20
+              if ".app.tar.gz" in n:
+                s += 10
+              if "universal" in n:
+                s += 5
+            elif meta_os == "linux":
+              if "/appimage/" in p:
+                s += 20
+              if "/deb/" in p:
+                s += 10
+              if ".appimage" in n:
+                s += 10
+              if installer == "appimage" and n.endswith(".tar.gz"):
+                s += 5
+              if installer == "deb" and n.endswith(".deb"):
+                s += 5
+            return s
+
+          chosen_by_installer: dict[str, dict] = {}
+          for installer, items in items_by_installer.items():
+            items.sort(key=lambda it: (-score(it), it["asset_name"]))
+            chosen_by_installer[installer] = items[0]
+
+          installers_out: dict[str, dict] = {}
+          out_dir = pathlib.Path("updater_assets")
+          out_dir.mkdir(parents=True, exist_ok=True)
+
+          for installer in required_installers:
+            chosen = chosen_by_installer[installer]
+
+            # Avoid duplicate asset uploads: Linux job uploads .deb and .AppImage separately.
+            copy_asset = True
+            asset_path_hint = chosen["path_hint"]
+            asset_name_lower = chosen["asset_name"].lower()
+            if meta_os == "linux":
+              if installer == "deb" and "/bundle/deb/" in asset_path_hint and asset_name_lower.endswith(".deb"):
+                copy_asset = False
+              if installer == "appimage" and "/bundle/appimage/" in asset_path_hint and asset_name_lower.endswith(".appimage"):
+                copy_asset = False
+
+            if copy_asset:
+              shutil.copy2(chosen["asset_path"], out_dir / chosen["asset_name"])
+            shutil.copy2(chosen["sig_path"], out_dir / chosen["sig_name"])
+
+            installers_out[installer] = {
+              "asset_name": chosen["asset_name"],
+              "sig_name": chosen["sig_name"],
+              "signature": chosen["signature"],
+            }
+
+          out = {"os": meta_os, "installers": installers_out}
+          out_path = pathlib.Path(f"updater-meta-{meta_os}.json")
+          out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+          print(f"Wrote {out_path}")
+          PY
+
+      - name: Upload updater metadata artifact
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-meta-${{ matrix.meta_os }}
+          if-no-files-found: error
+          path: updater-meta-${{ matrix.meta_os }}.json
+
+      - name: Upload updater assets to GitHub Release
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          fail_on_unmatched_files: true
+          files: |
+            updater_assets/*
 
       - name: Upload macOS assets to GitHub Release
         if: runner.os == 'macOS'
@@ -81,8 +280,8 @@ jobs:
           tag_name: ${{ github.event.release.tag_name }}
           fail_on_unmatched_files: true
           files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/*.app.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.zip
 
       - name: Upload Linux assets to GitHub Release
         if: runner.os == 'Linux'
@@ -93,3 +292,78 @@ jobs:
           files: |
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/deb/*.deb
+
+  publish-latest-json:
+    if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+    needs: build-and-upload
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download updater metadata artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: updater-meta
+
+      - name: Build latest.json
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          PUB_DATE: ${{ github.event.release.published_at }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          repo = os.environ["REPO"]
+          tag = os.environ["TAG"]
+          body = os.environ.get("RELEASE_BODY", "") or ""
+          pub_date = os.environ.get("PUB_DATE", "") or ""
+          version = tag[1:] if tag.startswith("v") else tag
+
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+
+          mac_path = pathlib.Path("updater-meta") / "updater-meta-macos" / "updater-meta-macos.json"
+          linux_path = pathlib.Path("updater-meta") / "updater-meta-linux" / "updater-meta-linux.json"
+          mac = json.loads(mac_path.read_text(encoding="utf-8"))
+          linux = json.loads(linux_path.read_text(encoding="utf-8"))
+
+          mac_app = (mac.get("installers") or {}).get("app") or {}
+          linux_appimage = (linux.get("installers") or {}).get("appimage") or {}
+          linux_deb = (linux.get("installers") or {}).get("deb") or {}
+
+          required = [
+            ("macos app", mac_app),
+            ("linux appimage", linux_appimage),
+            ("linux deb", linux_deb),
+          ]
+          missing = [name for name, item in required if not item.get("asset_name") or not item.get("signature")]
+          if missing:
+            raise SystemExit(f"Missing updater metadata: {', '.join(missing)}")
+
+          platforms = {
+            "darwin-aarch64-app": {"url": f"{base}/{mac_app['asset_name']}", "signature": mac_app["signature"]},
+            "darwin-x86_64-app": {"url": f"{base}/{mac_app['asset_name']}", "signature": mac_app["signature"]},
+            "linux-x86_64-appimage": {"url": f"{base}/{linux_appimage['asset_name']}", "signature": linux_appimage["signature"]},
+            "linux-x86_64-deb": {"url": f"{base}/{linux_deb['asset_name']}", "signature": linux_deb["signature"]},
+          }
+
+          latest = {
+            "version": version,
+            "notes": body,
+            "pub_date": pub_date,
+            "platforms": platforms,
+          }
+
+          pathlib.Path("latest.json").write_text(json.dumps(latest, indent=2), encoding="utf-8")
+          print("Wrote latest.json")
+          PY
+
+      - name: Upload latest.json to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          fail_on_unmatched_files: true
+          files: |
+            latest.json

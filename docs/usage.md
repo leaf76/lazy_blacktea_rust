@@ -28,3 +28,15 @@ Some features export files (e.g., screenshots, UI inspector exports, bugreport a
 ## Task Center
 
 Long-running operations are tracked in the Task Center. It keeps a limited history to stay fast.
+
+## Desktop Notifications
+
+You can enable native desktop notifications for task completion.
+
+- Open Settings -> Notifications.
+- Enable "Desktop notifications".
+- Click "Request permission" (macOS may prompt).
+- Use "Send test" to verify notifications work.
+
+Notes:
+- On Windows, notifications may behave differently in development builds. Install the app for the best experience.

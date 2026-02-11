@@ -6,8 +6,10 @@ import type {
   AppBasicInfo,
   AppIcon,
   AppInfo,
+  BugreportLogAroundPage,
   BugreportLogFilters,
   BugreportLogPage,
+  BugreportLogSearchResult,
   BugreportLogSummary,
   BugreportResult,
   CommandResponse,
@@ -216,8 +218,9 @@ export const installApkBatch = async (
   grant: boolean,
   allowTestPackages: boolean,
   extraArgs?: string,
+  traceIdOverride?: string,
 ) => {
-  const traceId = createTraceId();
+  const traceId = traceIdOverride ?? createTraceId();
   return tauriInvoke<CommandResponse<ApkBatchInstallResult>>("install_apk_batch", {
     serials,
     apk_path: apkPath,
@@ -403,6 +406,46 @@ export const stopPerfMonitor = async (serial: string) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<boolean>>("stop_perf_monitor", {
     serial,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const startNetProfiler = async (
+  serial: string,
+  intervalMs?: number,
+  topN?: number,
+  pinnedUids?: number[],
+) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<boolean>>("start_net_profiler", {
+    serial,
+    interval_ms: intervalMs,
+    intervalMs,
+    top_n: topN,
+    topN,
+    pinned_uids: pinnedUids,
+    pinnedUids,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const stopNetProfiler = async (serial: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<boolean>>("stop_net_profiler", {
+    serial,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const setNetProfilerPinnedUids = async (serial: string, pinnedUids?: number[]) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<boolean>>("set_net_profiler_pinned_uids", {
+    serial,
+    pinned_uids: pinnedUids,
+    pinnedUids,
     trace_id: traceId,
     traceId,
   });
@@ -651,6 +694,45 @@ export const queryBugreportLogcat = async (
     filters,
     offset,
     limit,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const searchBugreportLogcat = async (
+  reportId: string,
+  query: string,
+  filters: BugreportLogFilters,
+  limit?: number,
+) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<BugreportLogSearchResult>>("search_bugreport_logcat", {
+    report_id: reportId,
+    reportId,
+    query,
+    filters,
+    limit,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const queryBugreportLogcatAround = async (
+  reportId: string,
+  anchorId: number,
+  filters: BugreportLogFilters,
+  before?: number,
+  after?: number,
+) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<BugreportLogAroundPage>>("query_bugreport_logcat_around", {
+    report_id: reportId,
+    reportId,
+    anchor_id: anchorId,
+    anchorId,
+    before,
+    after,
+    filters,
     trace_id: traceId,
     traceId,
   });

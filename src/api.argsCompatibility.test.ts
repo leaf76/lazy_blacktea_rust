@@ -84,4 +84,50 @@ describe("api command args compatibility", () => {
       }),
     );
   });
+
+  it("sends both snake_case and camelCase keys for startNetProfiler pinnedUids", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: true });
+
+    const { startNetProfiler } = await import("./api");
+    await startNetProfiler("emulator-5554", 2000, 20, [1000, 1001]);
+
+    expect(invoke).toHaveBeenCalledWith(
+      "start_net_profiler",
+      expect.objectContaining({
+        serial: "emulator-5554",
+        interval_ms: 2000,
+        intervalMs: 2000,
+        top_n: 20,
+        topN: 20,
+        pinned_uids: [1000, 1001],
+        pinnedUids: [1000, 1001],
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
+
+  it("sends both snake_case and camelCase keys for setNetProfilerPinnedUids", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: true });
+
+    const { setNetProfilerPinnedUids } = await import("./api");
+    await setNetProfilerPinnedUids("emulator-5554", [1000, 1001, 1002]);
+
+    expect(invoke).toHaveBeenCalledWith(
+      "set_net_profiler_pinned_uids",
+      expect.objectContaining({
+        serial: "emulator-5554",
+        pinned_uids: [1000, 1001, 1002],
+        pinnedUids: [1000, 1001, 1002],
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
 });
