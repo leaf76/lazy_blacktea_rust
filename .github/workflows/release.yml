@@ -26,6 +26,8 @@ jobs:
             target: ""
             meta_os: linux
     runs-on: ${{ matrix.os }}
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
 
     steps:
       - name: Checkout tag
@@ -70,7 +72,7 @@ jobs:
         run: npm ci
 
       - name: Validate updater pubkey is configured
-        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -93,7 +95,7 @@ jobs:
           PY
 
       - name: Build Tauri bundles (signed updater)
-        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -106,7 +108,7 @@ jobs:
           fi
 
       - name: Build Tauri bundles (unsigned)
-        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY == '' }}
+        if: ${{ env.HAS_SIGNING_KEY != 'true' }}
         run: |
           set -euo pipefail
           if [ -n "${{ matrix.target }}" ]; then
@@ -127,7 +129,7 @@ jobs:
           done
 
       - name: Collect updater metadata
-        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         run: |
           set -euo pipefail
           META_OS="${{ matrix.meta_os }}"
@@ -257,7 +259,7 @@ jobs:
           PY
 
       - name: Upload updater metadata artifact
-        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: updater-meta-${{ matrix.meta_os }}
@@ -265,7 +267,7 @@ jobs:
           path: updater-meta-${{ matrix.meta_os }}.json
 
       - name: Upload updater assets to GitHub Release
-        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
@@ -294,16 +296,19 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
 
   publish-latest-json:
-    if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     needs: build-and-upload
     runs-on: ubuntu-24.04
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - name: Download updater metadata artifacts
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         uses: actions/download-artifact@v4
         with:
           path: updater-meta
 
       - name: Build latest.json
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         env:
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
@@ -361,6 +366,7 @@ jobs:
           PY
 
       - name: Upload latest.json to GitHub Release
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
