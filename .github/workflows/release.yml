@@ -49,6 +49,28 @@ jobs:
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      - name: Build universal smoke/soak helpers for macOS bundle
+        if: runner.os == 'macOS' && matrix.target == 'universal-apple-darwin'
+        run: |
+          set -euo pipefail
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build \
+              --manifest-path src-tauri/Cargo.toml \
+              --release \
+              --target "$target" \
+              --bin smoke \
+              --bin soak
+          done
+
+          mkdir -p src-tauri/target/universal-apple-darwin/release
+          for bin in smoke soak; do
+            lipo -create \
+              "src-tauri/target/x86_64-apple-darwin/release/${bin}" \
+              "src-tauri/target/aarch64-apple-darwin/release/${bin}" \
+              -output "src-tauri/target/universal-apple-darwin/release/${bin}"
+            chmod +x "src-tauri/target/universal-apple-darwin/release/${bin}"
+          done
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
