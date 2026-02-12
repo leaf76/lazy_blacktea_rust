@@ -47,6 +47,52 @@ describe("tasksReducer", () => {
     expect(cleared.items.map((t) => t.id)).toEqual(["2"]);
   });
 
+  it("recomputes task status from device statuses", () => {
+    const task = createTask({ id: "1", kind: "bugreport", title: "Bugreport", serials: ["A", "B"] });
+    const state = createInitialTaskState();
+    const withTask = { ...state, items: [task] };
+
+    const aDone = tasksReducer(withTask, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "A",
+      patch: { status: "success", progress: 100 },
+    });
+    const stillRunning = tasksReducer(aDone, { type: "TASK_RECOMPUTE_STATUS", id: "1" });
+    expect(stillRunning.items[0].status).toBe("running");
+
+    const bDone = tasksReducer(stillRunning, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "B",
+      patch: { status: "success", progress: 100 },
+    });
+    const success = tasksReducer(bDone, { type: "TASK_RECOMPUTE_STATUS", id: "1" });
+    expect(success.items[0].status).toBe("success");
+    expect(success.items[0].finished_at).not.toBeNull();
+  });
+
+  it("recomputes task status with cancelled and error precedence", () => {
+    const task = createTask({ id: "1", kind: "bugreport", title: "Bugreport", serials: ["A", "B"] });
+    const state = createInitialTaskState();
+    const withTask = { ...state, items: [task] };
+
+    const cancelled = tasksReducer(withTask, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "A",
+      patch: { status: "cancelled" },
+    });
+    const error = tasksReducer(cancelled, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "B",
+      patch: { status: "error" },
+    });
+    const final = tasksReducer(error, { type: "TASK_RECOMPUTE_STATUS", id: "1" });
+    expect(final.items[0].status).toBe("error");
+  });
+
   it("sanitizes and inflates stored tasks", () => {
     const state = createInitialTaskState();
     const longMessage = "x".repeat(500);

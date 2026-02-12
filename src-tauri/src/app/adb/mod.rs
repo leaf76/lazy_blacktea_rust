@@ -1,9 +1,11 @@
 pub mod apk;
 pub mod apps;
 pub mod bugreport;
+pub mod device_tracking;
 pub mod locator;
 pub mod parse;
 pub mod paths;
 pub mod runner;
 pub mod scrcpy;
+pub mod track_devices;
 pub mod transfer;

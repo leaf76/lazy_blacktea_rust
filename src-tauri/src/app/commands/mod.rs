@@ -25,6 +25,7 @@ use crate::app::adb::apps::{
     parse_dumpsys_version_name, parse_pm_list_packages_output, parse_pm_path_output,
 };
 use crate::app::adb::bugreport::{parse_bugreportz_line, BugreportzPayload};
+use crate::app::adb::device_tracking::start_device_tracker;
 use crate::app::adb::locator::{normalize_command_path, resolve_adb_program, validate_adb_program};
 use crate::app::adb::parse::{
     build_device_detail, parse_adb_devices, parse_audio_summary, parse_battery_level,
@@ -1674,6 +1675,53 @@ pub fn list_devices(
     Ok(CommandResponse {
         trace_id,
         data: devices,
+    })
+}
+
+#[tauri::command(async)]
+pub fn start_device_tracking(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    info!(trace_id = %trace_id, "start_device_tracking");
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let mut guard = state
+        .device_tracker
+        .lock()
+        .map_err(|_| AppError::system("Device tracker registry locked", &trace_id))?;
+    if let Some(handle) = guard.take() {
+        handle.stop();
+    }
+    *guard = Some(start_device_tracker(app, trace_id.clone(), adb_program));
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub fn stop_device_tracking(
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    info!(trace_id = %trace_id, "stop_device_tracking");
+
+    let mut guard = state
+        .device_tracker
+        .lock()
+        .map_err(|_| AppError::system("Device tracker registry locked", &trace_id))?;
+    if let Some(handle) = guard.take() {
+        handle.stop();
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
     })
 }
 

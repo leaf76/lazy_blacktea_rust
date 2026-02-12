@@ -60,6 +60,13 @@ export type TaskAction =
       finished_at?: number;
     }
   | {
+      // Derive the task status from per-device statuses (useful for event-driven tasks
+      // that may complete devices out of order or after a UI reload).
+      type: "TASK_RECOMPUTE_STATUS";
+      id: string;
+      finished_at?: number;
+    }
+  | {
       type: "TASK_UPDATE_DEVICE";
       id: string;
       serial: string;
@@ -97,6 +104,32 @@ export const tasksReducer = (state: TaskState, action: TaskAction): TaskState =>
           ? { ...item, status: action.status, finished_at: finishedAt }
           : item,
       ),
+    };
+  }
+  if (action.type === "TASK_RECOMPUTE_STATUS") {
+    const finishedAt = action.finished_at ?? Date.now();
+    return {
+      ...state,
+      items: state.items.map((item) => {
+        if (item.id !== action.id) {
+          return item;
+        }
+        const entries = Object.values(item.devices);
+        if (entries.length === 0) {
+          return item;
+        }
+        const hasRunning = entries.some((entry) => entry.status === "running");
+        if (hasRunning) {
+          return item.status === "running" ? item : { ...item, status: "running", finished_at: null };
+        }
+        const hasError = entries.some((entry) => entry.status === "error");
+        const hasCancelled = entries.some((entry) => entry.status === "cancelled");
+        const nextStatus: TaskStatus = hasError ? "error" : hasCancelled ? "cancelled" : "success";
+        if (item.status === nextStatus && item.finished_at != null) {
+          return item;
+        }
+        return { ...item, status: nextStatus, finished_at: finishedAt };
+      }),
     };
   }
   if (action.type === "TASK_UPDATE_DEVICE") {

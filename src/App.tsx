@@ -85,9 +85,11 @@ import {
   resetConfig,
   runShell,
   startPerfMonitor,
+  startDeviceTracking,
   startNetProfiler,
   setNetProfilerPinnedUids,
   startTerminalSession,
+  stopDeviceTracking,
   stopTerminalSession,
   stopPerfMonitor,
   stopNetProfiler,
@@ -162,8 +164,12 @@ import {
   resolveSelectedSerials,
   selectSerialsForGroup,
 } from "./deviceUtils";
-import { getAutoRefreshIntervalMs } from "./deviceAutoRefresh";
+import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
 import { bugreportLogLineMatches, buildBugreportLogFindPattern } from "./bugreportLogFind";
+import {
+  findRunningBugreportTaskIdForSerial,
+  resolveBugreportPanelTaskId,
+} from "./bugreportTaskRecovery";
 import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
 import {
   applyDroppedPaths,
@@ -198,6 +204,7 @@ type ApkInstallEvent = {
   raw_output?: string | null;
   trace_id: string;
 };
+type DeviceTrackingSnapshotPayload = { trace_id: string; devices: DeviceInfo[] };
 type LogcatLineEntry = { id: number; text: string };
 type PerfMonitorState = {
   running: boolean;
@@ -1570,6 +1577,10 @@ function App() {
   const [rebootConfirmOpen, setRebootConfirmOpen] = useState(false);
   const [rebootConfirmMode, setRebootConfirmMode] = useState<RebootMode>("normal");
   const [taskState, dispatchTasks] = useReducer(tasksReducer, undefined, () => createInitialTaskState(50));
+  const taskStateRef = useRef(taskState);
+  useEffect(() => {
+    taskStateRef.current = taskState;
+  }, [taskState]);
   const [logcatMatchIndex, setLogcatMatchIndex] = useState(0);
   const logcatOutputRef = useRef<HTMLDivElement>(null);
   const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
@@ -1580,7 +1591,6 @@ function App() {
   const devicePopoverRef = useRef<HTMLDivElement | null>(null);
   const devicePopoverTriggerRef = useRef<HTMLDivElement | null>(null);
   const devicePopoverSearchRef = useRef<HTMLInputElement | null>(null);
-  const bugreportTaskBySerialRef = useRef<Record<string, string>>({});
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
   const apkInstallTaskByTraceIdRef = useRef<Record<string, string>>({});
   const prevTaskItemsRef = useRef<TaskItem[] | null>(null);
@@ -1589,9 +1599,13 @@ function App() {
   const refreshSeqRef = useRef(0);
   const detailRefreshSeqRef = useRef(0);
   const detailRefreshTimerRef = useRef<number | null>(null);
-  const deviceAutoRefreshTimerRef = useRef<number | null>(null);
-  const deviceAutoRefreshInFlightRef = useRef(false);
   const deviceAutoRefreshLastWarnAtRef = useRef(0);
+  const deviceTrackingLastSnapshotAtRef = useRef<number>(0);
+  const deviceTrackingLastFallbackAtRef = useRef<number>(0);
+  const deviceTrackingPendingSnapshotRef = useRef<DeviceInfo[] | null>(null);
+  const deviceTrackingRestartInFlightRef = useRef(false);
+  const deviceTrackingFallbackInFlightRef = useRef(false);
+  const deviceTrackingStartedAtRef = useRef<number>(0);
   const busyRef = useRef(false);
   const adbInfoRef = useRef<AdbInfo | null>(null);
   const devicesRef = useRef<DeviceInfo[]>([]);
@@ -1615,9 +1629,6 @@ function App() {
     pathname: "/",
     mode: "single",
   });
-  const bugreportBatchRef = useRef<
-    Record<string, { total: number; done: number; hasError: boolean; hasCancelled: boolean }>
-  >({});
   const bugreportLogLastReportIdRef = useRef<string | null>(null);
   const bugreportLogLoadAllTokenRef = useRef(0);
   const bugreportLogLoadAllRunningRef = useRef(false);
@@ -1747,12 +1758,24 @@ function App() {
     const groupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
     return { filteredCount: filtered.length, selected, groupNames, grouped, ungrouped };
   }, [devices, devicePopoverSearch, groupMap, selectedSerials]);
+  const resolvedBugreportTaskId = useMemo(
+    () => resolveBugreportPanelTaskId(taskState.items, latestBugreportTaskId),
+    [taskState.items, latestBugreportTaskId],
+  );
+  useEffect(() => {
+    if (!resolvedBugreportTaskId) {
+      return;
+    }
+    if (resolvedBugreportTaskId !== latestBugreportTaskId) {
+      setLatestBugreportTaskId(resolvedBugreportTaskId);
+    }
+  }, [resolvedBugreportTaskId, latestBugreportTaskId]);
   const latestBugreportTask = useMemo(() => {
-    if (!latestBugreportTaskId) {
+    if (!resolvedBugreportTaskId) {
       return null;
     }
-    return taskState.items.find((task) => task.id === latestBugreportTaskId) ?? null;
-  }, [latestBugreportTaskId, taskState.items]);
+    return taskState.items.find((task) => task.id === resolvedBugreportTaskId) ?? null;
+  }, [resolvedBugreportTaskId, taskState.items]);
   const latestBugreportEntries = useMemo(() => {
     if (!latestBugreportTask) {
       return [];
@@ -2085,6 +2108,25 @@ function App() {
       }
     };
   }, [taskState]);
+
+  useEffect(() => {
+    const key = "lazy_blacktea_tasks_v1";
+    const flush = () => {
+      try {
+        const stored = sanitizeTaskStateForStorage(taskStateRef.current);
+        localStorage.setItem(key, JSON.stringify(stored));
+      } catch (error) {
+        console.warn("Failed to persist Task Center state to storage.", error);
+      }
+    };
+    // Ensure we don't lose running task state if the app is reloaded/closed before the debounce fires.
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, []);
 
   const apkInstallerPersistTimerRef = useRef<number | null>(null);
   useEffect(() => {
@@ -2572,6 +2614,89 @@ function App() {
     }, 4000);
   };
 
+  const pushToastRef = useRef(pushToast);
+  useEffect(() => {
+    pushToastRef.current = pushToast;
+  }, [pushToast]);
+
+  const hasRunningTasksRef = useRef(false);
+  useEffect(() => {
+    hasRunningTasksRef.current = taskState.items.some(
+      (task) => task.status === "running" || Object.values(task.devices).some((entry) => entry.status === "running"),
+    );
+  }, [taskState.items]);
+
+  const reloadBlockLastToastAtRef = useRef(0);
+  useEffect(() => {
+    // In production, prevent accidental full reloads that reset the UI and hide running task progress.
+    // Dev builds keep default reload behavior for fast iteration.
+    if (!isTauriRuntime() || !import.meta.env.PROD) {
+      return;
+    }
+
+    const maybeToastBlocked = () => {
+      const now = Date.now();
+      if (now - reloadBlockLastToastAtRef.current < 4000) {
+        return;
+      }
+      reloadBlockLastToastAtRef.current = now;
+      pushToastRef.current("Reload is disabled in production to avoid interrupting tasks.", "info");
+    };
+
+    const allowNativeContextMenu = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) {
+        return false;
+      }
+      // Preserve basic editing UX for text inputs.
+      return Boolean(target.closest('input, textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"]'));
+    };
+
+    const handleContextMenu = (event: MouseEvent) => {
+      if (!hasRunningTasksRef.current) {
+        return;
+      }
+      if (allowNativeContextMenu(event)) {
+        return;
+      }
+      event.preventDefault();
+      maybeToastBlocked();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!hasRunningTasksRef.current) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const isReloadShortcut =
+        event.key === "F5" || (key === "r" && (event.metaKey || event.ctrlKey));
+      if (!isReloadShortcut) {
+        return;
+      }
+      event.preventDefault();
+      maybeToastBlocked();
+    };
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasRunningTasksRef.current) {
+        return;
+      }
+      // Attempt to warn users if something still triggers a reload/navigation.
+      event.preventDefault();
+      // eslint-disable-next-line no-param-reassign
+      event.returnValue = "";
+    };
+
+    window.addEventListener("contextmenu", handleContextMenu);
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("contextmenu", handleContextMenu);
+      window.removeEventListener("keydown", handleKeyDown, { capture: true } as AddEventListenerOptions);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
+
   const refreshDesktopNotificationsPermission = async () => {
     const state = await getDesktopNotificationPermission();
     setDesktopNotificationPermission(state);
@@ -2704,6 +2829,59 @@ function App() {
     detailRefreshTimerRef.current = window.setTimeout(() => {
       void refreshDeviceDetails(options);
     }, delayMs);
+  };
+
+  const applyDeviceTrackingSnapshot = (nextDevices: DeviceInfo[], options: { allowDetailRefresh: boolean }) => {
+    const prevBySerial = new Map(
+      devicesRef.current.map((device) => [device.summary.serial, device.summary.state] as const),
+    );
+    const nextBySerial = new Map(
+      nextDevices.map((device) => [device.summary.serial, device.summary.state] as const),
+    );
+    const serialsChanged =
+      prevBySerial.size !== nextBySerial.size || Array.from(nextBySerial.keys()).some((serial) => !prevBySerial.has(serial));
+    const statesChanged = Array.from(nextBySerial.entries()).some(([serial, state]) => prevBySerial.get(serial) !== state);
+    const shouldRefreshDetail = serialsChanged || statesChanged;
+
+    // Tracking snapshots contain summaries only; keep the last known detail to avoid UI flicker.
+    setDevices((prev) => mergeDeviceDetails(prev, nextDevices, { preserveMissingDetail: true }));
+    setSelectedSerials((prev) => resolveSelectedSerials(prev, nextDevices));
+    if (options.allowDetailRefresh && shouldRefreshDetail) {
+      scheduleDeviceDetailRefresh(800, { notifyOnError: false });
+    }
+  };
+
+  const flushPendingDeviceTrackingSnapshot = (options: { allowDetailRefresh: boolean }) => {
+    const pending = deviceTrackingPendingSnapshotRef.current;
+    if (!pending) {
+      return;
+    }
+    deviceTrackingPendingSnapshotRef.current = null;
+    applyDeviceTrackingSnapshot(pending, options);
+  };
+
+  const refreshDeviceSummaryOnce = async (notifyOnError = false) => {
+    if (busyRef.current || deviceTrackingFallbackInFlightRef.current) {
+      return;
+    }
+
+    deviceTrackingFallbackInFlightRef.current = true;
+    try {
+      const response = await listDevices(false);
+      setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
+      setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
+      scheduleDeviceDetailRefresh(800, { notifyOnError });
+      deviceTrackingLastSnapshotAtRef.current = Date.now();
+      deviceTrackingLastFallbackAtRef.current = Date.now();
+    } catch (error) {
+      if (notifyOnError) {
+        pushToast(`Device summary refresh failed: ${formatError(error)}`, "error");
+      } else {
+        console.warn("Device summary refresh failed.", error);
+      }
+    } finally {
+      deviceTrackingFallbackInFlightRef.current = false;
+    }
   };
 
   const refreshDevices = async () => {
@@ -2856,103 +3034,124 @@ function App() {
     netBySerialRef.current = netBySerial;
   }, [netBySerial]);
 
-  useEffect(() => {
-    const intervalMs = getAutoRefreshIntervalMs(config);
-    if (!intervalMs) {
-      return;
-    }
+	  useEffect(() => {
+	    if (!config?.device.auto_refresh_enabled) {
+	      void stopDeviceTracking().catch(() => null);
+	      return;
+	    }
 
-    const warnThrottled = (error: unknown) => {
+    const warnThrottled = (error: unknown, message: string) => {
       const now = Date.now();
       if (now - deviceAutoRefreshLastWarnAtRef.current < 30_000) {
         return;
       }
       deviceAutoRefreshLastWarnAtRef.current = now;
-      console.warn("Device auto-refresh failed.", error);
+      console.warn(message, error);
     };
 
-    const tick = async () => {
-      if (busyRef.current || deviceAutoRefreshInFlightRef.current) {
+    const unlisten = listen<DeviceTrackingSnapshotPayload>("device-tracking-snapshot", (event) => {
+      const nextDevices = event.payload?.devices;
+      if (!Array.isArray(nextDevices)) {
         return;
       }
+      deviceTrackingLastSnapshotAtRef.current = Date.now();
+      deviceTrackingLastFallbackAtRef.current = Date.now();
+      if (busyRef.current) {
+        deviceTrackingPendingSnapshotRef.current = nextDevices;
+        return;
+      }
+      deviceTrackingPendingSnapshotRef.current = nextDevices;
+      flushPendingDeviceTrackingSnapshot({ allowDetailRefresh: true });
+	    });
 
+    deviceTrackingStartedAtRef.current = Date.now();
+    deviceTrackingLastSnapshotAtRef.current = 0;
+    deviceTrackingLastFallbackAtRef.current = 0;
+    void startDeviceTracking().catch((error) => warnThrottled(error, "Device tracking start failed."));
+    void refreshDeviceSummaryOnce(false);
+    return () => {
+      void unlisten.then((unlisten) => unlisten());
+      void stopDeviceTracking().catch(() => null);
+    };
+  }, [config?.device.auto_refresh_enabled, config?.device.refresh_interval]);
+
+  useEffect(() => {
+    if (!config?.device.auto_refresh_enabled) {
+      return;
+    }
+    if (busy) {
+      return;
+    }
+    flushPendingDeviceTrackingSnapshot({ allowDetailRefresh: true });
+  }, [busy, config?.device.auto_refresh_enabled]);
+
+  useEffect(() => {
+    if (!config?.device.auto_refresh_enabled) {
+      return;
+    }
+
+    const intervalMs = clampRefreshIntervalSec(config.device.refresh_interval) * 1000;
+    const handle = window.setInterval(() => {
       if (!configRef.current?.device.auto_refresh_enabled) {
         return;
       }
+      if (busyRef.current) {
+        return;
+      }
+      if (deviceTrackingRestartInFlightRef.current) {
+        return;
+      }
 
-      deviceAutoRefreshInFlightRef.current = true;
-      try {
-        const currentAdbInfo = adbInfoRef.current;
-        if (currentAdbInfo == null || !currentAdbInfo.available) {
-          const adbResponse = await checkAdb();
-          if (busyRef.current) {
-            return;
-          }
-          setAdbInfo(adbResponse.data);
-          adbInfoRef.current = adbResponse.data;
-          if (!adbResponse.data.available) {
-            setDevices([]);
-            setSelectedSerials([]);
-            return;
-          }
+      const now = Date.now();
+      const lastSnapshotAt = deviceTrackingLastSnapshotAtRef.current;
+      const lastFallbackAt = deviceTrackingLastFallbackAtRef.current;
+      const startedAt = deviceTrackingStartedAtRef.current;
+      const warmupMs = Math.max(3_000, intervalMs);
+      const maxStartWaitMs = Math.max(10_000, intervalMs * 2);
+      const staleWindowMs = Math.max(12_000, intervalMs * 3);
+
+      if (now - startedAt < warmupMs) {
+        return;
+      }
+
+      // `adb track-devices` does not emit periodic snapshots when the device list is unchanged.
+      // We still keep a periodic fallback summary refresh for heartbeat recovery.
+      if (lastSnapshotAt !== 0) {
+        if (
+          now - lastSnapshotAt >= staleWindowMs &&
+          now - lastFallbackAt >= intervalMs
+        ) {
+          void refreshDeviceSummaryOnce(false);
+          deviceTrackingLastFallbackAtRef.current = now;
         }
+        return;
+      }
 
-        const response = await listDevices(false);
-        if (busyRef.current) {
-          return;
-        }
+      if (now - startedAt < maxStartWaitMs) {
+        return;
+      }
 
-        const prevBySerial = new Map(
-          devicesRef.current.map((device) => [device.summary.serial, device.summary.state] as const),
-        );
-        const nextBySerial = new Map(
-          response.data.map((device) => [device.summary.serial, device.summary.state] as const),
-        );
-        const serialsChanged =
-          prevBySerial.size !== nextBySerial.size ||
-          Array.from(nextBySerial.keys()).some((serial) => !prevBySerial.has(serial));
-        const statesChanged = Array.from(nextBySerial.entries()).some(([serial, state]) => prevBySerial.get(serial) !== state);
-        const shouldRefreshDetail = serialsChanged || statesChanged;
-
-        // Auto-refresh uses listDevices(false) so preserve previously fetched detail fields.
-        setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
-        setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
-
-        if (shouldRefreshDetail) {
-          scheduleDeviceDetailRefresh(800, { notifyOnError: false });
-        }
-      } catch (error) {
-        warnThrottled(error);
+      deviceTrackingRestartInFlightRef.current = true;
+      void (async () => {
         try {
-          const adbResponse = await checkAdb();
-          if (busyRef.current) {
-            return;
-          }
-          setAdbInfo(adbResponse.data);
-          adbInfoRef.current = adbResponse.data;
-          if (!adbResponse.data.available) {
-            setDevices([]);
-            setSelectedSerials([]);
-          }
-        } catch (innerError) {
-          warnThrottled(innerError);
+          await stopDeviceTracking();
+        } catch (error) {
+          console.warn("Device tracking stop failed.", error);
         }
-      } finally {
-        deviceAutoRefreshInFlightRef.current = false;
-      }
-    };
-
-    void tick();
-    const handle = window.setInterval(() => {
-      void tick();
+        try {
+          deviceTrackingStartedAtRef.current = Date.now();
+          await startDeviceTracking();
+          deviceTrackingLastSnapshotAtRef.current = 0;
+          deviceTrackingLastFallbackAtRef.current = 0;
+          void refreshDeviceSummaryOnce(false);
+        } catch (error) {
+          console.warn("Device tracking restart failed.", error);
+        } finally {
+          deviceTrackingRestartInFlightRef.current = false;
+        }
+      })();
     }, intervalMs);
-    deviceAutoRefreshTimerRef.current = handle;
-    return () => {
-      window.clearInterval(handle);
-      if (deviceAutoRefreshTimerRef.current === handle) {
-        deviceAutoRefreshTimerRef.current = null;
-      }
-    };
+    return () => window.clearInterval(handle);
   }, [config?.device.auto_refresh_enabled, config?.device.refresh_interval]);
 
   useEffect(() => {
@@ -3414,7 +3613,7 @@ function App() {
       if (!activeSerial || payload.serial === activeSerial) {
         setBugreportProgress(payload.progress);
       }
-      const taskId = bugreportTaskBySerialRef.current[payload.serial];
+      const taskId = findRunningBugreportTaskIdForSerial(taskStateRef.current.items, payload.serial);
       if (taskId) {
         dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: payload.trace_id });
         dispatchTasks({
@@ -3439,7 +3638,7 @@ function App() {
       if (!serial) {
         return;
       }
-      const taskId = bugreportTaskBySerialRef.current[serial];
+      const taskId = findRunningBugreportTaskIdForSerial(taskStateRef.current.items, serial);
       if (!taskId || !payload.result) {
         return;
       }
@@ -3465,28 +3664,7 @@ function App() {
               : payload.result.error ?? "Bugreport failed.",
         },
       });
-      const summary = bugreportBatchRef.current[taskId];
-      if (summary) {
-        summary.done += 1;
-        if (status === "error") {
-          summary.hasError = true;
-        }
-        if (status === "cancelled") {
-          summary.hasCancelled = true;
-        }
-        if (summary.done >= summary.total) {
-          const finalStatus: TaskStatus = summary.hasError
-            ? "error"
-            : summary.hasCancelled
-              ? "cancelled"
-              : "success";
-          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: finalStatus });
-          delete bugreportBatchRef.current[taskId];
-        }
-      } else {
-        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status });
-      }
-      delete bugreportTaskBySerialRef.current[serial];
+      dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
     });
 
     return () => {
@@ -4194,14 +4372,7 @@ function App() {
 	    });
 	    setLatestBugreportTaskId(taskId);
 	    setBugreportResult(null);
-	    bugreportBatchRef.current[taskId] = {
-	      total: serials.length,
-	      done: 0,
-	      hasError: false,
-	      hasCancelled: false,
-	    };
 	    serials.forEach((serial) => {
-	      bugreportTaskBySerialRef.current[serial] = taskId;
 	      dispatchTasks({
 	        type: "TASK_UPDATE_DEVICE",
 	        id: taskId,
@@ -4229,18 +4400,9 @@ function App() {
 	          type: "TASK_UPDATE_DEVICE",
 	          id: taskId,
 	          serial: item.serial,
-	          patch: { status: "error", message: formatError(item.error) },
+	          patch: { status: "error", progress: null, message: formatError(item.error) },
 	        });
-	        const summary = bugreportBatchRef.current[taskId];
-	        if (summary) {
-	          summary.done += 1;
-	          summary.hasError = true;
-	          if (summary.done >= summary.total) {
-	            dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-	            delete bugreportBatchRef.current[taskId];
-	          }
-	        }
-	        delete bugreportTaskBySerialRef.current[item.serial];
+	        dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
 	      });
 	      pushToast(
 	        failed.length
@@ -4264,7 +4426,7 @@ function App() {
 	        serials.map(async (serial) => {
 	          try {
 	            await cancelBugreport(serial);
-	            const taskId = bugreportTaskBySerialRef.current[serial];
+	            const taskId = findRunningBugreportTaskIdForSerial(taskStateRef.current.items, serial);
 	            if (taskId) {
 	              dispatchTasks({
 	                type: "TASK_UPDATE_DEVICE",
@@ -4272,6 +4434,7 @@ function App() {
 	                serial,
 	                patch: { status: "cancelled", message: "Bugreport cancel requested." },
 	              });
+	              dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
 	            }
 	          } catch (error) {
 	            pushToast(formatError(error), "error");
@@ -12462,10 +12625,14 @@ function App() {
 	                              }
 	                            />
 	                          </label>
-                            <div className="muted settings-hint">
-                              How often to refresh while auto-refresh is enabled. Minimum 1 second.
+                          <div className="muted settings-hint">
+                              Refresh interval for heartbeat fallback and recovery checks while auto-refresh is enabled. Minimum 1 second.
                             </div>
-	                        </div>
+                            <div className="muted settings-hint">
+                              Primary auto-refresh path uses <code>adb track-devices</code>. If tracking is idle, it may briefly fall back to
+                              <code>adb devices</code> for a single summary refresh.
+                            </div>
+		                        </div>
 	                        <div className="settings-group">
 	                          <h3>Commands</h3>
 	                          <label>

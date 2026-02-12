@@ -98,6 +98,22 @@ export const listDevices = async (detailed = true) => {
   });
 };
 
+export const startDeviceTracking = async () => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<boolean>>("start_device_tracking", {
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const stopDeviceTracking = async () => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<boolean>>("stop_device_tracking", {
+    trace_id: traceId,
+    traceId,
+  });
+};
+
 export const adbPair = async (address: string, pairingCode: string) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<HostCommandResult>>("adb_pair", {

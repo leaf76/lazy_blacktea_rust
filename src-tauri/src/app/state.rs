@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
+use crate::app::adb::device_tracking::DeviceTrackerHandle;
 use crate::app::bluetooth::service::BluetoothMonitorHandle;
 use crate::app::scheduler::TaskScheduler;
 use crate::app::terminal::TerminalSession;
@@ -42,6 +43,7 @@ pub struct AppState {
     pub net_profilers: Mutex<HashMap<String, NetProfilerHandle>>,
     pub bugreport_processes: Mutex<HashMap<String, BugreportHandle>>,
     pub bluetooth_monitors: Mutex<HashMap<String, BluetoothMonitorHandle>>,
+    pub device_tracker: Mutex<Option<DeviceTrackerHandle>>,
     pub terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
 }
 
@@ -55,6 +57,7 @@ impl AppState {
             net_profilers: Mutex::new(HashMap::new()),
             bugreport_processes: Mutex::new(HashMap::new()),
             bluetooth_monitors: Mutex::new(HashMap::new()),
+            device_tracker: Mutex::new(None),
             terminal_sessions: Mutex::new(HashMap::new()),
         }
     }

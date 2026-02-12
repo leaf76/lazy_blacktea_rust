@@ -10,10 +10,10 @@ use app::commands::{
     query_bugreport_logcat, query_bugreport_logcat_around, reboot_devices, rename_device_path,
     reset_config, run_shell, save_app_config, search_bugreport_logcat, set_app_enabled,
     set_bluetooth_state, set_net_profiler_pinned_uids, set_wifi_state, start_bluetooth_monitor,
-    start_logcat, start_net_profiler, start_perf_monitor, start_screen_record,
-    start_terminal_session, stop_bluetooth_monitor, stop_logcat, stop_net_profiler,
-    stop_perf_monitor, stop_screen_record, stop_terminal_session, uninstall_app,
-    write_terminal_session,
+    start_device_tracking, start_logcat, start_net_profiler, start_perf_monitor,
+    start_screen_record, start_terminal_session, stop_bluetooth_monitor, stop_device_tracking,
+    stop_logcat, stop_net_profiler, stop_perf_monitor, stop_screen_record, stop_terminal_session,
+    uninstall_app, write_terminal_session,
 };
 use app::logging::init_logging;
 use app::state::AppState;
@@ -36,6 +36,8 @@ pub fn run() {
             check_adb,
             export_diagnostics_bundle,
             list_devices,
+            start_device_tracking,
+            stop_device_tracking,
             adb_pair,
             adb_connect,
             run_shell,
