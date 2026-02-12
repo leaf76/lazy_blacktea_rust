@@ -181,6 +181,7 @@ import {
   installUpdateAndRelaunch,
   readUpdateLastCheckedMs,
   shouldAutoCheck,
+  type UpdateCheckResult,
   type UpdaterUpdateLike,
 } from "./updater";
 import appPackage from "../package.json";
@@ -1234,6 +1235,32 @@ function App() {
   const [updateLastCheckedMs, setUpdateLastCheckedMs] = useState<number | null>(() => readUpdateLastCheckedMs());
   const [updateLastCheckSource, setUpdateLastCheckSource] = useState<"auto" | "manual" | null>(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const applyUpdateCheckResult = (source: "auto" | "manual", result: UpdateCheckResult) => {
+    if (result.status === "update_available") {
+      setUpdateAvailable(result.update);
+      setUpdateStatus("update_available");
+      return;
+    }
+
+    if (result.status === "error") {
+      setUpdateAvailable(null);
+      if (source === "manual") {
+        setUpdateStatus("error");
+        setUpdateError(result.message);
+        return;
+      }
+
+      setUpdateStatus("idle");
+      setUpdateError(null);
+      return;
+    }
+
+    setUpdateAvailable(null);
+    setUpdateStatus(source === "manual" ? "up_to_date" : "idle");
+    if (source === "manual") {
+      setUpdateError(null);
+    }
+  };
   const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
   const [logcatSourceValue, setLogcatSourceValue] = useState("");
@@ -1330,19 +1357,7 @@ function App() {
         return;
       }
       setUpdateLastCheckedMs(nowMs);
-      if (result.status === "update_available") {
-        setUpdateAvailable(result.update);
-        setUpdateStatus("update_available");
-        return;
-      }
-      if (result.status === "error") {
-        setUpdateStatus("error");
-        setUpdateError(result.message);
-        return;
-      }
-      // Keep startup checks quiet unless an update is available.
-      setUpdateAvailable(null);
-      setUpdateStatus("idle");
+      applyUpdateCheckResult("auto", result);
     })();
 
     return () => {
@@ -1371,18 +1386,7 @@ function App() {
 
     const result = await checkForUpdate({ nowMs });
     setUpdateLastCheckedMs(nowMs);
-    if (result.status === "update_available") {
-      setUpdateAvailable(result.update);
-      setUpdateStatus("update_available");
-      return;
-    }
-    if (result.status === "error") {
-      setUpdateStatus("error");
-      setUpdateError(result.message);
-      return;
-    }
-    setUpdateAvailable(null);
-    setUpdateStatus(source === "manual" ? "up_to_date" : "idle");
+    applyUpdateCheckResult(source, result);
   };
 
   const handleManualUpdateCheck = () => {
