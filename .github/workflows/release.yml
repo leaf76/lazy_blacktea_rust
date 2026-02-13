@@ -150,6 +150,22 @@ jobs:
             fi
           done
 
+      - name: Verify macOS artifacts before release upload
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.zip
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No macOS release assets found. Check bundle output:"
+            find "src-tauri/target/${{ matrix.target }}/release/bundle" -maxdepth 3 -type f || true
+            exit 1
+          fi
+          printf '%s\0' "${files[@]}" > release_upload_files.m0
+
       - name: Collect updater metadata
         if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         run: |
@@ -280,6 +296,19 @@ jobs:
           print(f"Wrote {out_path}")
           PY
 
+      - name: Verify updater assets before upload
+        if: ${{ env.HAS_SIGNING_KEY == 'true' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(updater_assets/*)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No updater assets prepared. Check collect step:"
+            ls -la updater_assets || true
+            exit 1
+          fi
+          printf '%s\0' "${assets[@]}" > updater_upload_files.m0
+
       - name: Upload updater metadata artifact
         if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         uses: actions/upload-artifact@v4
@@ -290,32 +319,78 @@ jobs:
 
       - name: Upload updater assets to GitHub Release
         if: ${{ env.HAS_SIGNING_KEY == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          fail_on_unmatched_files: true
-          files: |
-            updater_assets/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=()
+          while IFS= read -r -d '' path; do
+            files+=("$path")
+          done < updater_upload_files.m0
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Failed to upload updater assets after 3 attempts."
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 10))
+            echo "Upload failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
+            sleep "$sleep_seconds"
+          done
 
       - name: Upload macOS assets to GitHub Release
         if: runner.os == 'macOS'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          fail_on_unmatched_files: true
-          files: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=()
+          while IFS= read -r -d '' path; do
+            files+=("$path")
+          done < release_upload_files.m0
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Failed to upload macOS assets after 3 attempts."
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 10))
+            echo "Upload failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
+            sleep "$sleep_seconds"
+          done
 
       - name: Upload Linux assets to GitHub Release
         if: runner.os == 'Linux'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          fail_on_unmatched_files: true
-          files: |
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/deb/*.deb
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Linux release assets found."
+            find "src-tauri/target/release/bundle" -maxdepth 3 -type f || true
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Failed to upload Linux assets after 3 attempts."
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 10))
+            echo "Upload failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
+            sleep "$sleep_seconds"
+          done
 
   publish-latest-json:
     needs: build-and-upload
@@ -389,9 +464,19 @@ jobs:
 
       - name: Upload latest.json to GitHub Release
         if: ${{ env.HAS_SIGNING_KEY == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          fail_on_unmatched_files: true
-          files: |
-            latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.event.release.tag_name }}" latest.json --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Failed to upload latest.json after 3 attempts."
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 10))
+            echo "Upload failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
+            sleep "$sleep_seconds"
+          done
