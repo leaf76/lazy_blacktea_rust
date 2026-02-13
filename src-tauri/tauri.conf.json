@@ -37,7 +37,7 @@
       "endpoints": [
         "https://github.com/leaf76/lazy_blacktea_rust/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1Q0ZCRDMzMUNDRUY3QTMKUldTajk4NGNNNzNQZFZWc2ZPRTdXbkRlQ25zRUxGaTl6YTFSVXplRG0wd1B3NnJTaVpJV1lwcloK"
     }
   }
 }
