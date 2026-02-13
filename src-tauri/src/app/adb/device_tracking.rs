@@ -91,6 +91,11 @@ pub fn start_device_tracker(
                         return;
                     }
                 };
+                if let Some(mut previous) = guard.take() {
+                    // `-l` fallback replaces an already-exited child; wait() reaps it
+                    // so we do not leak a zombie process on Unix.
+                    let _ = previous.wait();
+                }
                 *guard = Some(child);
             }
 
