@@ -23,6 +23,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   warnSpy?.mockRestore();
   warnSpy = null;
 });
@@ -95,6 +96,44 @@ describe("checkForUpdate", () => {
     expect(result.message).toMatch(/Unable to check for updates/i);
     expect(result.message).not.toMatch(/network down/i);
     expect(readUpdateLastCheckedMs(storage)).toBe(3_000);
+  });
+
+  it("returns up_to_date when latest release tag matches current version", async () => {
+    const storage = createMemoryStorage();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ tag_name: "v0.0.57" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await checkForUpdate({ storage, nowMs: 4_000, currentVersion: "0.0.57" });
+
+    expect(result.status).toBe("up_to_date");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(check).not.toHaveBeenCalled();
+    expect(readUpdateLastCheckedMs(storage)).toBe(4_000);
+  });
+
+  it("returns publishing message when release tag is newer but updater artifacts are missing", async () => {
+    const storage = createMemoryStorage();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ tag_name: "v0.0.58" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    (check as unknown as { mockRejectedValue: (value: unknown) => void }).mockRejectedValue(
+      new Error("update endpoint did not respond with a successful status code"),
+    );
+
+    const result = await checkForUpdate({ storage, nowMs: 5_000, currentVersion: "0.0.57" });
+
+    expect(result.status).toBe("error");
+    if (result.status !== "error") {
+      throw new Error(`Expected error, got ${result.status}`);
+    }
+    expect(result.message).toMatch(/newer release is available/i);
+    expect(result.message).not.toMatch(/successful status code/i);
+    expect(readUpdateLastCheckedMs(storage)).toBe(5_000);
   });
 });
 

@@ -1619,7 +1619,10 @@ function App() {
     setUpdateError(null);
 
     void (async () => {
-      const result = await checkForUpdate({ nowMs });
+      const result = await checkForUpdate({
+        nowMs,
+        currentVersion: appVersionLabel !== "--" ? appVersionLabel : undefined,
+      });
       if (cancelled) {
         return;
       }
@@ -1651,7 +1654,10 @@ function App() {
     setUpdateStatus("checking");
     setUpdateError(null);
 
-    const result = await checkForUpdate({ nowMs });
+    const result = await checkForUpdate({
+      nowMs,
+      currentVersion: appVersionLabel !== "--" ? appVersionLabel : undefined,
+    });
     setUpdateLastCheckedMs(nowMs);
     applyUpdateCheckResult(source, result);
   };
