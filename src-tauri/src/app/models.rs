@@ -96,6 +96,21 @@ pub struct LogcatExportResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogcatStatus {
+    pub serial: String,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LegacyLogcatPreset {
+    pub name: String,
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PerfSnapshot {
     pub ts_ms: i64,
     pub cpu_total_percent_x100: Option<u16>,

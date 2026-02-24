@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createInitialTaskState,
   createTask,
+  finalizeRestoredTaskState,
   inflateStoredTaskState,
   parseStoredTaskState,
   sanitizeTaskStateForStorage,
@@ -110,5 +111,48 @@ describe("tasksReducer", () => {
     expect(parsed).not.toBeNull();
     const inflated = inflateStoredTaskState(parsed!, 50);
     expect(inflated.items[0].devices.A.stdout ?? null).toBeNull();
+  });
+
+  it("finalizes restored running bugreport tasks as interrupted", () => {
+    const runningTask = createTask({
+      id: "1",
+      kind: "bugreport",
+      title: "Bugreport",
+      serials: ["A", "B"],
+      started_at: 100,
+    });
+    const partial = tasksReducer({ items: [runningTask], max_items: 50 }, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "A",
+      patch: { status: "success", progress: 100, message: "Done" },
+    });
+
+    const finalized = finalizeRestoredTaskState(partial, 999);
+    const task = finalized.items[0];
+
+    expect(task.status).toBe("interrupted");
+    expect(task.finished_at).toBe(999);
+    expect(task.devices.A.status).toBe("success");
+    expect(task.devices.B.status).toBe("interrupted");
+    expect(task.devices.B.progress ?? null).toBeNull();
+    expect(task.devices.B.message).toContain("App restarted");
+  });
+
+  it("does not finalize restored running non-bugreport tasks", () => {
+    const runningTask = createTask({
+      id: "1",
+      kind: "apk_install",
+      title: "Install",
+      serials: ["A"],
+      started_at: 100,
+    });
+
+    const finalized = finalizeRestoredTaskState({ items: [runningTask], max_items: 50 }, 999);
+    const task = finalized.items[0];
+
+    expect(task.status).toBe("running");
+    expect(task.finished_at).toBeNull();
+    expect(task.devices.A.status).toBe("running");
   });
 });

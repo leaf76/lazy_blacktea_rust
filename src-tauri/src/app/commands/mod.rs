@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -51,8 +51,9 @@ use crate::app::models::{
     AppComponentsSummary, AppIcon, AppInfo, BugreportLogAroundPage, BugreportLogFilters,
     BugreportLogPage, BugreportLogSearchResult, BugreportLogSummary, BugreportResult,
     CommandResponse, CommandResult, DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview,
-    HostCommandResult, LogcatExportResult, NetProfilerSnapshot, PerfSnapshot, ScrcpyInfo,
-    TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
+    HostCommandResult, LegacyLogcatPreset, LogcatExportResult, LogcatStatus, NetProfilerSnapshot,
+    PerfSnapshot, ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
+    UiHierarchyExportResult,
 };
 use crate::app::net_profiler::parse::{
     parse_cmd_package_list_u, parse_dumpsys_netstats_app_uid_stats, parse_xt_qtaguid_stats,
@@ -92,8 +93,27 @@ fn start_logcat_inner(
     let mut guard = registry
         .lock()
         .map_err(|_| AppError::system("Logcat registry locked", trace_id))?;
-    if guard.contains_key(&serial) {
-        return Err(AppError::validation("Logcat already running", trace_id));
+    let existing_running = if let Some(handle) = guard.get_mut(&serial) {
+        match handle.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => false,
+            Err(err) => {
+                return Err(AppError::system(
+                    format!("Failed to inspect logcat process: {err}"),
+                    trace_id,
+                ))
+            }
+        }
+    } else {
+        false
+    };
+    if existing_running {
+        return Ok(true);
+    }
+    if let Some(mut stale) = guard.remove(&serial) {
+        stale.stop_flag.store(true, Ordering::Relaxed);
+        let _ = stale.child.kill();
+        let _ = stale.child.wait();
     }
 
     let mut child = spawn_logcat(
@@ -215,12 +235,49 @@ fn stop_logcat_inner(
         .map_err(|_| AppError::system("Logcat registry locked", trace_id))?;
     let mut handle = match guard.remove(&serial) {
         Some(handle) => handle,
-        None => return Err(AppError::validation("Logcat not running", trace_id)),
+        None => return Ok(true),
     };
     handle.stop_flag.store(true, Ordering::Relaxed);
     let _ = handle.child.kill();
     let _ = handle.child.wait();
     Ok(true)
+}
+
+fn get_logcat_status_inner(
+    serial: String,
+    registry: &std::sync::Mutex<std::collections::HashMap<String, LogcatHandle>>,
+    trace_id: &str,
+) -> Result<LogcatStatus, AppError> {
+    ensure_non_empty(&serial, "serial", trace_id)?;
+
+    let mut guard = registry
+        .lock()
+        .map_err(|_| AppError::system("Logcat registry locked", trace_id))?;
+
+    let running = if let Some(handle) = guard.get_mut(&serial) {
+        match handle.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => false,
+            Err(err) => {
+                return Err(AppError::system(
+                    format!("Failed to inspect logcat process: {err}"),
+                    trace_id,
+                ))
+            }
+        }
+    } else {
+        false
+    };
+
+    if !running {
+        if let Some(mut stale) = guard.remove(&serial) {
+            stale.stop_flag.store(true, Ordering::Relaxed);
+            let _ = stale.child.kill();
+            let _ = stale.child.wait();
+        }
+    }
+
+    Ok(LogcatStatus { serial, running })
 }
 
 // Smoke helpers: these allow macOS-friendly "real device" checks without needing a Tauri AppHandle.
@@ -914,6 +971,191 @@ fn validate_generate_bugreport_inputs(
     ensure_non_empty(serial, "serial", trace_id)?;
     ensure_non_empty(output_dir, "output_dir", trace_id)?;
     Ok(())
+}
+
+fn parse_string_array_from_json(value: Option<&serde_json::Value>, limit: usize) -> Vec<String> {
+    let Some(items) = value.and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut values = Vec::new();
+    let mut seen = HashSet::new();
+    for item in items {
+        let Some(raw) = item.as_str() else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let owned = trimmed.to_string();
+        if seen.insert(owned.clone()) {
+            values.push(owned);
+            if values.len() >= limit {
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn parse_legacy_logcat_preset_json(content: &str) -> Option<LegacyLogcatPreset> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    let record = parsed.as_object()?;
+    let name = record.get("name")?.as_str()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    let mut include = parse_string_array_from_json(record.get("filters"), 50);
+    let mut exclude = Vec::new();
+    if include.is_empty() {
+        include = parse_string_array_from_json(record.get("include"), 50);
+        exclude = parse_string_array_from_json(record.get("exclude"), 50);
+    }
+    if include.is_empty() && exclude.is_empty() {
+        include = parse_string_array_from_json(record.get("patterns"), 50);
+    }
+    if include.is_empty() && exclude.is_empty() {
+        return None;
+    }
+
+    Some(LegacyLogcatPreset {
+        name,
+        include,
+        exclude,
+    })
+}
+
+fn parse_legacy_logcat_filters_json(
+    content: &str,
+    preset_name: &str,
+) -> Option<LegacyLogcatPreset> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    let record = parsed.as_object()?;
+    let name = preset_name.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    let mut include = Vec::new();
+    let mut seen = HashSet::new();
+    for value in record.values() {
+        let Some(raw) = value.as_str() else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let owned = trimmed.to_string();
+        if seen.insert(owned.clone()) {
+            include.push(owned);
+            if include.len() >= 50 {
+                break;
+            }
+        }
+    }
+
+    if include.is_empty() {
+        return None;
+    }
+
+    Some(LegacyLogcatPreset {
+        name,
+        include,
+        exclude: Vec::new(),
+    })
+}
+
+fn load_legacy_logcat_presets_from_home(
+    home_dir: &Path,
+    trace_id: &str,
+) -> Vec<LegacyLogcatPreset> {
+    let mut presets = Vec::new();
+    let preset_dir = home_dir.join(".lazy_blacktea").join("presets");
+    if preset_dir.is_dir() {
+        let mut preset_paths: Vec<PathBuf> = match fs::read_dir(&preset_dir) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                })
+                .collect(),
+            Err(err) => {
+                warn!(
+                    trace_id = %trace_id,
+                    path = %preset_dir.to_string_lossy(),
+                    error = %err,
+                    "failed to read legacy preset directory"
+                );
+                Vec::new()
+            }
+        };
+        preset_paths.sort();
+
+        for path in preset_paths {
+            let content = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(err) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        path = %path.to_string_lossy(),
+                        error = %err,
+                        "failed to read legacy preset file"
+                    );
+                    continue;
+                }
+            };
+            if let Some(preset) = parse_legacy_logcat_preset_json(&content) {
+                presets.push(preset);
+            } else {
+                warn!(
+                    trace_id = %trace_id,
+                    path = %path.to_string_lossy(),
+                    "ignored invalid legacy preset file"
+                );
+            }
+        }
+    }
+
+    let legacy_filters_path = home_dir.join(".lazy_blacktea_filters.json");
+    if legacy_filters_path.is_file() {
+        match fs::read_to_string(&legacy_filters_path) {
+            Ok(content) => {
+                if let Some(preset) = parse_legacy_logcat_filters_json(&content, "Migrated Filters")
+                {
+                    presets.push(preset);
+                } else {
+                    warn!(
+                        trace_id = %trace_id,
+                        path = %legacy_filters_path.to_string_lossy(),
+                        "ignored invalid legacy filters file"
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(
+                    trace_id = %trace_id,
+                    path = %legacy_filters_path.to_string_lossy(),
+                    error = %err,
+                    "failed to read legacy filters file"
+                );
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    presets.retain(|preset| seen.insert(preset.name.clone()));
+    presets
 }
 
 fn append_limited(buffer: &mut String, chunk: &str, max_len: usize) {
@@ -5606,6 +5848,35 @@ pub fn stop_logcat(
         trace_id,
         data: true,
     })
+}
+
+#[tauri::command(async)]
+pub fn get_logcat_status(
+    serial: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<LogcatStatus>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let status = get_logcat_status_inner(serial, &state.logcat_processes, &trace_id)?;
+    Ok(CommandResponse {
+        trace_id,
+        data: status,
+    })
+}
+
+#[tauri::command(async)]
+pub fn load_legacy_logcat_presets(
+    trace_id: Option<String>,
+) -> Result<CommandResponse<Vec<LegacyLogcatPreset>>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let data = dirs::home_dir()
+        .map(|home_dir| load_legacy_logcat_presets_from_home(&home_dir, &trace_id))
+        .unwrap_or_else(|| {
+            warn!(trace_id = %trace_id, "failed to resolve home directory for legacy presets");
+            Vec::new()
+        });
+
+    Ok(CommandResponse { trace_id, data })
 }
 
 #[tauri::command(async)]

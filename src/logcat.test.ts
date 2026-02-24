@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendRetainedLogcatEntries,
   buildLogcatFilter,
+  filterLogcatEntriesByBaseFilters,
+  filterLogcatEntriesBySearch,
   filterLogcatLines,
+  isLogcatBaseFilterActive,
+  mergeLogcatEntriesById,
   parseLogcatLevel,
   parsePidOutput,
+  type LogcatBaseFilterState,
 } from "./logcat";
 
 describe("logcat helpers", () => {
@@ -106,5 +112,99 @@ describe("logcat helpers", () => {
     });
     expect(result.lines).toEqual(["E/NetworkPolicy( 99): failed"]);
     expect(result.matchIndices).toEqual([]);
+  });
+
+  it("detects when base filters are active", () => {
+    expect(
+      isLogcatBaseFilterActive({
+        levels: { V: true, D: true, I: true, W: true, E: true, F: true },
+        activePatterns: [],
+        excludePatterns: [],
+        livePattern: "",
+      }),
+    ).toBe(false);
+
+    expect(
+      isLogcatBaseFilterActive({
+        levels: { V: false, D: true, I: true, W: true, E: true, F: true },
+        activePatterns: [],
+        excludePatterns: [],
+        livePattern: "",
+      }),
+    ).toBe(true);
+  });
+
+  it("appends retained logcat entries with dedupe and limit", () => {
+    const existing = [
+      { id: 1, text: "E/Tag: first" },
+      { id: 2, text: "E/Tag: second" },
+    ];
+    const incoming = [
+      { id: 2, text: "E/Tag: second duplicate" },
+      { id: 3, text: "E/Tag: third" },
+      { id: 4, text: "E/Tag: fourth" },
+    ];
+
+    expect(appendRetainedLogcatEntries(existing, incoming, 3)).toEqual([
+      { id: 2, text: "E/Tag: second" },
+      { id: 3, text: "E/Tag: third" },
+      { id: 4, text: "E/Tag: fourth" },
+    ]);
+  });
+
+  it("merges retained entries and raw filtered entries by id", () => {
+    const retained = [
+      { id: 1, text: "E/Tag: old match" },
+      { id: 5, text: "W/Tag: retained" },
+    ];
+    const rawFiltered = [
+      { id: 5, text: "W/Tag: from raw" },
+      { id: 9, text: "E/Tag: new match" },
+    ];
+
+    expect(mergeLogcatEntriesById(retained, rawFiltered)).toEqual([
+      { id: 1, text: "E/Tag: old match" },
+      { id: 5, text: "W/Tag: retained" },
+      { id: 9, text: "E/Tag: new match" },
+    ]);
+  });
+
+  it("keeps base filtering and search filtering as separate stages", () => {
+    const batchA = [
+      { id: 1, text: "E/Tag(  1): crash alpha" },
+      { id: 2, text: "I/Tag(  1): noise" },
+      { id: 3, text: "E/Tag(  1): crash beta" },
+    ];
+    const batchB = Array.from({ length: 2500 }, (_, index) => ({
+      id: index + 4,
+      text: "I/Tag(  1): noise",
+    }));
+
+    const baseState: LogcatBaseFilterState = {
+      levels: { V: false, D: false, I: false, W: true, E: true, F: true },
+      activePatterns: ["crash"],
+      excludePatterns: [],
+      livePattern: "",
+    };
+
+    const retainedFromA = filterLogcatEntriesByBaseFilters(batchA, baseState);
+    const rawWindowFromB = filterLogcatEntriesByBaseFilters(batchB, baseState);
+    expect(rawWindowFromB).toEqual([]);
+
+    const merged = mergeLogcatEntriesById(retainedFromA, rawWindowFromB);
+    expect(merged).toEqual([
+      { id: 1, text: "E/Tag(  1): crash alpha" },
+      { id: 3, text: "E/Tag(  1): crash beta" },
+    ]);
+
+    const searched = filterLogcatEntriesBySearch(merged, {
+      searchTerm: "alpha",
+      searchCaseSensitive: false,
+      searchRegex: false,
+      searchOnly: true,
+    });
+
+    expect(searched.lines).toEqual([{ id: 1, text: "E/Tag(  1): crash alpha" }]);
+    expect(searched.matchIds).toEqual([1]);
   });
 });

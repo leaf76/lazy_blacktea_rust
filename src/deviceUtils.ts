@@ -40,6 +40,14 @@ export const reduceSelectionToOne = (previous: string[], devices: DeviceInfo[]):
   return preferred ? [preferred.summary.serial] : [];
 };
 
+export const setPrimarySelection = (previous: string[], serial: string): string[] => {
+  if (previous[0] === serial) {
+    return previous;
+  }
+  const others = previous.filter((item) => item !== serial);
+  return [serial, ...others];
+};
+
 export const formatDeviceInfoMarkdown = (device: DeviceInfo): string => {
   const detail = device.detail;
   const lines = [

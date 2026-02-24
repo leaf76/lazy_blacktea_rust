@@ -41,7 +41,11 @@ import type {
   BugreportResult,
   DeviceFileEntry,
   DeviceInfo,
+  DashboardCardId,
+  DashboardFieldId,
+  DashboardSettings,
   FilePreview,
+  LegacyLogcatPreset,
   LogcatEvent,
   NetProfilerEvent,
   NetProfilerSnapshot,
@@ -60,8 +64,10 @@ import {
   checkScrcpy,
   clearAppData,
   clearLogcat,
+  exportDiagnosticsBundle,
   getAppBasicInfo,
   getAppIcon,
+  getLogcatStatus,
   exportLogcat,
   exportUiHierarchy,
   forceStopApp,
@@ -76,6 +82,7 @@ import {
   listApps,
   listDeviceFiles,
   listDevices,
+  loadLegacyLogcatPresets,
   openAppInfo,
   previewLocalFile,
   pullDeviceFile,
@@ -111,11 +118,16 @@ import {
   uninstallApp,
 } from "./api";
 import {
+  appendRetainedLogcatEntries,
   buildLogcatFilter,
   buildSearchRegex,
   defaultLogcatLevels,
-  filterLogcatEntries,
+  filterLogcatEntriesByBaseFilters,
+  filterLogcatEntriesBySearch,
+  isLogcatBaseFilterActive,
+  mergeLogcatEntriesById,
   parsePidOutput,
+  type LogcatBaseFilterState,
   type LogcatLevelsState,
   type LogcatSourceMode,
 } from "./logcat";
@@ -135,6 +147,16 @@ import {
   formatKhz,
   formatPerSecX100,
 } from "./perf";
+import {
+  buildDashboardCardViews,
+  buildDefaultDashboardSettings,
+  getDashboardFieldLabel,
+  moveDashboardField,
+  normalizeDashboardSettings,
+  toggleDashboardCard,
+  toggleDashboardField,
+  type DashboardCardView,
+} from "./dashboardConfig";
 import { buildLinePath, extractNetSeries, sliceSnapshotsByWindowMs } from "./netProfiler";
 import {
   initialPairingState,
@@ -145,6 +167,7 @@ import {
 import {
   createInitialTaskState,
   createTask,
+  finalizeRestoredTaskState,
   inflateStoredTaskState,
   parseStoredTaskState,
   sanitizeTaskStateForStorage,
@@ -162,6 +185,7 @@ import {
   mergeDeviceDetails,
   reduceSelectionToOne,
   resolveSelectedSerials,
+  setPrimarySelection,
   selectSerialsForGroup,
 } from "./deviceUtils";
 import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
@@ -176,6 +200,7 @@ import {
   sanitizeMultiPathsForStorage,
   sanitizeStoredState,
 } from "./apkInstallerState";
+import { buildGithubBugIssueUrl } from "./githubIssueReport";
 import {
   checkForUpdate,
   installUpdateAndRelaunch,
@@ -239,6 +264,9 @@ const TERMINAL_MAX_LINES = 500;
 const NET_PROFILER_MAX_SAMPLES = 180;
 const APK_INSTALLER_STORAGE_KEY = "lazy_blacktea_apk_installer_v1";
 const SHARED_LOG_FILTERS_STORAGE_KEY = "lazy_blacktea_shared_log_filters_v1";
+const LOGCAT_PRESETS_STORAGE_KEY = "logcat_presets";
+const LOGCAT_PRESETS_LEGACY_MIGRATION_KEY = "lazy_blacktea_logcat_presets_migrated_v1";
+const BUGREPORT_PRESETS_STORAGE_KEY = "bugreport_log_presets_v1";
 
 type StoredSharedLogFiltersV1 = {
   levels?: Record<string, unknown>;
@@ -286,6 +314,32 @@ function loadSharedLogFiltersFromStorage(): { levels: LogcatLevelsState; textChi
     return fallback;
   }
 }
+
+const normalizePresetLevels = (levels?: LogcatLevelsState): LogcatLevelsState => ({
+  ...defaultLogcatLevels,
+  ...(levels ?? {}),
+});
+
+const areStringArraysEqual = (left: string[], right: string[]) => {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+};
+
+const areLogLevelsEqual = (left: LogcatLevelsState, right: LogcatLevelsState) =>
+  LOG_LEVELS.every((level) => left[level] === right[level]);
+
+const summarizeLogLevels = (levels: LogcatLevelsState) => {
+  const enabled = LOG_LEVELS.filter((level) => levels[level]);
+  if (enabled.length === LOG_LEVELS.length) {
+    return "All";
+  }
+  if (enabled.length === 0) {
+    return "None";
+  }
+  return enabled.join(" ");
+};
 
 const appendTerminalBuffer = (
   lines: string[],
@@ -379,6 +433,8 @@ const MemoLogcatLineRow = memo(LogcatLineRow, (prev, next) => {
 const LOGCAT_LINE_HEIGHT_PX = 16;
 const LOGCAT_OUTPUT_PADDING_PX = 8;
 const LOGCAT_OVERSCAN = 80;
+const LOGCAT_RAW_BUFFER_LIMIT = 2000;
+const LOGCAT_RETAINED_LIMIT = 20000;
 
 const LogcatOutput = memo(function LogcatOutput({
   entries,
@@ -940,8 +996,27 @@ function LogLiveFilterBar({
   value,
   onValueChange,
   onAdd,
+  chips,
+  onRemoveChip,
+  onEditChip,
+  onClearChips,
+  showChipsRow,
+  presets,
+  presetSelected,
+  onPresetSelectedChange,
+  presetName,
+  onPresetNameChange,
+  hasSelectedPreset,
+  onApplyPreset,
+  onUpdatePreset,
+  onDeletePreset,
+  onSavePreset,
+  showPresetRow,
   disabled,
   filtersCount,
+  activePresetLabel,
+  levelsSummary,
+  isPresetDirty,
   headerActions,
 }: {
   kind: LogTextChipKind;
@@ -949,10 +1024,44 @@ function LogLiveFilterBar({
   value: string;
   onValueChange: (next: string) => void;
   onAdd: () => void;
+  chips?: LogTextChip[];
+  onRemoveChip?: (chipId: string) => void;
+  onEditChip?: (chip: LogTextChip) => void;
+  onClearChips?: () => void;
+  showChipsRow?: boolean;
+  presets?: Array<{ name: string }>;
+  presetSelected?: string;
+  onPresetSelectedChange?: (next: string) => void;
+  presetName?: string;
+  onPresetNameChange?: (next: string) => void;
+  hasSelectedPreset?: boolean;
+  onApplyPreset?: (name: string) => void;
+  onUpdatePreset?: (name: string) => void;
+  onDeletePreset?: (name: string) => void;
+  onSavePreset?: () => void;
+  showPresetRow?: boolean;
   disabled: boolean;
   filtersCount: number;
+  activePresetLabel?: string;
+  levelsSummary?: string;
+  isPresetDirty?: boolean;
   headerActions?: ReactNode;
 }) {
+  const activeChips = chips ?? [];
+  const shouldShowChipsRow = showChipsRow ?? true;
+  const availablePresets = presets ?? [];
+  const shouldShowPresetRow = showPresetRow ?? false;
+  const nextPresetSelected = presetSelected ?? "";
+  const nextPresetName = presetName ?? "";
+  const canApplyPreset = Boolean(hasSelectedPreset && onApplyPreset && nextPresetSelected);
+  const canUpdatePreset = Boolean(hasSelectedPreset && onUpdatePreset && nextPresetSelected);
+  const canDeletePreset = Boolean(hasSelectedPreset && onDeletePreset && nextPresetSelected);
+  const canSavePreset = Boolean(onSavePreset && nextPresetName.trim());
+  const hasActivePreset = Boolean(activePresetLabel?.trim());
+  const presetLabel = activePresetLabel?.trim() || "None";
+  const levelsLabel = levelsSummary?.trim() || "All";
+  const stateLabel = hasActivePreset ? (isPresetDirty ? "Unsaved changes" : "Saved") : "No preset selected";
+
   return (
     <div className="logcat-filter-grid logcat-live-filter-grid">
       <div className="panel-sub logcat-filter-bar logcat-live-filter-bar">
@@ -994,6 +1103,147 @@ function LogLiveFilterBar({
                 Add
               </button>
             </div>
+            <div className="live-filter-status-strip" role="status" aria-live="polite">
+              <span className="live-filter-status-pill">
+                <span className="live-filter-status-pill-label">Preset</span>
+                <strong>{presetLabel}</strong>
+              </span>
+              <span className="live-filter-status-pill">
+                <span className="live-filter-status-pill-label">Filters</span>
+                <strong>{filtersCount}</strong>
+              </span>
+              <span className="live-filter-status-pill">
+                <span className="live-filter-status-pill-label">Levels</span>
+                <strong>{levelsLabel}</strong>
+              </span>
+              <span className={`live-filter-status-pill ${isPresetDirty ? "is-dirty" : ""}`}>
+                <span className="live-filter-status-pill-label">State</span>
+                <strong>{stateLabel}</strong>
+              </span>
+            </div>
+            {shouldShowChipsRow && (
+              <div className="logcat-live-filter-chip-row">
+                {activeChips.length === 0 ? (
+                  <p className="muted">No active filters yet.</p>
+                ) : (
+                  <>
+                    <div className="logcat-live-filter-chip-list" role="list" aria-label="Active live filters">
+                      {activeChips.map((chip) => (
+                        <span
+                          key={chip.id}
+                          className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
+                          role="listitem"
+                        >
+                          <button
+                            type="button"
+                            className="logcat-live-filter-chip-edit"
+                            onClick={() => onEditChip?.(chip)}
+                            disabled={disabled || !onEditChip}
+                            title="Click to edit"
+                            aria-label={`Edit ${chip.kind === "exclude" ? "exclude" : "include"} filter ${chip.value}`}
+                          >
+                            <span className="bugreport-log-chip-label" title={chip.value}>
+                              {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            className="bugreport-log-chip-remove"
+                            aria-label={`Remove ${chip.kind === "exclude" ? "NOT " : ""}${chip.value}`}
+                            onClick={() => onRemoveChip?.(chip.id)}
+                            disabled={disabled || !onRemoveChip}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={onClearChips}
+                      disabled={disabled || activeChips.length === 0 || !onClearChips}
+                    >
+                      Clear filters
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            {shouldShowPresetRow && (
+              <div className="logcat-presets">
+                <div className="logcat-preset-row single">
+                  <div className="logcat-preset-group left">
+                    <label>Preset</label>
+                    <select
+                      value={nextPresetSelected}
+                      onChange={(event) => onPresetSelectedChange?.(event.target.value)}
+                      disabled={disabled || !onPresetSelectedChange}
+                    >
+                      <option value="">Select preset</option>
+                      {availablePresets.map((preset) => (
+                        <option key={preset.name} value={preset.name}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (nextPresetSelected) {
+                          onApplyPreset?.(nextPresetSelected);
+                        }
+                      }}
+                      disabled={disabled || !canApplyPreset}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => {
+                        if (nextPresetSelected) {
+                          onUpdatePreset?.(nextPresetSelected);
+                        }
+                      }}
+                      disabled={disabled || !canUpdatePreset}
+                    >
+                      Update
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => {
+                        if (nextPresetSelected) {
+                          onDeletePreset?.(nextPresetSelected);
+                        }
+                      }}
+                      disabled={disabled || !canDeletePreset}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                  <div className="logcat-preset-group right">
+                    <label>New</label>
+                    <input
+                      value={nextPresetName}
+                      onChange={(event) => onPresetNameChange?.(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && nextPresetName.trim() && !disabled) {
+                          event.preventDefault();
+                          onSavePreset?.();
+                        }
+                      }}
+                      placeholder="e.g. Crash Only"
+                      disabled={disabled || !onPresetNameChange}
+                    />
+                    <button type="button" onClick={onSavePreset} disabled={disabled || !canSavePreset}>
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1043,6 +1293,7 @@ function SharedRegexFiltersAndPresetsPanel({
   onApplyPreset,
   onDeletePreset,
   onSavePreset,
+  showPresetRow,
   children,
 }: {
   chips: LogTextChip[];
@@ -1062,8 +1313,10 @@ function SharedRegexFiltersAndPresetsPanel({
   onApplyPreset: (name: string) => void;
   onDeletePreset: (name: string) => void;
   onSavePreset: () => void;
+  showPresetRow?: boolean;
   children?: ReactNode;
 }) {
+  const shouldShowPresetRow = showPresetRow ?? true;
   return (
     <div className={`logcat-filter-grid${gridClassName ? ` ${gridClassName}` : ""}`}>
       <div className="panel-sub logcat-filter-bar">
@@ -1121,60 +1374,62 @@ function SharedRegexFiltersAndPresetsPanel({
           </div>
         </div>
 
-        <div className="logcat-presets">
-          <div className="logcat-preset-row single">
-            <div className="logcat-preset-group left">
-              <label>Preset</label>
-              <select
-                value={presetSelected}
-                onChange={(event) => onPresetSelectedChange(event.target.value)}
-                disabled={disabled}
-              >
-                <option value="">Select preset</option>
-                {presets.map((preset) => (
-                  <option key={preset.name} value={preset.name}>
-                    {preset.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => {
-                  if (presetSelected) {
-                    onApplyPreset(presetSelected);
-                  }
-                }}
-                disabled={disabled || !hasSelectedPreset}
-              >
-                Apply
-              </button>
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => {
-                  if (presetSelected) {
-                    onDeletePreset(presetSelected);
-                  }
-                }}
-                disabled={disabled || !hasSelectedPreset}
-              >
-                Delete
-              </button>
-            </div>
-            <div className="logcat-preset-group right">
-              <label>New</label>
-              <input
-                value={presetName}
-                onChange={(event) => onPresetNameChange(event.target.value)}
-                placeholder="e.g. Crash Only"
-                disabled={disabled}
-              />
-              <button type="button" onClick={onSavePreset} disabled={disabled}>
-                Save
-              </button>
+        {shouldShowPresetRow && (
+          <div className="logcat-presets">
+            <div className="logcat-preset-row single">
+              <div className="logcat-preset-group left">
+                <label>Preset</label>
+                <select
+                  value={presetSelected}
+                  onChange={(event) => onPresetSelectedChange(event.target.value)}
+                  disabled={disabled}
+                >
+                  <option value="">Select preset</option>
+                  {presets.map((preset) => (
+                    <option key={preset.name} value={preset.name}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (presetSelected) {
+                      onApplyPreset(presetSelected);
+                    }
+                  }}
+                  disabled={disabled || !hasSelectedPreset}
+                >
+                  Apply
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    if (presetSelected) {
+                      onDeletePreset(presetSelected);
+                    }
+                  }}
+                  disabled={disabled || !hasSelectedPreset}
+                >
+                  Delete
+                </button>
+              </div>
+              <div className="logcat-preset-group right">
+                <label>New</label>
+                <input
+                  value={presetName}
+                  onChange={(event) => onPresetNameChange(event.target.value)}
+                  placeholder="e.g. Crash Only"
+                  disabled={disabled}
+                />
+                <button type="button" onClick={onSavePreset} disabled={disabled}>
+                  Save
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {children}
       </div>
@@ -1183,12 +1438,17 @@ function SharedRegexFiltersAndPresetsPanel({
 }
 
 function App() {
-  type LogcatFilterPreset = {
-    name: string;
-    include: string[];
-    exclude: string[];
+  type LogcatFilterPreset = LegacyLogcatPreset & {
     levels?: LogcatLevelsState;
   };
+  type BugreportFilterPreset = LogcatFilterPreset & {
+    buffer?: string;
+    tag?: string;
+    pid?: string;
+    start?: string;
+    end?: string;
+  };
+  type PresetContext = "logcat" | "bugreport";
 
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
@@ -1262,6 +1522,7 @@ function App() {
     }
   };
   const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
+  const [logcatRetainedBySerial, setLogcatRetainedBySerial] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
   const [logcatSourceValue, setLogcatSourceValue] = useState("");
   const [logLevels, setLogLevels] = useState<LogcatLevelsState>(() => loadSharedLogFiltersFromStorage().levels);
@@ -1269,7 +1530,11 @@ function App() {
   const [logcatPresetName, setLogcatPresetName] = useState("");
   const [logcatPresets, setLogcatPresets] = useState<LogcatFilterPreset[]>([]);
   const [logcatPresetSelected, setLogcatPresetSelected] = useState("");
-  const [logcatFiltersExpanded, setLogcatFiltersExpanded] = useState(false);
+  const [bugreportPresetName, setBugreportPresetName] = useState("");
+  const [bugreportPresets, setBugreportPresets] = useState<BugreportFilterPreset[]>([]);
+  const [bugreportPresetSelected, setBugreportPresetSelected] = useState("");
+  const [presetUpdateModal, setPresetUpdateModal] = useState<null | { context: PresetContext; name: string }>(null);
+  const [presetDeleteModal, setPresetDeleteModal] = useState<null | { context: PresetContext; name: string }>(null);
   const [logcatSearchTerm, setLogcatSearchTerm] = useState("");
   const [logcatSearchRegex, setLogcatSearchRegex] = useState(false);
   const [logcatSearchCaseSensitive, setLogcatSearchCaseSensitive] = useState(false);
@@ -1280,6 +1545,8 @@ function App() {
   const [logcatLastExport, setLogcatLastExport] = useState("");
   const [logcatAdvancedOpen, setLogcatAdvancedOpen] = useState(false);
   const [logcatTextKind, setLogcatTextKind] = useState<LogTextChipKind>("include");
+  const [logcatRunningBySerial, setLogcatRunningBySerial] = useState<Record<string, boolean>>({});
+  const [logcatStatusLoadingBySerial, setLogcatStatusLoadingBySerial] = useState<Record<string, boolean>>({});
   const [sharedLogTextChips, setSharedLogTextChips] = useState<LogTextChip[]>(
     () => loadSharedLogFiltersFromStorage().textChips,
   );
@@ -1577,10 +1844,13 @@ function App() {
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [dashboardConfigOpen, setDashboardConfigOpen] = useState(false);
+  const [dashboardDraft, setDashboardDraft] = useState<DashboardSettings>(buildDefaultDashboardSettings());
   const [pairingState, dispatchPairing] = useReducer(pairingReducer, initialPairingState);
   const [rebootConfirmOpen, setRebootConfirmOpen] = useState(false);
   const [rebootConfirmMode, setRebootConfirmMode] = useState<RebootMode>("normal");
   const [taskState, dispatchTasks] = useReducer(tasksReducer, undefined, () => createInitialTaskState(50));
+  const [githubReportPendingByKey, setGithubReportPendingByKey] = useState<Record<string, boolean>>({});
   const taskStateRef = useRef(taskState);
   useEffect(() => {
     taskStateRef.current = taskState;
@@ -1605,9 +1875,9 @@ function App() {
   const detailRefreshTimerRef = useRef<number | null>(null);
   const deviceAutoRefreshLastWarnAtRef = useRef(0);
   const deviceTrackingLastSnapshotAtRef = useRef<number>(0);
-  const deviceTrackingLastFallbackAtRef = useRef<number>(0);
   const deviceTrackingPendingSnapshotRef = useRef<DeviceInfo[] | null>(null);
   const deviceTrackingRestartInFlightRef = useRef(false);
+  const deviceTrackingNoSnapshotRestartedRef = useRef(false);
   const deviceTrackingFallbackInFlightRef = useRef(false);
   const deviceTrackingStartedAtRef = useRef<number>(0);
   const busyRef = useRef(false);
@@ -1619,6 +1889,15 @@ function App() {
   const logcatPendingRef = useRef<Record<string, string[]>>({});
   const logcatNextIdRef = useRef<Record<string, number>>({});
   const logcatFlushTimerRef = useRef<number | null>(null);
+  const logcatBaseFilterRef = useRef<{ active: boolean; state: LogcatBaseFilterState }>({
+    active: false,
+    state: {
+      levels: { ...defaultLogcatLevels },
+      activePatterns: [],
+      excludePatterns: [],
+      livePattern: "",
+    },
+  });
   const perfLastSerialRef = useRef<string | null>(null);
   const netLastSerialRef = useRef<string | null>(null);
   const filesDragContextRef = useRef<{
@@ -1640,6 +1919,7 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
+  const isLogcatView = location.pathname === "/logcat";
   const isPerformanceView = location.pathname === "/performance";
   const isNetworkView = location.pathname === "/network";
   const isUiInspectorView = location.pathname === "/ui-inspector";
@@ -1649,6 +1929,10 @@ function App() {
     }
   }, [isBugreportLogViewer]);
   const activeSerial = selectedSerials[0];
+  const activeLogcatRunning = activeSerial ? (logcatRunningBySerial[activeSerial] ?? false) : false;
+  const activeLogcatStatusLoading = activeSerial
+    ? (logcatStatusLoadingBySerial[activeSerial] ?? false)
+    : false;
   const activeDevice = useMemo(
     () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
     [devices, activeSerial],
@@ -1669,6 +1953,32 @@ function App() {
       : selectedCount === 1
         ? activeSerial ?? "No device selected"
         : `${selectedCount} devices selected`;
+  const canStartLogcat =
+    !busy &&
+    selectedSerials.length === 1 &&
+    !activeLogcatStatusLoading &&
+    !activeLogcatRunning;
+  const canStopLogcat =
+    !busy &&
+    selectedSerials.length === 1 &&
+    !activeLogcatStatusLoading &&
+    activeLogcatRunning;
+  const logcatStatusLabel =
+    selectedSerials.length !== 1
+      ? "Select one device"
+      : activeLogcatStatusLoading
+        ? "Checking..."
+        : activeLogcatRunning
+          ? "Running"
+          : "Stopped";
+  const logcatStatusTone =
+    selectedSerials.length !== 1
+      ? "idle"
+      : activeLogcatStatusLoading
+        ? "busy"
+        : activeLogcatRunning
+          ? "ok"
+          : "idle";
   const hasFileSelection = filesSelectedPaths.length > 0;
   const fileSelectionLabel = hasFileSelection
     ? `${filesSelectedPaths.length} items selected`
@@ -1981,6 +2291,7 @@ function App() {
 
   useEffect(() => {
     setDevicePopoverOpen(false);
+    setDashboardConfigOpen(false);
   }, [location.pathname]);
 
   useEffect(() => {
@@ -2012,13 +2323,7 @@ function App() {
   };
 
   const handleSelectActiveSerial = (serial: string) => {
-    setSelectedSerials((prev) => {
-      if (prev[0] === serial) {
-        return prev;
-      }
-      const others = prev.filter((s) => s !== serial);
-      return [serial, ...others];
-    });
+    setSelectedSerials((prev) => setPrimarySelection(prev, serial));
   };
 
   const getDeviceTone = (state: string) => {
@@ -2052,7 +2357,8 @@ function App() {
           return;
         }
         const inflated = inflateStoredTaskState(parsed, 50);
-        dispatchTasks({ type: "TASK_SET_ALL", items: inflated.items, max_items: inflated.max_items });
+        const restored = finalizeRestoredTaskState(inflated);
+        dispatchTasks({ type: "TASK_SET_ALL", items: restored.items, max_items: restored.max_items });
       } catch (error) {
         console.warn("Failed to load Task Center state from storage.", error);
       }
@@ -2182,29 +2488,63 @@ function App() {
     [sharedLogTextChips],
   );
 
-  const logcatFiltered = useMemo(
-    () => {
-      const liveInclude = logcatTextKind === "include" ? logcatLiveFilter : "";
-      const liveExclude = logcatTextKind === "exclude" ? logcatLiveFilter : "";
+  const logcatBaseFilterState = useMemo<LogcatBaseFilterState>(() => {
+    const liveInclude = logcatTextKind === "include" ? logcatLiveFilter : "";
+    const liveExclude = logcatTextKind === "exclude" ? logcatLiveFilter : "";
+    return {
+      levels: logLevels,
+      activePatterns: sharedLogRegexFilters.text_terms,
+      excludePatterns: [...sharedLogRegexFilters.text_excludes, liveExclude].filter(Boolean),
+      livePattern: liveInclude,
+    };
+  }, [
+    logLevels,
+    logcatLiveFilter,
+    logcatTextKind,
+    sharedLogRegexFilters.text_terms,
+    sharedLogRegexFilters.text_excludes,
+  ]);
 
-      return filterLogcatEntries(rawLogcatLines, {
-        levels: logLevels,
-        activePatterns: sharedLogRegexFilters.text_terms,
-        excludePatterns: [...sharedLogRegexFilters.text_excludes, liveExclude].filter(Boolean),
-        livePattern: liveInclude,
+  const logcatBaseFilterActive = useMemo(
+    () => isLogcatBaseFilterActive(logcatBaseFilterState),
+    [logcatBaseFilterState],
+  );
+
+  useEffect(() => {
+    logcatBaseFilterRef.current = {
+      active: logcatBaseFilterActive,
+      state: logcatBaseFilterState,
+    };
+  }, [logcatBaseFilterActive, logcatBaseFilterState]);
+
+  const logcatRawBaseFiltered = useMemo(
+    () => filterLogcatEntriesByBaseFilters(rawLogcatLines, logcatBaseFilterState),
+    [rawLogcatLines, logcatBaseFilterState],
+  );
+
+  const logcatRetainedEntries = useMemo<LogcatLineEntry[]>(
+    () => (activeSerial ? logcatRetainedBySerial[activeSerial] ?? [] : []),
+    [activeSerial, logcatRetainedBySerial],
+  );
+
+  const logcatBaseDisplayLines = useMemo(
+    () =>
+      logcatBaseFilterActive
+        ? mergeLogcatEntriesById(logcatRetainedEntries, logcatRawBaseFiltered)
+        : rawLogcatLines,
+    [logcatBaseFilterActive, logcatRetainedEntries, logcatRawBaseFiltered, rawLogcatLines],
+  );
+
+  const logcatFiltered = useMemo(
+    () =>
+      filterLogcatEntriesBySearch(logcatBaseDisplayLines, {
         searchTerm: logcatSearchTerm,
         searchCaseSensitive: logcatSearchCaseSensitive,
         searchRegex: logcatSearchRegex,
         searchOnly: logcatSearchOnly,
-      });
-    },
+      }),
     [
-      rawLogcatLines,
-      logLevels,
-      logcatLiveFilter,
-      logcatTextKind,
-      sharedLogRegexFilters.text_terms,
-      sharedLogRegexFilters.text_excludes,
+      logcatBaseDisplayLines,
       logcatSearchTerm,
       logcatSearchCaseSensitive,
       logcatSearchRegex,
@@ -2224,6 +2564,51 @@ function App() {
     () => logcatPresets.find((preset) => preset.name === logcatPresetSelected) ?? null,
     [logcatPresets, logcatPresetSelected],
   );
+  const selectedBugreportPreset = useMemo(
+    () => bugreportPresets.find((preset) => preset.name === bugreportPresetSelected) ?? null,
+    [bugreportPresets, bugreportPresetSelected],
+  );
+  const logLevelsSummary = useMemo(() => summarizeLogLevels(logLevels), [logLevels]);
+  const logcatPresetDirty = useMemo(() => {
+    if (!selectedLogcatPreset) {
+      return false;
+    }
+    return (
+      !areStringArraysEqual(selectedLogcatPreset.include, sharedLogRegexFilters.text_terms) ||
+      !areStringArraysEqual(selectedLogcatPreset.exclude, sharedLogRegexFilters.text_excludes) ||
+      !areLogLevelsEqual(normalizePresetLevels(selectedLogcatPreset.levels), logLevels)
+    );
+  }, [
+    selectedLogcatPreset,
+    sharedLogRegexFilters.text_terms,
+    sharedLogRegexFilters.text_excludes,
+    logLevels,
+  ]);
+  const bugreportPresetDirty = useMemo(() => {
+    if (!selectedBugreportPreset) {
+      return false;
+    }
+    return (
+      !areStringArraysEqual(selectedBugreportPreset.include, sharedLogRegexFilters.text_terms) ||
+      !areStringArraysEqual(selectedBugreportPreset.exclude, sharedLogRegexFilters.text_excludes) ||
+      !areLogLevelsEqual(normalizePresetLevels(selectedBugreportPreset.levels), logLevels) ||
+      (selectedBugreportPreset.buffer ?? "").trim() !== bugreportLogBuffer.trim() ||
+      (selectedBugreportPreset.tag ?? "").trim() !== bugreportLogTag.trim() ||
+      (selectedBugreportPreset.pid ?? "").trim() !== bugreportLogPid.trim() ||
+      (selectedBugreportPreset.start ?? "").trim() !== bugreportLogStart.trim() ||
+      (selectedBugreportPreset.end ?? "").trim() !== bugreportLogEnd.trim()
+    );
+  }, [
+    selectedBugreportPreset,
+    sharedLogRegexFilters.text_terms,
+    sharedLogRegexFilters.text_excludes,
+    logLevels,
+    bugreportLogBuffer,
+    bugreportLogTag,
+    bugreportLogPid,
+    bugreportLogStart,
+    bugreportLogEnd,
+  ]);
 
   const runningTaskCount = useMemo(
     () => taskState.items.filter((task) => task.status === "running").length,
@@ -2238,6 +2623,15 @@ function App() {
       setLogcatPresetSelected("");
     }
   }, [logcatPresets, logcatPresetSelected]);
+
+  useEffect(() => {
+    if (!bugreportPresetSelected) {
+      return;
+    }
+    if (!bugreportPresets.some((preset) => preset.name === bugreportPresetSelected)) {
+      setBugreportPresetSelected("");
+    }
+  }, [bugreportPresets, bugreportPresetSelected]);
 
   const uiScreenshotSrc = uiScreenshotDataUrl;
   const uiNodesParse = useMemo(() => parseUiNodes(uiXml), [uiXml]);
@@ -2623,6 +3017,92 @@ function App() {
     pushToastRef.current = pushToast;
   }, [pushToast]);
 
+  const buildGithubReportKey = (taskId: string, serial: string) => `${taskId}:${serial}`;
+
+  const parseErrorCode = (value: string | null | undefined) => {
+    if (!value) {
+      return null;
+    }
+    const match = value.match(/\((ERR_[A-Z0-9_]+)\)/);
+    return match ? match[1] : null;
+  };
+
+  const openIssueUrl = async (url: string) => {
+    try {
+      await openPath(url);
+      return true;
+    } catch (error) {
+      console.warn("Failed to open GitHub issue URL via opener plugin.", error);
+    }
+    const popup = window.open(url, "_blank", "noopener,noreferrer");
+    return Boolean(popup);
+  };
+
+  const handleReportTaskIssue = async (task: TaskItem, serial: string) => {
+    const entry = task.devices[serial];
+    if (!entry || entry.status !== "error") {
+      return;
+    }
+
+    const key = buildGithubReportKey(task.id, serial);
+    if (githubReportPendingByKey[key]) {
+      return;
+    }
+    setGithubReportPendingByKey((prev) => ({ ...prev, [key]: true }));
+
+    let diagnosticsPath: string | null = null;
+    let diagnosticsError: string | null = null;
+
+    try {
+      const response = await exportDiagnosticsBundle();
+      diagnosticsPath = response.data.trim() || null;
+    } catch (error) {
+      diagnosticsError = formatError(error);
+    }
+
+    const adbVersion = adbInfoRef.current?.version_output?.trim() || adbInfoRef.current?.error?.trim() || null;
+    const issueUrl = buildGithubBugIssueUrl({
+      taskTitle: task.title,
+      taskKind: task.kind,
+      serial,
+      traceId: task.trace_id ?? null,
+      message: entry.message ?? entry.stderr ?? null,
+      code: parseErrorCode(entry.message) ?? parseErrorCode(entry.stderr),
+      exitCode: entry.exit_code ?? null,
+      outputPath: entry.output_path ?? null,
+      diagnosticsPath,
+      diagnosticsError,
+      appVersion: appVersionLabel,
+      osPlatform: typeof navigator === "undefined" ? "" : navigator.platform,
+      adbVersion,
+    });
+
+    try {
+      const opened = await openIssueUrl(issueUrl);
+      if (!opened) {
+        pushToast("Unable to open GitHub issue form. Please open it manually.", "error");
+        return;
+      }
+
+      if (diagnosticsPath) {
+        pushToast(`GitHub issue form opened. Attach diagnostics bundle: ${diagnosticsPath}`, "info");
+      } else if (diagnosticsError) {
+        pushToast(`GitHub issue form opened. Diagnostics export failed: ${diagnosticsError}`, "info");
+      } else {
+        pushToast("GitHub issue form opened.", "info");
+      }
+    } finally {
+      setGithubReportPendingByKey((prev) => {
+        if (!prev[key]) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+
   const hasRunningTasksRef = useRef(false);
   useEffect(() => {
     hasRunningTasksRef.current = taskState.items.some(
@@ -2769,7 +3249,7 @@ function App() {
     if (task.status === "error" && !settings.desktop_on_error) {
       return;
     }
-    if (task.status === "cancelled" && !settings.desktop_on_cancelled) {
+    if ((task.status === "cancelled" || task.status === "interrupted") && !settings.desktop_on_cancelled) {
       return;
     }
 
@@ -2875,8 +3355,6 @@ function App() {
       setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
       setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
       scheduleDeviceDetailRefresh(800, { notifyOnError });
-      deviceTrackingLastSnapshotAtRef.current = Date.now();
-      deviceTrackingLastFallbackAtRef.current = Date.now();
     } catch (error) {
       if (notifyOnError) {
         pushToast(`Device summary refresh failed: ${formatError(error)}`, "error");
@@ -3023,6 +3501,13 @@ function App() {
   }, [config]);
 
   useEffect(() => {
+    if (dashboardConfigOpen) {
+      return;
+    }
+    setDashboardDraft(normalizeDashboardSettings(config?.dashboard));
+  }, [config?.dashboard, dashboardConfigOpen]);
+
+  useEffect(() => {
     terminalActiveSerialsRef.current = terminalActiveSerials;
   }, [terminalActiveSerials]);
 
@@ -3059,7 +3544,7 @@ function App() {
         return;
       }
       deviceTrackingLastSnapshotAtRef.current = Date.now();
-      deviceTrackingLastFallbackAtRef.current = Date.now();
+      deviceTrackingNoSnapshotRestartedRef.current = false;
       if (busyRef.current) {
         deviceTrackingPendingSnapshotRef.current = nextDevices;
         return;
@@ -3070,7 +3555,7 @@ function App() {
 
     deviceTrackingStartedAtRef.current = Date.now();
     deviceTrackingLastSnapshotAtRef.current = 0;
-    deviceTrackingLastFallbackAtRef.current = 0;
+    deviceTrackingNoSnapshotRestartedRef.current = false;
     void startDeviceTracking().catch((error) => warnThrottled(error, "Device tracking start failed."));
     void refreshDeviceSummaryOnce(false);
     return () => {
@@ -3108,26 +3593,19 @@ function App() {
 
       const now = Date.now();
       const lastSnapshotAt = deviceTrackingLastSnapshotAtRef.current;
-      const lastFallbackAt = deviceTrackingLastFallbackAtRef.current;
       const startedAt = deviceTrackingStartedAtRef.current;
       const warmupMs = Math.max(3_000, intervalMs);
       const maxStartWaitMs = Math.max(10_000, intervalMs * 2);
-      const staleWindowMs = Math.max(12_000, intervalMs * 3);
 
       if (now - startedAt < warmupMs) {
         return;
       }
 
-      // `adb track-devices` does not emit periodic snapshots when the device list is unchanged.
-      // We still keep a periodic fallback summary refresh for heartbeat recovery.
       if (lastSnapshotAt !== 0) {
-        if (
-          now - lastSnapshotAt >= staleWindowMs &&
-          now - lastFallbackAt >= intervalMs
-        ) {
-          void refreshDeviceSummaryOnce(false);
-          deviceTrackingLastFallbackAtRef.current = now;
-        }
+        return;
+      }
+
+      if (deviceTrackingNoSnapshotRestartedRef.current) {
         return;
       }
 
@@ -3136,6 +3614,7 @@ function App() {
       }
 
       deviceTrackingRestartInFlightRef.current = true;
+      deviceTrackingNoSnapshotRestartedRef.current = true;
       void (async () => {
         try {
           await stopDeviceTracking();
@@ -3146,10 +3625,10 @@ function App() {
           deviceTrackingStartedAtRef.current = Date.now();
           await startDeviceTracking();
           deviceTrackingLastSnapshotAtRef.current = 0;
-          deviceTrackingLastFallbackAtRef.current = 0;
           void refreshDeviceSummaryOnce(false);
         } catch (error) {
           console.warn("Device tracking restart failed.", error);
+          void refreshDeviceSummaryOnce(false);
         } finally {
           deviceTrackingRestartInFlightRef.current = false;
         }
@@ -3208,78 +3687,257 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const stored = localStorage.getItem("logcat_presets");
-    if (!stored) {
-      return;
-    }
-    try {
-      const parsed = JSON.parse(stored) as unknown;
-      if (Array.isArray(parsed)) {
-        const asStringArray = (value: unknown) => {
-          if (!Array.isArray(value)) {
-            return [];
-          }
-          return value
-            .filter((item): item is string => typeof item === "string")
-            .map((item) => item.trim())
-            .filter(Boolean);
-        };
+    let cancelled = false;
 
+    const asStringArray = (value: unknown) => {
+      if (!Array.isArray(value)) {
+        return [];
+      }
+      return value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 50);
+    };
+
+    const parseLogcatPreset = (item: unknown): LogcatFilterPreset | null => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === "string" ? record.name.trim() : "";
+      if (!name) {
+        return null;
+      }
+
+      let include = asStringArray(record.include);
+      let exclude = asStringArray(record.exclude);
+
+      const legacyPatterns = asStringArray(record.patterns);
+      if (include.length === 0 && exclude.length === 0 && legacyPatterns.length > 0) {
+        include = legacyPatterns;
+      }
+
+      let levels: LogcatLevelsState | undefined;
+      if (record.levels && typeof record.levels === "object") {
+        const levelsRecord = record.levels as Record<string, unknown>;
+        const parsedLevels: Partial<LogcatLevelsState> = {};
+        let ok = true;
+        LOG_LEVELS.forEach((level) => {
+          const value = levelsRecord[level];
+          if (typeof value !== "boolean") {
+            ok = false;
+          } else {
+            parsedLevels[level] = value;
+          }
+        });
+        if (ok) {
+          levels = parsedLevels as LogcatLevelsState;
+        }
+      }
+
+      return {
+        name,
+        include,
+        exclude,
+        ...(levels ? { levels } : {}),
+      };
+    };
+
+    const parseStoredPresets = (stored: string | null): LogcatFilterPreset[] => {
+      if (!stored) {
+        return [];
+      }
+      try {
+        const parsed = JSON.parse(stored) as unknown;
+        if (!Array.isArray(parsed)) {
+          return [];
+        }
         const nextPresets: LogcatFilterPreset[] = [];
         parsed.forEach((item) => {
-          if (!item || typeof item !== "object") {
-            return;
+          const preset = parseLogcatPreset(item);
+          if (preset) {
+            nextPresets.push(preset);
           }
-          const record = item as Record<string, unknown>;
-          const name = typeof record.name === "string" ? record.name.trim() : "";
-          if (!name) {
-            return;
-          }
-
-          let include = asStringArray(record.include).slice(0, 50);
-          let exclude = asStringArray(record.exclude).slice(0, 50);
-
-          const legacyPatterns = asStringArray(record.patterns).slice(0, 50);
-          if (include.length === 0 && exclude.length === 0 && legacyPatterns.length > 0) {
-            include = legacyPatterns;
-          }
-
-          let levels: LogcatLevelsState | undefined;
-          if (record.levels && typeof record.levels === "object") {
-            const levelsRecord = record.levels as Record<string, unknown>;
-            const parsedLevels: Partial<LogcatLevelsState> = {};
-            let ok = true;
-            LOG_LEVELS.forEach((level) => {
-              const value = levelsRecord[level];
-              if (typeof value !== "boolean") {
-                ok = false;
-              } else {
-                parsedLevels[level] = value;
-              }
-            });
-            if (ok) {
-              levels = parsedLevels as LogcatLevelsState;
-            }
-          }
-
-          nextPresets.push({
-            name,
-            include,
-            exclude,
-            ...(levels ? { levels } : {}),
-          });
         });
+        return nextPresets;
+      } catch {
+        return [];
+      }
+    };
 
+    void (async () => {
+      const localPresets = parseStoredPresets(localStorage.getItem(LOGCAT_PRESETS_STORAGE_KEY));
+      let nextPresets = localPresets;
+
+      if (isTauriRuntime()) {
+        let shouldImportLegacy = false;
+        try {
+          shouldImportLegacy =
+            localStorage.getItem(LOGCAT_PRESETS_LEGACY_MIGRATION_KEY) !== "1";
+        } catch (error) {
+          console.warn("Failed to read logcat preset migration flag.", error);
+        }
+
+        if (shouldImportLegacy) {
+          try {
+            const response = await loadLegacyLogcatPresets();
+            if (response.data.length > 0) {
+              const merged = [...localPresets];
+              const names = new Set(localPresets.map((preset) => preset.name));
+              response.data.forEach((legacyPreset) => {
+                const parsedPreset = parseLogcatPreset(legacyPreset);
+                if (!parsedPreset || names.has(parsedPreset.name)) {
+                  return;
+                }
+                merged.push(parsedPreset);
+                names.add(parsedPreset.name);
+              });
+              nextPresets = merged;
+            }
+            try {
+              localStorage.setItem(LOGCAT_PRESETS_LEGACY_MIGRATION_KEY, "1");
+            } catch (error) {
+              console.warn("Failed to persist logcat preset migration flag.", error);
+            }
+          } catch (error) {
+            console.warn("Failed to import legacy logcat presets.", error);
+          }
+        }
+      }
+
+      if (!cancelled) {
         setLogcatPresets(nextPresets);
       }
-    } catch {
-      setLogcatPresets([]);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(LOGCAT_PRESETS_STORAGE_KEY, JSON.stringify(logcatPresets));
+  }, [logcatPresets]);
+
+  useEffect(() => {
+    const asStringArray = (value: unknown) => {
+      if (!Array.isArray(value)) {
+        return [];
+      }
+      return value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 50);
+    };
+
+    const parseLogcatPreset = (item: unknown): LogcatFilterPreset | null => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === "string" ? record.name.trim() : "";
+      if (!name) {
+        return null;
+      }
+
+      let include = asStringArray(record.include);
+      let exclude = asStringArray(record.exclude);
+
+      const legacyPatterns = asStringArray(record.patterns);
+      if (include.length === 0 && exclude.length === 0 && legacyPatterns.length > 0) {
+        include = legacyPatterns;
+      }
+
+      let levels: LogcatLevelsState | undefined;
+      if (record.levels && typeof record.levels === "object") {
+        const levelsRecord = record.levels as Record<string, unknown>;
+        const parsedLevels: Partial<LogcatLevelsState> = {};
+        let ok = true;
+        LOG_LEVELS.forEach((level) => {
+          const value = levelsRecord[level];
+          if (typeof value !== "boolean") {
+            ok = false;
+          } else {
+            parsedLevels[level] = value;
+          }
+        });
+        if (ok) {
+          levels = parsedLevels as LogcatLevelsState;
+        }
+      }
+
+      return {
+        name,
+        include,
+        exclude,
+        ...(levels ? { levels } : {}),
+      };
+    };
+
+    const parseOptionalText = (value: unknown) =>
+      typeof value === "string" ? value.trim() : "";
+
+    const parseBugreportPreset = (item: unknown): BugreportFilterPreset | null => {
+      const base = parseLogcatPreset(item);
+      if (!base) {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const buffer = parseOptionalText(record.buffer);
+      const tag = parseOptionalText(record.tag);
+      const pid = parseOptionalText(record.pid);
+      const start = parseOptionalText(record.start);
+      const end = parseOptionalText(record.end);
+      return {
+        ...base,
+        ...(buffer ? { buffer } : {}),
+        ...(tag ? { tag } : {}),
+        ...(pid ? { pid } : {}),
+        ...(start ? { start } : {}),
+        ...(end ? { end } : {}),
+      };
+    };
+
+    const parseStoredPresets = (stored: string | null): BugreportFilterPreset[] => {
+      if (!stored) {
+        return [];
+      }
+      try {
+        const parsed = JSON.parse(stored) as unknown;
+        if (!Array.isArray(parsed)) {
+          return [];
+        }
+        const nextPresets: BugreportFilterPreset[] = [];
+        parsed.forEach((item) => {
+          const preset = parseBugreportPreset(item);
+          if (preset) {
+            nextPresets.push(preset);
+          }
+        });
+        return nextPresets;
+      } catch {
+        return [];
+      }
+    };
+
+    const storedBugreportPresets = localStorage.getItem(BUGREPORT_PRESETS_STORAGE_KEY);
+    if (storedBugreportPresets) {
+      setBugreportPresets(parseStoredPresets(storedBugreportPresets));
+      return;
+    }
+
+    const logcatPresetFallback = localStorage.getItem(LOGCAT_PRESETS_STORAGE_KEY);
+    const fallbackPresets = parseStoredPresets(logcatPresetFallback);
+    if (fallbackPresets.length > 0) {
+      setBugreportPresets(fallbackPresets);
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("logcat_presets", JSON.stringify(logcatPresets));
-  }, [logcatPresets]);
+    localStorage.setItem(BUGREPORT_PRESETS_STORAGE_KEY, JSON.stringify(bugreportPresets));
+  }, [bugreportPresets]);
 
   useEffect(() => {
     if (!config) {
@@ -3318,21 +3976,60 @@ function App() {
         return;
       }
       logcatPendingRef.current = {};
+      const appendedEntriesBySerial: Record<string, LogcatLineEntry[]> = {};
+      serials.forEach((serial) => {
+        const appended = pending[serial] ?? [];
+        let nextId = logcatNextIdRef.current[serial] ?? 0;
+        const appendedEntries: LogcatLineEntry[] = appended.map((text) => {
+          nextId += 1;
+          return { id: nextId, text };
+        });
+        logcatNextIdRef.current[serial] = nextId;
+        appendedEntriesBySerial[serial] = appendedEntries;
+      });
+
       setLogcatLines((prev) => {
         const next: Record<string, LogcatLineEntry[]> = { ...prev };
         serials.forEach((serial) => {
           const existing = next[serial] ?? [];
-          const appended = pending[serial] ?? [];
-          let nextId =
-            logcatNextIdRef.current[serial] ??
-            existing[existing.length - 1]?.id ??
-            0;
-          const appendedEntries: LogcatLineEntry[] = appended.map((text) => {
-            nextId += 1;
-            return { id: nextId, text };
-          });
-          logcatNextIdRef.current[serial] = nextId;
-          next[serial] = [...existing, ...appendedEntries].slice(-2000);
+          const appendedEntries = appendedEntriesBySerial[serial] ?? [];
+          next[serial] = [...existing, ...appendedEntries].slice(-LOGCAT_RAW_BUFFER_LIMIT);
+        });
+        return next;
+      });
+
+      const baseFilterSnapshot = logcatBaseFilterRef.current;
+      if (!baseFilterSnapshot.active) {
+        return;
+      }
+
+      setLogcatRetainedBySerial((prev) => {
+        let next = prev;
+        serials.forEach((serial) => {
+          const appendedEntries = appendedEntriesBySerial[serial] ?? [];
+          if (!appendedEntries.length) {
+            return;
+          }
+          const matchedEntries = filterLogcatEntriesByBaseFilters(
+            appendedEntries,
+            baseFilterSnapshot.state,
+          );
+          if (!matchedEntries.length) {
+            return;
+          }
+          const existing = prev[serial] ?? [];
+          const retained = appendRetainedLogcatEntries(
+            existing,
+            matchedEntries,
+            LOGCAT_RETAINED_LIMIT,
+          );
+          if (retained === existing) {
+            return;
+          }
+          if (next === prev) {
+            next = { ...prev };
+          }
+          next[serial] = retained;
         });
         return next;
       });
@@ -4497,6 +5194,18 @@ function App() {
     setSharedLogTextChips([]);
   };
 
+  const editSharedLogFilterChip = (chip: LogTextChip) => {
+    setLogcatTextKind(chip.kind);
+    setLogcatLiveFilter(chip.value);
+    setSharedLogTextChips((prev) => removeLogTextChip(prev, chip.id));
+  };
+
+  const editBugreportLogFilterChip = (chip: LogTextChip) => {
+    setBugreportLogFilterKind(chip.kind);
+    setBugreportLogLiveFilter(chip.value);
+    setSharedLogTextChips((prev) => removeLogTextChip(prev, chip.id));
+  };
+
   const addLogcatLiveFilter = () => {
     if (addSharedLogFilter(logcatTextKind, logcatLiveFilter)) {
       setLogcatLiveFilter("");
@@ -4509,18 +5218,12 @@ function App() {
     }
   };
 
-  const saveLogcatPreset = () => {
-    const name = logcatPresetName.trim();
-    if (!name) {
-      pushToast("Preset name is required.", "error");
-      return;
-    }
-
+  const buildLogcatPresetFromCurrent = (name: string): LogcatFilterPreset | null => {
     const hasAnyFilters = sharedLogTextChips.length > 0;
     const hasLevelOverrides = LOG_LEVELS.some((level) => !logLevels[level]);
     if (!hasAnyFilters && !hasLevelOverrides) {
       pushToast("Preset must include at least one filter or a level override.", "error");
-      return;
+      return null;
     }
 
     const { text_terms: include, text_excludes: exclude } = buildLogTextFilters(sharedLogTextChips);
@@ -4539,11 +5242,51 @@ function App() {
       exclude,
       levels: levelsSnapshot,
     };
+    return nextPreset;
+  };
+
+  const saveLogcatPreset = (nameInput: string) => {
+    const name = nameInput.trim();
+    if (!name) {
+      pushToast("Preset name is required.", "error");
+      return false;
+    }
+    if (logcatPresets.some((preset) => preset.name === name)) {
+      pushToast("Preset name already exists. Use Update to overwrite.", "error");
+      return false;
+    }
+
+    const nextPreset = buildLogcatPresetFromCurrent(name);
+    if (!nextPreset) {
+      return false;
+    }
 
     setLogcatPresets((prev) => [...prev.filter((preset) => preset.name !== name), nextPreset]);
     setLogcatPresetName("");
     setLogcatPresetSelected(name);
     pushToast("Preset saved.", "info");
+    return true;
+  };
+
+  const updateLogcatPreset = (name: string) => {
+    const target = name.trim();
+    if (!target) {
+      pushToast("Select a preset to update.", "error");
+      return false;
+    }
+    if (!logcatPresets.some((preset) => preset.name === target)) {
+      pushToast("Preset does not exist.", "error");
+      return false;
+    }
+    const nextPreset = buildLogcatPresetFromCurrent(target);
+    if (!nextPreset) {
+      return false;
+    }
+    setLogcatPresets((prev) => [...prev.filter((preset) => preset.name !== target), nextPreset]);
+    setLogcatPresetName(target);
+    setLogcatPresetSelected(target);
+    pushToast("Preset updated.", "info");
+    return true;
   };
 
   const applyLogcatPreset = (name: string) => {
@@ -4584,15 +5327,253 @@ function App() {
   };
 
   const deleteLogcatPreset = (name: string) => {
-    setLogcatPresets((prev) => prev.filter((item) => item.name !== name));
-    if (logcatPresetSelected === name) {
+    const target = name.trim();
+    if (!target) {
+      pushToast("Select a preset to delete.", "error");
+      return false;
+    }
+    if (!logcatPresets.some((preset) => preset.name === target)) {
+      pushToast("Preset does not exist.", "error");
+      return false;
+    }
+    setLogcatPresets((prev) => prev.filter((item) => item.name !== target));
+    if (logcatPresetSelected === target) {
       setLogcatPresetSelected("");
     }
+    if (logcatPresetName.trim() === target) {
+      setLogcatPresetName("");
+    }
+    pushToast("Preset deleted.", "info");
+    return true;
   };
+
+  const buildBugreportPresetFromCurrent = (name: string): BugreportFilterPreset | null => {
+    const hasAnyFilters = sharedLogTextChips.length > 0;
+    const hasLevelOverrides = LOG_LEVELS.some((level) => !logLevels[level]);
+    const buffer = bugreportLogBuffer.trim();
+    const tag = bugreportLogTag.trim();
+    const pid = bugreportLogPid.trim();
+    const start = bugreportLogStart.trim();
+    const end = bugreportLogEnd.trim();
+    const hasBugreportMeta = Boolean(buffer || tag || pid || start || end);
+    if (!hasAnyFilters && !hasLevelOverrides && !hasBugreportMeta) {
+      pushToast("Preset must include at least one filter, level override, or bugreport condition.", "error");
+      return null;
+    }
+
+    const { text_terms: include, text_excludes: exclude } = buildLogTextFilters(sharedLogTextChips);
+    const levelsSnapshot: LogcatLevelsState = {
+      V: logLevels.V,
+      D: logLevels.D,
+      I: logLevels.I,
+      W: logLevels.W,
+      E: logLevels.E,
+      F: logLevels.F,
+    };
+
+    const nextPreset: BugreportFilterPreset = {
+      name,
+      include,
+      exclude,
+      levels: levelsSnapshot,
+      ...(buffer ? { buffer } : {}),
+      ...(tag ? { tag } : {}),
+      ...(pid ? { pid } : {}),
+      ...(start ? { start } : {}),
+      ...(end ? { end } : {}),
+    };
+    return nextPreset;
+  };
+
+  const saveBugreportPreset = (nameInput: string) => {
+    const name = nameInput.trim();
+    if (!name) {
+      pushToast("Preset name is required.", "error");
+      return false;
+    }
+    if (bugreportPresets.some((preset) => preset.name === name)) {
+      pushToast("Preset name already exists. Use Update to overwrite.", "error");
+      return false;
+    }
+
+    const nextPreset = buildBugreportPresetFromCurrent(name);
+    if (!nextPreset) {
+      return false;
+    }
+
+    setBugreportPresets((prev) => [...prev.filter((preset) => preset.name !== name), nextPreset]);
+    setBugreportPresetName("");
+    setBugreportPresetSelected(name);
+    pushToast("Bugreport preset saved.", "info");
+    return true;
+  };
+
+  const updateBugreportPreset = (name: string) => {
+    const target = name.trim();
+    if (!target) {
+      pushToast("Select a preset to update.", "error");
+      return false;
+    }
+    if (!bugreportPresets.some((preset) => preset.name === target)) {
+      pushToast("Preset does not exist.", "error");
+      return false;
+    }
+    const nextPreset = buildBugreportPresetFromCurrent(target);
+    if (!nextPreset) {
+      return false;
+    }
+
+    setBugreportPresets((prev) => [...prev.filter((preset) => preset.name !== target), nextPreset]);
+    setBugreportPresetName(target);
+    setBugreportPresetSelected(target);
+    pushToast("Bugreport preset updated.", "info");
+    return true;
+  };
+
+  const applyBugreportPreset = (name: string) => {
+    const preset = bugreportPresets.find((item) => item.name === name);
+    if (!preset) {
+      return;
+    }
+
+    const invalidPatterns: string[] = [];
+    let nextChips: LogTextChip[] = [];
+    preset.include.forEach((pattern) => {
+      try {
+        // eslint-disable-next-line no-new
+        new RegExp(pattern, "i");
+        nextChips = addLogTextChip(nextChips, "include", pattern);
+      } catch {
+        invalidPatterns.push(pattern);
+      }
+    });
+    preset.exclude.forEach((pattern) => {
+      try {
+        // eslint-disable-next-line no-new
+        new RegExp(pattern, "i");
+        nextChips = addLogTextChip(nextChips, "exclude", pattern);
+      } catch {
+        invalidPatterns.push(pattern);
+      }
+    });
+
+    if (invalidPatterns.length > 0) {
+      pushToast("Some preset patterns were invalid and were ignored.", "error");
+    }
+
+    setSharedLogTextChips(nextChips);
+    if (preset.levels) {
+      setLogLevels(preset.levels);
+    }
+    setBugreportLogBuffer(preset.buffer ?? "");
+    setBugreportLogTag(preset.tag ?? "");
+    setBugreportLogPid(preset.pid ?? "");
+    setBugreportLogStart(preset.start ?? "");
+    setBugreportLogEnd(preset.end ?? "");
+    setBugreportLogLiveFilter("");
+  };
+
+  const deleteBugreportPreset = (name: string) => {
+    const target = name.trim();
+    if (!target) {
+      pushToast("Select a preset to delete.", "error");
+      return false;
+    }
+    if (!bugreportPresets.some((preset) => preset.name === target)) {
+      pushToast("Preset does not exist.", "error");
+      return false;
+    }
+    setBugreportPresets((prev) => prev.filter((item) => item.name !== target));
+    if (bugreportPresetSelected === target) {
+      setBugreportPresetSelected("");
+    }
+    if (bugreportPresetName.trim() === target) {
+      setBugreportPresetName("");
+    }
+    pushToast("Bugreport preset deleted.", "info");
+    return true;
+  };
+
+  const presetContextLabel = (context: PresetContext) =>
+    context === "logcat" ? "Logcat" : "Bugreport";
+
+  const closePresetUpdateModal = () => setPresetUpdateModal(null);
+  const closePresetDeleteModal = () => setPresetDeleteModal(null);
+
+  const openPresetUpdateModal = (context: PresetContext, name: string) => {
+    const target = name.trim();
+    if (!target) {
+      pushToast("Select a preset to update.", "error");
+      return;
+    }
+    setPresetUpdateModal({ context, name: target });
+  };
+
+  const openPresetDeleteModal = (context: PresetContext, name: string) => {
+    const target = name.trim();
+    if (!target) {
+      pushToast("Select a preset to delete.", "error");
+      return;
+    }
+    setPresetDeleteModal({ context, name: target });
+  };
+
+  const handlePresetUpdateConfirm = () => {
+    if (!presetUpdateModal) {
+      return;
+    }
+    const ok =
+      presetUpdateModal.context === "logcat"
+        ? updateLogcatPreset(presetUpdateModal.name)
+        : updateBugreportPreset(presetUpdateModal.name);
+    if (ok) {
+      closePresetUpdateModal();
+    }
+  };
+
+  const handlePresetDeleteConfirm = () => {
+    if (!presetDeleteModal) {
+      return;
+    }
+    const ok =
+      presetDeleteModal.context === "logcat"
+        ? deleteLogcatPreset(presetDeleteModal.name)
+        : deleteBugreportPreset(presetDeleteModal.name);
+    if (ok) {
+      closePresetDeleteModal();
+    }
+  };
+
+  const refreshLogcatStatus = async (serial: string, options: { silent?: boolean } = {}) => {
+    setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: true }));
+    try {
+      const response = await getLogcatStatus(serial);
+      setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: response.data.running }));
+      return response.data.running;
+    } catch (error) {
+      if (!options.silent) {
+        pushToast(formatError(error), "error");
+      }
+      return null;
+    } finally {
+      setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: false }));
+    }
+  };
+
+  useEffect(() => {
+    if (!isLogcatView || selectedSerials.length !== 1 || !activeSerial) {
+      return;
+    }
+    void refreshLogcatStatus(activeSerial, { silent: true });
+  }, [isLogcatView, selectedSerials.length, activeSerial]);
 
   const handleLogcatStart = async () => {
     const serial = ensureSingleSelection("logcat");
     if (!serial) {
+      return;
+    }
+    if (logcatRunningBySerial[serial]) {
+      pushToast("Logcat is already running.", "info");
       return;
     }
     const sourceValue = logcatSourceValue.trim();
@@ -4629,10 +5610,18 @@ function App() {
     setBusy(true);
     try {
       await startLogcat(serial, filter || undefined);
+      setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: true }));
+      void refreshLogcatStatus(serial, { silent: true });
       setLogcatActiveFilterSummary(filter || "All");
       pushToast("Logcat started.", "info");
     } catch (error) {
-      pushToast(formatError(error), "error");
+      const message = formatError(error);
+      if (message.toLowerCase().includes("already running")) {
+        setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: true }));
+        pushToast("Logcat is already running.", "info");
+      } else {
+        pushToast(message, "error");
+      }
     } finally {
       setBusy(false);
     }
@@ -4643,15 +5632,32 @@ function App() {
     if (!serial) {
       return;
     }
+    if (!logcatRunningBySerial[serial]) {
+      pushToast("Logcat is already stopped.", "info");
+      return;
+    }
     setBusy(true);
     try {
       await stopLogcat(serial);
+      setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: false }));
+      void refreshLogcatStatus(serial, { silent: true });
       pushToast("Logcat stopped.", "info");
     } catch (error) {
-      pushToast(formatError(error), "error");
+      const message = formatError(error);
+      if (message.toLowerCase().includes("not running")) {
+        setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: false }));
+        pushToast("Logcat is already stopped.", "info");
+      } else {
+        pushToast(message, "error");
+      }
     } finally {
       setBusy(false);
     }
+  };
+
+  const clearLogcatLocalCache = (serial: string) => {
+    setLogcatLines((prev) => ({ ...prev, [serial]: [] }));
+    setLogcatRetainedBySerial((prev) => ({ ...prev, [serial]: [] }));
   };
 
   const handleLogcatClearBuffer = async () => {
@@ -4662,7 +5668,7 @@ function App() {
     setBusy(true);
     try {
       await clearLogcat(serial);
-      setLogcatLines((prev) => ({ ...prev, [serial]: [] }));
+      clearLogcatLocalCache(serial);
       pushToast("Logcat buffer cleared.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -4676,7 +5682,7 @@ function App() {
     if (!serial) {
       return;
     }
-    setLogcatLines((prev) => ({ ...prev, [serial]: [] }));
+    clearLogcatLocalCache(serial);
   };
 
   const handleLogcatExport = async () => {
@@ -6492,7 +7498,7 @@ function App() {
     setBusy(true);
     try {
       await clearLogcat(singleSerial);
-      setLogcatLines((prev) => ({ ...prev, [singleSerial]: [] }));
+      clearLogcatLocalCache(singleSerial);
       pushToast("Logcat cleared.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -6528,24 +7534,86 @@ function App() {
     }
   };
 
+  const buildConfigForSave = (
+    base: AppConfig,
+    options: { dashboard?: DashboardSettings } = {},
+  ): AppConfig => ({
+    ...base,
+    apk_install: {
+      ...base.apk_install,
+      allow_downgrade: apkAllowDowngrade,
+      replace_existing: apkReplace,
+      grant_permissions: apkGrant,
+      allow_test_packages: apkAllowTest,
+      extra_args: apkExtraArgs,
+    },
+    device_groups: expandGroups(groupMap),
+    dashboard: normalizeDashboardSettings(options.dashboard ?? base.dashboard),
+  });
+
+  const openDashboardConfig = () => {
+    setDashboardDraft(normalizeDashboardSettings(config?.dashboard));
+    setDashboardConfigOpen(true);
+  };
+
+  const closeDashboardConfig = () => {
+    if (busy) {
+      return;
+    }
+    setDashboardConfigOpen(false);
+  };
+
+  const handleDashboardCardToggle = (cardId: DashboardCardId, enabled: boolean) => {
+    setDashboardDraft((prev) => toggleDashboardCard(prev, cardId, enabled));
+  };
+
+  const handleDashboardFieldToggle = (
+    cardId: DashboardCardId,
+    fieldId: DashboardFieldId,
+    enabled: boolean,
+  ) => {
+    setDashboardDraft((prev) => toggleDashboardField(prev, cardId, fieldId, enabled));
+  };
+
+  const handleDashboardFieldMove = (
+    cardId: DashboardCardId,
+    fieldId: DashboardFieldId,
+    direction: "up" | "down",
+  ) => {
+    setDashboardDraft((prev) => moveDashboardField(prev, cardId, fieldId, direction));
+  };
+
+  const handleDashboardReset = () => {
+    setDashboardDraft(buildDefaultDashboardSettings());
+  };
+
+  const handleDashboardSave = async () => {
+    if (!config) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = buildConfigForSave(config, { dashboard: dashboardDraft });
+      const response = await saveConfig(updated);
+      setConfig(response.data);
+      setGroupMap(flattenGroups(response.data.device_groups));
+      setDashboardDraft(normalizeDashboardSettings(response.data.dashboard));
+      setDashboardConfigOpen(false);
+      pushToast("Dashboard preferences saved.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSaveConfig = async () => {
     if (!config) {
       return;
     }
     setBusy(true);
     try {
-      const updated = {
-        ...config,
-        apk_install: {
-          ...config.apk_install,
-          allow_downgrade: apkAllowDowngrade,
-          replace_existing: apkReplace,
-          grant_permissions: apkGrant,
-          allow_test_packages: apkAllowTest,
-          extra_args: apkExtraArgs,
-        },
-        device_groups: expandGroups(groupMap),
-      };
+      const updated = buildConfigForSave(config);
       const response = await saveConfig(updated);
       setConfig(response.data);
       setGroupMap(flattenGroups(response.data.device_groups));
@@ -7058,31 +8126,30 @@ function App() {
     },
   ];
 
+  const dashboardCardClassMap: Record<DashboardCardId, string> = {
+    overview: "dashboard-hero",
+    device_profile: "dashboard-connection",
+    capacity_battery: "dashboard-recents",
+    connection_health: "dashboard-health",
+  };
+
   const DashboardView = () => {
-    const detail = activeDevice?.detail;
-    const deviceName =
-      detail?.model ?? activeDevice?.summary.model ?? activeSerial ?? "No device selected";
-    const deviceState = activeDevice?.summary.state ?? "No device";
-    const deviceStateTone =
-      deviceState === "device"
-        ? "ok"
-        : deviceState === "unauthorized"
-          ? "error"
-          : deviceState === "offline"
-            ? "warn"
-            : "idle";
-    const wifiState =
-      detail?.wifi_is_on == null ? "Unknown" : detail.wifi_is_on ? "On" : "Off";
-    const btState =
-      detail?.bt_is_on == null ? "Unknown" : detail.bt_is_on ? "On" : "Off";
-    const wifiLabel =
-      detail?.wifi_is_on == null ? "WiFi Unknown" : detail.wifi_is_on ? "WiFi On" : "WiFi Off";
-    const btLabel =
-      detail?.bt_is_on == null
-        ? "Bluetooth Unknown"
-        : detail.bt_is_on
-          ? "Bluetooth On"
-          : "Bluetooth Off";
+    const dashboardSettings = dashboardConfigOpen
+      ? normalizeDashboardSettings(dashboardDraft)
+      : normalizeDashboardSettings(config?.dashboard);
+    const dashboardCards = buildDashboardCardViews(
+      {
+        devices,
+        selectedSerials,
+        activeSerial,
+        runningTaskCount,
+        selectedConnectedCount,
+        adbAvailable: adbInfo?.available ?? null,
+        scrcpyAvailable: scrcpyInfo?.available ?? null,
+      },
+      dashboardSettings,
+    );
+    const editableCards = normalizeDashboardSettings(dashboardDraft).cards;
 
     if (adbInfo && !adbInfo.available) {
       return (
@@ -7161,122 +8228,60 @@ function App() {
             <p className="muted">Overview, quick actions, and device health.</p>
           </div>
           <div className="page-actions">
+            <button className="ghost" onClick={openDashboardConfig} disabled={busy || !config}>
+              Configure
+            </button>
             <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
               Manage Devices
             </button>
           </div>
         </div>
+        {selectedSerials.length === 0 && (
+          <div className="inline-alert info">
+            <strong>No devices selected</strong>
+            <span className="muted">Select one or more devices from the top device picker to populate dashboard cards.</span>
+          </div>
+        )}
         <div className="dashboard-grid">
-          <section className="panel card dashboard-hero">
-            <div className="card-header">
-              <div>
-                <h2>Primary Device</h2>
-                <p className="muted">Health, context, and selection.</p>
-              </div>
-              <div className="device-hero-status">
-                <span className={`status-pill ${deviceStateTone}`}>{deviceState}</span>
-                <span className="badge">
-                  {selectedSerials.length ? `${selectedSerials.length} selected` : "No selection"}
-                </span>
-              </div>
-            </div>
-            <div className="device-hero">
-              <div className="device-hero-main">
-                <p className="eyebrow">Primary Device</p>
-                <strong>{deviceName}</strong>
-                <p className="muted">{activeSerial ?? "Select a device"}</p>
-                <div className="device-hero-tags">
-                  <span className="badge">{wifiLabel}</span>
-                  <span className="badge">{btLabel}</span>
-                  <span className="badge">
-                    {scrcpyInfo?.available ? "scrcpy Ready" : "scrcpy Missing"}
-                  </span>
+          {dashboardCards.map((card) => (
+            <section
+              key={card.id}
+              className={`panel card dashboard-info-card ${dashboardCardClassMap[card.id] ?? ""}`}
+            >
+              <div className="card-header">
+                <div>
+                  <h2>{card.title}</h2>
+                  <p className="muted">{card.description}</p>
                 </div>
+                <span className="badge">{card.fields.length} fields</span>
               </div>
-              <div className="device-hero-actions">
-                <button
-                  className="ghost"
-                  onClick={handleCopyDeviceInfo}
-                  disabled={busy || selectedSerials.length !== 1}
-                >
-                  Copy Device Info
-                </button>
-                <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
-                  Open Device Manager
-                </button>
-              </div>
-            </div>
-            <div className="summary-grid summary-grid-hero">
-              <div>
-                <span className="muted">Name</span>
-                <strong>{detail?.name ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Brand</span>
-                <strong>{detail?.brand ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Model</span>
-                <strong>{detail?.model ?? activeDevice?.summary.model ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Serial</span>
-                <strong>{activeSerial ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Serial Number</span>
-                <strong>{detail?.serial_number ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Android</span>
-                <strong>{detail?.android_version ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">API</span>
-                <strong>{detail?.api_level ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Processor</span>
-                <strong>{detail?.processor ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Resolution</span>
-                <strong>{detail?.resolution ?? "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">Storage</span>
-                <strong>
-                  {detail?.storage_total_bytes != null
-                    ? formatBytes(detail.storage_total_bytes)
-                    : "--"}
-                </strong>
-              </div>
-              <div>
-                <span className="muted">Memory</span>
-                <strong>
-                  {detail?.memory_total_bytes != null
-                    ? formatBytes(detail.memory_total_bytes)
-                    : "--"}
-                </strong>
-              </div>
-              <div>
-                <span className="muted">Battery</span>
-                <strong>{detail?.battery_level != null ? `${detail.battery_level}%` : "--"}</strong>
-              </div>
-              <div>
-                <span className="muted">WiFi</span>
-                <strong>{wifiState}</strong>
-              </div>
-              <div>
-                <span className="muted">Bluetooth</span>
-                <strong>{btState}</strong>
-              </div>
-              <div>
-                <span className="muted">GMS</span>
-                <strong>{detail?.gms_version ?? "--"}</strong>
-              </div>
-            </div>
-          </section>
+              {card.fields.length === 0 ? (
+                <p className="muted">No fields enabled for this card. Open Configure to enable fields.</p>
+              ) : (
+                <div className="summary-grid summary-grid-hero">
+                  {card.fields.map((field) => (
+                    <div key={field.id}>
+                      <span className="muted">{field.label}</span>
+                      <strong>{field.value}</strong>
+                      {field.variants.length > 0 && (
+                        <details className="dashboard-variants">
+                          <summary className="muted">View per device</summary>
+                          <div className="dashboard-variants-list">
+                            {field.variants.map((variant) => (
+                              <div key={`${field.id}-${variant.serial}`} className="dashboard-variant-row">
+                                <code>{variant.serial}</code>
+                                <span>{variant.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          ))}
 
           <section className="panel card dashboard-actions">
             <div className="card-header">
@@ -7330,86 +8335,100 @@ function App() {
               ))}
             </div>
           </section>
-
-          <section className="panel card dashboard-connection">
-            <div className="card-header">
-              <div>
-                <h2>Connection Health</h2>
-                <p className="muted">ADB, tasks, and scrcpy readiness.</p>
-              </div>
-              <span className={`status-pill ${adbInfo?.available ? "ok" : "warn"}`}>
-                {adbInfo == null ? "Checking..." : adbInfo.available ? "Online" : "Offline"}
-              </span>
-            </div>
-            <div className="status-list status-list-hero">
-              <div>
-                <span className="muted">ADB Status</span>
-                <strong>
-                  {adbInfo == null ? "Checking..." : adbInfo.available ? "Available" : "Not available"}
-                </strong>
-              </div>
-              <div>
-                <span className="muted">Devices Connected</span>
-                <strong>{devices.length}</strong>
-              </div>
-              <div>
-                <span className="muted">Tasks</span>
-                <strong>{runningTaskCount > 0 ? `${runningTaskCount} running` : "Idle"}</strong>
-              </div>
-              <div>
-                <span className="muted">scrcpy</span>
-                <strong>{scrcpyInfo?.available ? "Available" : "Not installed"}</strong>
-              </div>
-            </div>
-            {!scrcpyInfo?.available && (
-              <p className="muted">
-                Install scrcpy to enable live mirror and high-fidelity interaction.
-              </p>
-            )}
-          </section>
-
-          <section className="panel card dashboard-recents">
-            <div className="card-header">
-              <div>
-                <h2>Recent Apps</h2>
-                <p className="muted">Quick access to recently loaded packages.</p>
-              </div>
-              <span className="badge">Quick access</span>
-            </div>
-            {apps.length === 0 ? (
-              <div className="empty-inline">
-                <p className="muted">No app list loaded yet.</p>
-                <button
-                  className="ghost"
-                  onClick={handleLoadApps}
-                  disabled={busy || selectedSerials.length !== 1}
-                >
-                  Load Apps
+        </div>
+        {dashboardConfigOpen && (
+          <div className="dashboard-config-backdrop" role="presentation" onClick={closeDashboardConfig}>
+            <aside
+              className="dashboard-config-drawer"
+              role="dialog"
+              aria-label="Configure dashboard cards"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="dashboard-config-header">
+                <div>
+                  <h2>Configure Dashboard</h2>
+                  <p className="muted">Toggle fields and reorder what each card displays.</p>
+                </div>
+                <button className="ghost" onClick={closeDashboardConfig} disabled={busy}>
+                  Close
                 </button>
               </div>
-            ) : (
-              <div className="list-compact">
-                {apps.slice(0, 5).map((app) => (
-                  <div key={app.package_name} className="list-row">
-                    <div>
-                      <strong>{app.package_name}</strong>
-                      <p className="muted">{app.package_name}</p>
-                    </div>
-                    <button
-                      className="ghost"
-                      onClick={() => {
-                        setSelectedApp(app);
-                        navigate("/apps");
-                      }}
-                    >
-                      Open
-                    </button>
-                  </div>
-                ))}
+              <div className="dashboard-config-body">
+                {editableCards.map((card) => {
+                  const preview = dashboardCards.find((entry) => entry.id === card.id) as DashboardCardView | undefined;
+                  return (
+                    <section key={card.id} className="dashboard-config-card">
+                      <div className="dashboard-config-card-header">
+                        <div>
+                          <strong>{preview?.title ?? card.id}</strong>
+                          <p className="muted">{preview?.description ?? ""}</p>
+                        </div>
+                        <label className="dashboard-config-toggle">
+                          <input
+                            type="checkbox"
+                            checked={card.enabled}
+                            onChange={(event) => handleDashboardCardToggle(card.id, event.target.checked)}
+                            disabled={busy}
+                          />
+                          <span>{card.enabled ? "Enabled" : "Disabled"}</span>
+                        </label>
+                      </div>
+                      <div className="dashboard-config-fields">
+                        {card.fields
+                          .slice()
+                          .sort((a, b) => a.order - b.order)
+                          .map((field, index, arr) => {
+                            const label =
+                              preview?.fields.find((entry) => entry.id === field.id)?.label ??
+                              getDashboardFieldLabel(field.id);
+                            return (
+                              <div key={field.id} className="dashboard-config-field-row">
+                                <label>
+                                  <input
+                                    type="checkbox"
+                                    checked={field.enabled}
+                                    onChange={(event) =>
+                                      handleDashboardFieldToggle(card.id, field.id, event.target.checked)
+                                    }
+                                    disabled={busy || !card.enabled}
+                                  />
+                                  <span>{label}</span>
+                                </label>
+                                <div className="dashboard-config-field-actions">
+                                  <button
+                                    className="ghost"
+                                    onClick={() => handleDashboardFieldMove(card.id, field.id, "up")}
+                                    disabled={busy || index === 0}
+                                  >
+                                    Up
+                                  </button>
+                                  <button
+                                    className="ghost"
+                                    onClick={() => handleDashboardFieldMove(card.id, field.id, "down")}
+                                    disabled={busy || index === arr.length - 1}
+                                  >
+                                    Down
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </section>
+                  );
+                })}
               </div>
-            )}
-          </section>
-        </div>
+              <div className="dashboard-config-footer">
+                <button className="ghost" onClick={handleDashboardReset} disabled={busy}>
+                  Reset to Balanced
+                </button>
+                <button onClick={handleDashboardSave} disabled={busy || !config}>
+                  Save
+                </button>
+              </div>
+            </aside>
+          </div>
+        )}
       </div>
     );
   };
@@ -7491,38 +8510,21 @@ function App() {
 	        className={`device-popover-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
 	        onClick={(event) => {
 	          const target = event.target as HTMLElement | null;
-	          if (target?.closest(".device-check")) {
+	          if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
 	            return;
 	          }
-	          // Row click sets primary; clicking the current primary again toggles it off.
-	          if (isActive && isSelected) {
-	            toggleDeviceInContextPopover(serial);
-	            return;
-	          }
-	          if (deviceSelectionMode === "single") {
-	            setSelectedSerials((prev) => (prev.length === 1 && prev[0] === serial ? prev : [serial]));
-	            return;
-	          }
-	          handleSelectActiveSerial(serial);
+	          toggleDeviceInContextPopover(serial);
 	        }}
 	        role="button"
 	        tabIndex={0}
 	        onKeyDown={(event) => {
 	          const target = event.target as HTMLElement | null;
-	          if (target?.closest(".device-check")) {
+	          if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
 	            return;
 	          }
 	          if (event.key === "Enter" || event.key === " ") {
 	            event.preventDefault();
-	            if (isActive && isSelected) {
-	              toggleDeviceInContextPopover(serial);
-	              return;
-	            }
-	            if (deviceSelectionMode === "single") {
-	              setSelectedSerials((prev) => (prev.length === 1 && prev[0] === serial ? prev : [serial]));
-	              return;
-	            }
-	            handleSelectActiveSerial(serial);
+	            toggleDeviceInContextPopover(serial);
 	          }
 	        }}
 	      >
@@ -7541,7 +8543,20 @@ function App() {
           <span className="device-popover-serial">{serial}</span>
         </div>
         <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
-        {isActive && <span className="device-active-badge">Primary</span>}
+        <button
+          type="button"
+          className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!isActive) {
+              handleSelectActiveSerial(serial);
+            }
+          }}
+          disabled={busy || isActive}
+          aria-label={isActive ? `${name} is primary device` : `Set ${name} as primary device`}
+        >
+          {isActive ? "Primary" : "Set Primary"}
+        </button>
       </div>
     );
   };
@@ -9025,8 +10040,8 @@ function App() {
 	                  </div>
 	                </div>
 	                <p className="muted device-popover-note">
-	                  Use checkboxes to select devices. Switch modes with Single/Multi. Click a row to set the primary
-	                  device.
+	                  Use checkboxes to select devices. Switch modes with Single/Multi. Use Set Primary to choose the
+	                  primary device.
 	                </p>
                 <div className="device-popover-list">
                   {devices.length === 0 ? (
@@ -9164,7 +10179,7 @@ function App() {
                             ? "busy"
                             : task.status === "success"
                               ? "ok"
-                              : task.status === "cancelled"
+                              : task.status === "cancelled" || task.status === "interrupted"
                                 ? "warn"
                                 : "error";
                         return (
@@ -9193,16 +10208,21 @@ function App() {
                               {summary.counts.cancelled > 0 && (
                                 <span className="badge">{summary.counts.cancelled} cancelled</span>
                               )}
+                              {summary.counts.interrupted > 0 && (
+                                <span className="badge">{summary.counts.interrupted} interrupted</span>
+                              )}
                             </div>
                             <div className="task-devices">
                               {summary.serials.map((serial) => {
                                 const entry = task.devices[serial];
+                                const reportKey = buildGithubReportKey(task.id, serial);
+                                const reportPending = Boolean(githubReportPendingByKey[reportKey]);
                                 const entryTone =
                                   entry.status === "running"
                                     ? "busy"
                                     : entry.status === "success"
                                       ? "ok"
-                                      : entry.status === "cancelled"
+                                      : entry.status === "cancelled" || entry.status === "interrupted"
                                         ? "warn"
                                         : "error";
                                 return (
@@ -9222,6 +10242,15 @@ function App() {
                                       {entry.output_path && (
                                         <button className="ghost" onClick={() => openPath(entry.output_path!)}>
                                           Open output
+                                        </button>
+                                      )}
+                                      {entry.status === "error" && (
+                                        <button
+                                          className="ghost"
+                                          onClick={() => void handleReportTaskIssue(task, serial)}
+                                          disabled={reportPending}
+                                        >
+                                          {reportPending ? "Reporting..." : "Report to GitHub"}
                                         </button>
                                       )}
                                     </div>
@@ -9330,7 +10359,6 @@ function App() {
                             key={serial}
                             className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
                             onClick={(event) => handleDeviceRowSelect(event, serial, index)}
-                            onDoubleClick={() => handleSelectActiveSerial(serial)}
                           >
 	                            <label className="device-check" onClick={(event) => event.stopPropagation()}>
 	                              <input
@@ -9387,6 +10415,25 @@ function App() {
                               <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
                             </div>
                             <div className="device-cell device-actions">
+                              <button
+                                type="button"
+                                className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  if (!isActive) {
+                                    handleSelectActiveSerial(serial);
+                                  }
+                                }}
+                                disabled={busy || isActive}
+                                aria-label={
+                                  isActive
+                                    ? `${detail?.model ?? device.summary.model ?? serial} is primary device`
+                                    : `Set ${detail?.model ?? device.summary.model ?? serial} as primary device`
+                                }
+                                title={isActive ? "Primary device" : "Set as primary device"}
+                              >
+                                {isActive ? "Primary" : "Set Primary"}
+                              </button>
                               <button
                                 type="button"
                                 className="ghost icon-only"
@@ -10077,6 +11124,9 @@ function App() {
                                   {summary.counts.cancelled > 0 && (
                                     <span className="badge">{summary.counts.cancelled} cancelled</span>
                                   )}
+                                  {summary.counts.interrupted > 0 && (
+                                    <span className="badge">{summary.counts.interrupted} interrupted</span>
+                                  )}
                                 </div>
                                 <div className="task-devices">
                                   {summary.serials.map((serial) => {
@@ -10086,7 +11136,7 @@ function App() {
                                         ? "busy"
                                         : entry.status === "success"
                                           ? "ok"
-                                          : entry.status === "cancelled"
+                                          : entry.status === "cancelled" || entry.status === "interrupted"
                                             ? "warn"
                                             : "error";
                                     return (
@@ -10662,6 +11712,7 @@ function App() {
 	                        <h2>Logcat Stream</h2>
 	                        <span>{selectedSummaryLabel}</span>
 	                      </div>
+                        <span className={`status-pill ${logcatStatusTone}`}>{logcatStatusLabel}</span>
 	                    </div>
 	                    {singleSelectionWarning && (
 	                      <div className="inline-alert info">
@@ -10673,10 +11724,10 @@ function App() {
 	                      <div className="logcat-toolbar-row">
 	                        <div className="logcat-toolbar-cluster">
 	                          <div className="logcat-button-group">
-                            <button onClick={handleLogcatStart} disabled={busy || selectedSerials.length !== 1}>
+                            <button onClick={handleLogcatStart} disabled={!canStartLogcat}>
                               Start
                             </button>
-                            <button onClick={handleLogcatStop} disabled={busy || selectedSerials.length !== 1}>
+                            <button onClick={handleLogcatStop} disabled={!canStopLogcat}>
                               Stop
                             </button>
                           </div>
@@ -10750,8 +11801,35 @@ function App() {
                         value={logcatLiveFilter}
                         onValueChange={setLogcatLiveFilter}
                         onAdd={addLogcatLiveFilter}
+                        chips={sharedLogTextChips}
+                        onRemoveChip={(chipId) =>
+                          setSharedLogTextChips((prev) => removeLogTextChip(prev, chipId))
+                        }
+                        onEditChip={editSharedLogFilterChip}
+                        onClearChips={clearSharedLogFilters}
+                        presets={logcatPresets}
+                        presetSelected={logcatPresetSelected}
+                        onPresetSelectedChange={(next) => {
+                          setLogcatPresetSelected(next);
+                          if (next) {
+                            setLogcatPresetName(next);
+                          }
+                        }}
+                        presetName={logcatPresetName}
+                        onPresetNameChange={setLogcatPresetName}
+                        hasSelectedPreset={Boolean(selectedLogcatPreset)}
+                        onApplyPreset={applyLogcatPreset}
+                        onUpdatePreset={(name) => openPresetUpdateModal("logcat", name)}
+                        onDeletePreset={(name) => openPresetDeleteModal("logcat", name)}
+                        onSavePreset={() => {
+                          saveLogcatPreset(logcatPresetName);
+                        }}
+                        showPresetRow
                         disabled={busy}
                         filtersCount={sharedLogTextChips.length}
+                        activePresetLabel={selectedLogcatPreset?.name}
+                        levelsSummary={logLevelsSummary}
+                        isPresetDirty={logcatPresetDirty}
                       />
                     {logcatAdvancedOpen && (
                       <InlineAdvancedPanel title="Advanced" onClose={() => setLogcatAdvancedOpen(false)}>
@@ -10807,26 +11885,6 @@ function App() {
                           </div>
                         </div>
 
-                        <SharedRegexFiltersAndPresetsPanel
-                          chips={sharedLogTextChips}
-                          expanded={logcatFiltersExpanded}
-                          onToggleExpanded={() => setLogcatFiltersExpanded((prev) => !prev)}
-                          onRemoveChip={(chipId) =>
-                            setSharedLogTextChips((prev) => removeLogTextChip(prev, chipId))
-                          }
-                          onClearChips={clearSharedLogFilters}
-                          disabled={busy}
-                          appliedTitle="Applied in real time."
-                          presets={logcatPresets}
-                          presetSelected={logcatPresetSelected}
-                          onPresetSelectedChange={setLogcatPresetSelected}
-                          presetName={logcatPresetName}
-                          onPresetNameChange={setLogcatPresetName}
-                          hasSelectedPreset={Boolean(selectedLogcatPreset)}
-                          onApplyPreset={applyLogcatPreset}
-                          onDeletePreset={deleteLogcatPreset}
-                          onSavePreset={saveLogcatPreset}
-                        />
                       </InlineAdvancedPanel>
                     )}
                     {logcatLastExport && (
@@ -10835,6 +11893,17 @@ function App() {
                         <span>{logcatLastExport}</span>
                       </div>
                     )}
+                    {selectedSerials.length === 1 &&
+                      activeLogcatRunning &&
+                      !activeLogcatStatusLoading &&
+                      logcatFiltered.lines.length === 0 && (
+                        <div className="inline-alert info">
+                          <strong>Waiting for logs</strong>
+                          <span className="muted">
+                            Logcat is running. Generate activity on device or adjust the active filters.
+                          </span>
+                        </div>
+                      )}
                     <div className="logcat-output-wrapper">
                       {logcatSearchOpen ? (
                         <div className="logcat-search-overlay">
@@ -11616,7 +12685,7 @@ function App() {
                                   ? "busy"
                                   : entry.status === "success"
                                     ? "ok"
-                                    : entry.status === "cancelled"
+                                    : entry.status === "cancelled" || entry.status === "interrupted"
                                       ? "warn"
                                       : "error";
                               return (
@@ -11949,22 +13018,6 @@ function App() {
                             });
                           }
 
-                          const maxRegexPreview = 3;
-                          const regexPreview = sharedLogTextChips.slice(0, maxRegexPreview);
-                          regexPreview.forEach((chip, index) => {
-                            chips.push({
-                              key: `re-${chip.id}-${index}`,
-                              label: chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value,
-                              tone: chip.kind === "exclude" ? "exclude" : undefined,
-                            });
-                          });
-	                          if (sharedLogTextChips.length > maxRegexPreview) {
-	                            chips.push({
-	                              key: "re-more",
-	                              label: `Regex +${sharedLogTextChips.length - maxRegexPreview}`,
-	                            });
-	                          }
-
 	                        if (chips.length === 0) {
 	                          return null;
 	                        }
@@ -11997,8 +13050,35 @@ function App() {
                         value={bugreportLogLiveFilter}
                         onValueChange={setBugreportLogLiveFilter}
                         onAdd={addBugreportLogLiveFilter}
+                        chips={sharedLogTextChips}
+                        onRemoveChip={(chipId) =>
+                          setSharedLogTextChips((prev) => removeLogTextChip(prev, chipId))
+                        }
+                        onEditChip={editBugreportLogFilterChip}
+                        onClearChips={clearSharedLogFilters}
+                        presets={bugreportPresets}
+                        presetSelected={bugreportPresetSelected}
+                        onPresetSelectedChange={(next) => {
+                          setBugreportPresetSelected(next);
+                          if (next) {
+                            setBugreportPresetName(next);
+                          }
+                        }}
+                        presetName={bugreportPresetName}
+                        onPresetNameChange={setBugreportPresetName}
+                        hasSelectedPreset={Boolean(selectedBugreportPreset)}
+                        onApplyPreset={applyBugreportPreset}
+                        onUpdatePreset={(name) => openPresetUpdateModal("bugreport", name)}
+                        onDeletePreset={(name) => openPresetDeleteModal("bugreport", name)}
+                        onSavePreset={() => {
+                          saveBugreportPreset(bugreportPresetName);
+                        }}
+                        showPresetRow
                         disabled={bugreportLogBusy}
                         filtersCount={sharedLogTextChips.length}
+                        activePresetLabel={selectedBugreportPreset?.name}
+                        levelsSummary={logLevelsSummary}
+                        isPresetDirty={bugreportPresetDirty}
                       />
 
 	                      {bugreportLogMatches.length > 0 ? (
@@ -12091,15 +13171,18 @@ function App() {
 		                          disabled={bugreportLogBusy}
 		                          appliedTitle="Applied to bugreport queries."
 		                          gridClassName="bugreport-log-filter-grid"
-		                          presets={logcatPresets}
-		                          presetSelected={logcatPresetSelected}
-		                          onPresetSelectedChange={setLogcatPresetSelected}
-		                          presetName={logcatPresetName}
-		                          onPresetNameChange={setLogcatPresetName}
-		                          hasSelectedPreset={Boolean(selectedLogcatPreset)}
-		                          onApplyPreset={applyLogcatPreset}
-		                          onDeletePreset={deleteLogcatPreset}
-		                          onSavePreset={saveLogcatPreset}
+		                          presets={bugreportPresets}
+		                          presetSelected={bugreportPresetSelected}
+		                          onPresetSelectedChange={setBugreportPresetSelected}
+		                          presetName={bugreportPresetName}
+		                          onPresetNameChange={setBugreportPresetName}
+		                          hasSelectedPreset={Boolean(selectedBugreportPreset)}
+		                          onApplyPreset={applyBugreportPreset}
+		                          onDeletePreset={(name) => openPresetDeleteModal("bugreport", name)}
+		                          onSavePreset={() => {
+		                            saveBugreportPreset(bugreportPresetName);
+		                          }}
+                              showPresetRow={false}
 		                        >
 		                          <div className="bugreport-log-advanced-fields">
 		                            <div className="bugreport-log-advanced-controls">
@@ -12628,13 +13711,13 @@ function App() {
 	                                )
 	                              }
 	                            />
-	                          </label>
+                          </label>
                           <div className="muted settings-hint">
-                              Refresh interval for heartbeat fallback and recovery checks while auto-refresh is enabled. Minimum 1 second.
+                              Refresh interval for tracker recovery checks while auto-refresh is enabled. Minimum 1 second.
                             </div>
                             <div className="muted settings-hint">
-                              Primary auto-refresh path uses <code>adb track-devices</code>. If tracking is idle, it may briefly fall back to
-                              <code>adb devices</code> for a single summary refresh.
+                              Primary auto-refresh path uses <code>adb track-devices</code> events. <code>adb devices</code> is only used for
+                              startup or recovery sync, not fixed polling.
                             </div>
 		                        </div>
 	                        <div className="settings-group">
@@ -13040,6 +14123,72 @@ function App() {
           </Routes>
         </main>
       </div>
+
+      {presetUpdateModal && (
+        <div className="modal-backdrop" onClick={closePresetUpdateModal}>
+          <div className="modal confirm-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Update {presetContextLabel(presetUpdateModal.context)} Preset</h3>
+                <p className="muted">This will overwrite the selected preset with current filters.</p>
+              </div>
+              <button className="ghost" onClick={closePresetUpdateModal} disabled={busy}>
+                Close
+              </button>
+            </div>
+            <div className="stack">
+              <p className="muted">
+                Target preset: <strong>{presetUpdateModal.name}</strong>
+              </p>
+              <div className="inline-alert info">
+                <strong>Confirm overwrite</strong>
+                <span className="muted">Existing preset values will be replaced.</span>
+              </div>
+            </div>
+            <div className="button-row">
+              <button onClick={handlePresetUpdateConfirm} disabled={busy}>
+                Confirm Update
+              </button>
+              <button className="ghost" onClick={closePresetUpdateModal} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {presetDeleteModal && (
+        <div className="modal-backdrop" onClick={closePresetDeleteModal}>
+          <div className="modal danger-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Delete {presetContextLabel(presetDeleteModal.context)} Preset</h3>
+                <p className="muted">This action cannot be undone.</p>
+              </div>
+              <button className="ghost" onClick={closePresetDeleteModal} disabled={busy}>
+                Close
+              </button>
+            </div>
+            <div className="stack">
+              <div className="inline-alert error">
+                <strong>Danger zone</strong>
+                <span className="muted">This preset will be removed permanently.</span>
+              </div>
+              <p className="muted">
+                Preset: <strong>{presetDeleteModal.name}</strong>
+              </p>
+            </div>
+            <div className="button-row">
+              <button className="danger" onClick={handlePresetDeleteConfirm} disabled={busy}>
+                Confirm Delete
+              </button>
+              <button className="ghost" onClick={closePresetDeleteModal} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {rebootConfirmOpen && (
         <div className="modal-backdrop" onClick={closeRebootConfirm}>

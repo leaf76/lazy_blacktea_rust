@@ -11,7 +11,7 @@ export type TaskKind =
   | "file_rename"
   | "file_delete";
 
-export type TaskStatus = "running" | "success" | "error" | "cancelled";
+export type TaskStatus = "running" | "success" | "error" | "cancelled" | "interrupted";
 
 export type DeviceTaskStatus = {
   serial: string;
@@ -114,17 +114,10 @@ export const tasksReducer = (state: TaskState, action: TaskAction): TaskState =>
         if (item.id !== action.id) {
           return item;
         }
-        const entries = Object.values(item.devices);
-        if (entries.length === 0) {
-          return item;
-        }
-        const hasRunning = entries.some((entry) => entry.status === "running");
-        if (hasRunning) {
+        const nextStatus = deriveTaskStatusFromDevices(item.devices);
+        if (nextStatus === "running") {
           return item.status === "running" ? item : { ...item, status: "running", finished_at: null };
         }
-        const hasError = entries.some((entry) => entry.status === "error");
-        const hasCancelled = entries.some((entry) => entry.status === "cancelled");
-        const nextStatus: TaskStatus = hasError ? "error" : hasCancelled ? "cancelled" : "success";
         if (item.status === nextStatus && item.finished_at != null) {
           return item;
         }
@@ -189,7 +182,10 @@ export const createTask = (params: {
 
 export const summarizeTask = (task: TaskItem) => {
   const serials = Object.keys(task.devices);
-  const counts = { running: 0, success: 0, error: 0, cancelled: 0 } as Record<TaskStatus, number>;
+  const counts = { running: 0, success: 0, error: 0, cancelled: 0, interrupted: 0 } as Record<
+    TaskStatus,
+    number
+  >;
   serials.forEach((serial) => {
     const status = task.devices[serial]?.status ?? "running";
     counts[status] += 1;
@@ -219,6 +215,32 @@ export type StoredTaskItem = {
 export type StoredTaskState = {
   max_items: number;
   items: StoredTaskItem[];
+};
+
+const RESTORED_TASK_INTERRUPTED_MESSAGE = "App restarted before this task finished.";
+
+const deriveTaskStatusFromDevices = (devices: Record<string, DeviceTaskStatus>): TaskStatus => {
+  const entries = Object.values(devices);
+  if (entries.length === 0) {
+    return "error";
+  }
+  const hasRunning = entries.some((entry) => entry.status === "running");
+  if (hasRunning) {
+    return "running";
+  }
+  const hasError = entries.some((entry) => entry.status === "error");
+  if (hasError) {
+    return "error";
+  }
+  const hasInterrupted = entries.some((entry) => entry.status === "interrupted");
+  if (hasInterrupted) {
+    return "interrupted";
+  }
+  const hasCancelled = entries.some((entry) => entry.status === "cancelled");
+  if (hasCancelled) {
+    return "cancelled";
+  }
+  return "success";
 };
 
 const truncateString = (value: string, maxLen: number) => {
@@ -314,4 +336,50 @@ export const inflateStoredTaskState = (stored: StoredTaskState, fallbackMaxItems
     } as TaskItem;
   });
   return { max_items: maxItems, items: items.slice(0, maxItems) };
+};
+
+export const finalizeRestoredTaskState = (state: TaskState, finishedAt = Date.now()): TaskState => {
+  const items = state.items.map((item) => {
+    if (item.kind !== "bugreport") {
+      return item;
+    }
+    const hadRunningDevice = Object.values(item.devices).some((entry) => entry.status === "running");
+    const shouldFinalize = item.status === "running" || hadRunningDevice;
+    if (!shouldFinalize) {
+      return item;
+    }
+
+    let devicesChanged = false;
+    const nextDevices: Record<string, DeviceTaskStatus> = {};
+    Object.entries(item.devices).forEach(([serial, entry]) => {
+      if (entry.status !== "running") {
+        nextDevices[serial] = entry;
+        return;
+      }
+      devicesChanged = true;
+      nextDevices[serial] = {
+        ...entry,
+        status: "interrupted",
+        progress: null,
+        message: RESTORED_TASK_INTERRUPTED_MESSAGE,
+      };
+    });
+
+    const devicesForStatus = devicesChanged ? nextDevices : item.devices;
+    const nextStatus = deriveTaskStatusFromDevices(devicesForStatus);
+    const nextFinishedAt = nextStatus === "running" ? null : item.finished_at ?? finishedAt;
+
+    if (!devicesChanged && item.status === nextStatus && item.finished_at === nextFinishedAt) {
+      return item;
+    }
+
+    return {
+      ...item,
+      devices: devicesForStatus,
+      status: nextStatus,
+      finished_at: nextFinishedAt,
+    };
+  });
+
+  return { ...state, items };
 };

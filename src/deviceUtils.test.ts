@@ -6,6 +6,7 @@ import {
   mergeDeviceDetails,
   reduceSelectionToOne,
   resolveSelectedSerials,
+  setPrimarySelection,
   selectSerialsForGroup,
 } from "./deviceUtils";
 import type { DeviceInfo } from "./types";
@@ -171,5 +172,22 @@ describe("deviceUtils", () => {
     expect(selectSerialsForGroup(devices, groupMap, "Test")).toEqual(["alpha"]);
     expect(selectSerialsForGroup(devices, groupMap, "__all_devices__")).toEqual(["alpha", "bravo", "charlie"]);
     expect(selectSerialsForGroup(devices, groupMap, "Missing")).toEqual([]);
+  });
+
+  it("reorders selection when setting primary while preserving remaining order", () => {
+    expect(setPrimarySelection(["alpha", "bravo", "charlie"], "bravo")).toEqual([
+      "bravo",
+      "alpha",
+      "charlie",
+    ]);
+  });
+
+  it("keeps selection unchanged when target is already primary", () => {
+    const selection = ["alpha", "bravo", "charlie"];
+    expect(setPrimarySelection(selection, "alpha")).toEqual(selection);
+  });
+
+  it("inserts target as primary when target is not in selection", () => {
+    expect(setPrimarySelection(["alpha", "bravo"], "charlie")).toEqual(["charlie", "alpha", "bravo"]);
   });
 });

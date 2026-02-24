@@ -303,6 +303,107 @@ impl Default for NotificationsSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DashboardFieldPref {
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub order: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DashboardCardPref {
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub order: i32,
+    #[serde(default)]
+    pub fields: Vec<DashboardFieldPref>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DashboardSettings {
+    #[serde(default)]
+    pub cards: Vec<DashboardCardPref>,
+}
+
+impl Default for DashboardSettings {
+    fn default() -> Self {
+        fn fields(ids: &[&str]) -> Vec<DashboardFieldPref> {
+            ids.iter()
+                .enumerate()
+                .map(|(index, id)| DashboardFieldPref {
+                    id: (*id).to_string(),
+                    enabled: true,
+                    order: index as i32,
+                })
+                .collect()
+        }
+
+        fn card(id: &str, order: i32, field_ids: &[&str]) -> DashboardCardPref {
+            DashboardCardPref {
+                id: id.to_string(),
+                enabled: true,
+                order,
+                fields: fields(field_ids),
+            }
+        }
+
+        Self {
+            cards: vec![
+                card(
+                    "overview",
+                    0,
+                    &[
+                        "selected_count",
+                        "online_count",
+                        "unauthorized_count",
+                        "offline_count",
+                        "primary_device",
+                        "running_tasks",
+                    ],
+                ),
+                card(
+                    "device_profile",
+                    1,
+                    &[
+                        "brand",
+                        "model",
+                        "android_version",
+                        "api_level",
+                        "processor",
+                        "resolution",
+                    ],
+                ),
+                card(
+                    "capacity_battery",
+                    2,
+                    &[
+                        "battery_level",
+                        "memory_total",
+                        "storage_total",
+                        "wifi_state",
+                        "bt_state",
+                        "gms_version",
+                    ],
+                ),
+                card(
+                    "connection_health",
+                    3,
+                    &[
+                        "adb_status",
+                        "scrcpy_status",
+                        "selected_connected",
+                        "selected_ready_ratio",
+                    ],
+                ),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TerminalSettings {
     #[serde(default)]
@@ -353,6 +454,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub notifications: NotificationsSettings,
     #[serde(default)]
+    pub dashboard: DashboardSettings,
+    #[serde(default)]
     pub terminal: TerminalSettings,
     #[serde(default)]
     pub command_history: Vec<String>,
@@ -382,6 +485,7 @@ impl Default for AppConfig {
             screen_record: ScreenRecordSettings::default(),
             logcat_viewer: LogcatViewerSettings::default(),
             notifications: NotificationsSettings::default(),
+            dashboard: DashboardSettings::default(),
             terminal: TerminalSettings::default(),
             command_history: Vec::new(),
             device_groups: HashMap::new(),
@@ -564,6 +668,9 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     if config.screen_record.time_limit_sec > 180 {
         config.screen_record.time_limit_sec = 180;
     }
+    if config.dashboard.cards.is_empty() {
+        config.dashboard = DashboardSettings::default();
+    }
     config
 }
 
@@ -678,6 +785,26 @@ mod tests {
         let config = AppConfig::default();
         assert!(config.terminal.restore_sessions.is_empty());
         assert!(config.terminal.buffers.is_empty());
+    }
+
+    #[test]
+    fn dashboard_settings_default_to_balanced_cards() {
+        let config = AppConfig::default();
+        assert_eq!(config.dashboard.cards.len(), 4);
+        assert_eq!(config.dashboard.cards[0].id, "overview");
+        assert_eq!(config.dashboard.cards[0].fields.len(), 6);
+    }
+
+    #[test]
+    fn loads_config_without_dashboard_field() {
+        let value = serde_json::json!({});
+        let parsed: AppConfig = serde_json::from_value(value).expect("config should deserialize");
+        assert_eq!(parsed.dashboard.cards.len(), 4);
+        assert!(parsed
+            .dashboard
+            .cards
+            .iter()
+            .any(|card| card.id == "device_profile"));
     }
 
     #[test]

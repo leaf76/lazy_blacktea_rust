@@ -30,6 +30,24 @@ fn spawn_long_running_piped_child() -> std::process::Child {
     }
 }
 
+fn spawn_exited_piped_child() -> std::process::Child {
+    if cfg!(windows) {
+        Command::new("cmd.exe")
+            .args(["/C", "echo", "done"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn echo")
+    } else {
+        Command::new("sh")
+            .args(["-c", "echo done"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn echo")
+    }
+}
+
 fn spawn_perf_stop_waiter(stop_flag: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         while !stop_flag.load(Ordering::Relaxed) {
@@ -302,7 +320,7 @@ fn set_net_profiler_pinned_uids_inner_rejects_too_many() {
 }
 
 #[test]
-fn start_logcat_inner_rejects_when_already_running() {
+fn start_logcat_inner_is_idempotent_when_already_running() {
     let registry = Mutex::new(std::collections::HashMap::<String, LogcatHandle>::new());
     let emitter: Arc<dyn Fn(LogcatEvent) + Send + Sync> = Arc::new(|_evt| {});
 
@@ -317,7 +335,7 @@ fn start_logcat_inner_rejects_when_already_running() {
         );
     }
 
-    let err = start_logcat_inner(
+    let ok = start_logcat_inner(
         "ABC".to_string(),
         None,
         "adb",
@@ -326,18 +344,51 @@ fn start_logcat_inner_rejects_when_already_running() {
         "trace-2",
         |_program, _serial, _filter, _trace| Ok(spawn_long_running_piped_child()),
     )
-    .expect_err("expected already running");
+    .expect("idempotent start should succeed");
+    assert!(ok);
 
-    assert_eq!(err.code, "ERR_VALIDATION");
-    assert!(err.error.to_lowercase().contains("already running"));
+    stop_logcat_inner("ABC".to_string(), &registry, "trace-2-stop").expect("cleanup stop");
 }
 
 #[test]
-fn stop_logcat_inner_errors_when_not_running() {
+fn start_logcat_inner_cleans_stale_handle_and_restarts() {
     let registry = Mutex::new(std::collections::HashMap::<String, LogcatHandle>::new());
-    let err = stop_logcat_inner("ABC".to_string(), &registry, "trace-3").expect_err("expected err");
-    assert_eq!(err.code, "ERR_VALIDATION");
-    assert!(err.error.to_lowercase().contains("not running"));
+    let emitter: Arc<dyn Fn(LogcatEvent) + Send + Sync> = Arc::new(|_evt| {});
+
+    let mut exited_child = spawn_exited_piped_child();
+    let _ = exited_child.wait();
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            LogcatHandle {
+                child: exited_child,
+                stop_flag: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+
+    let ok = start_logcat_inner(
+        "ABC".to_string(),
+        None,
+        "adb",
+        &registry,
+        emitter,
+        "trace-2b",
+        |_program, _serial, _filter, _trace| Ok(spawn_long_running_piped_child()),
+    )
+    .expect("stale handle should be replaced");
+    assert!(ok);
+
+    stop_logcat_inner("ABC".to_string(), &registry, "trace-2b-stop").expect("cleanup stop");
+}
+
+#[test]
+fn stop_logcat_inner_is_idempotent_when_not_running() {
+    let registry = Mutex::new(std::collections::HashMap::<String, LogcatHandle>::new());
+    let ok = stop_logcat_inner("ABC".to_string(), &registry, "trace-3")
+        .expect("idempotent stop should succeed");
+    assert!(ok);
 }
 
 #[test]
@@ -358,6 +409,175 @@ fn stop_logcat_inner_removes_handle() {
 
     let guard = registry.lock().expect("registry");
     assert!(!guard.contains_key("ABC"));
+}
+
+#[test]
+fn get_logcat_status_inner_reports_not_running_for_missing_handle() {
+    let registry = Mutex::new(std::collections::HashMap::<String, LogcatHandle>::new());
+    let status = get_logcat_status_inner("ABC".to_string(), &registry, "trace-logcat-status-1")
+        .expect("status");
+    assert_eq!(status.serial, "ABC");
+    assert!(!status.running);
+}
+
+#[test]
+fn get_logcat_status_inner_reports_running_for_active_handle() {
+    let registry = Mutex::new(std::collections::HashMap::<String, LogcatHandle>::new());
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            LogcatHandle {
+                child: spawn_long_running_piped_child(),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+    let status = get_logcat_status_inner("ABC".to_string(), &registry, "trace-logcat-status-2")
+        .expect("status");
+    assert!(status.running);
+
+    stop_logcat_inner("ABC".to_string(), &registry, "trace-logcat-status-2-stop")
+        .expect("cleanup stop");
+}
+
+#[test]
+fn get_logcat_status_inner_cleans_stale_handle() {
+    let registry = Mutex::new(std::collections::HashMap::<String, LogcatHandle>::new());
+    let mut exited_child = spawn_exited_piped_child();
+    let _ = exited_child.wait();
+    {
+        let mut guard = registry.lock().expect("registry");
+        guard.insert(
+            "ABC".to_string(),
+            LogcatHandle {
+                child: exited_child,
+                stop_flag: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+
+    let status = get_logcat_status_inner("ABC".to_string(), &registry, "trace-logcat-status-3")
+        .expect("status");
+    assert!(!status.running);
+    let guard = registry.lock().expect("registry");
+    assert!(!guard.contains_key("ABC"));
+}
+
+#[test]
+fn parse_legacy_logcat_preset_json_reads_filters() {
+    let raw = r#"{
+        "name": "Crash Watch",
+        "filters": [" ActivityManager ", "", "AndroidRuntime", "ActivityManager"]
+    }"#;
+
+    let preset = parse_legacy_logcat_preset_json(raw).expect("preset");
+    assert_eq!(preset.name, "Crash Watch");
+    assert_eq!(preset.include, vec!["ActivityManager", "AndroidRuntime"]);
+    assert!(preset.exclude.is_empty());
+}
+
+#[test]
+fn parse_legacy_logcat_preset_json_rejects_empty_payload() {
+    let raw = r#"{
+        "name": "   ",
+        "filters": ["ActivityManager"]
+    }"#;
+    assert!(parse_legacy_logcat_preset_json(raw).is_none());
+
+    let raw_no_filters = r#"{
+        "name": "Valid Name",
+        "filters": []
+    }"#;
+    assert!(parse_legacy_logcat_preset_json(raw_no_filters).is_none());
+}
+
+#[test]
+fn parse_legacy_logcat_filters_json_reads_value_map() {
+    let raw = r#"{
+        "f1": " Bluetooth ",
+        "f2": "",
+        "f3": "AudioFlinger",
+        "f4": "Bluetooth",
+        "f5": 123
+    }"#;
+
+    let preset = parse_legacy_logcat_filters_json(raw, "Migrated Filters").expect("preset");
+    assert_eq!(preset.name, "Migrated Filters");
+    assert_eq!(preset.include, vec!["Bluetooth", "AudioFlinger"]);
+    assert!(preset.exclude.is_empty());
+}
+
+#[test]
+fn load_legacy_logcat_presets_from_home_reads_files_and_legacy_map() {
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let home = tmp.path();
+    let preset_dir = home.join(".lazy_blacktea").join("presets");
+    std::fs::create_dir_all(&preset_dir).expect("create preset dir");
+
+    std::fs::write(
+        preset_dir.join("a.json"),
+        r#"{
+            "name": "Crash",
+            "filters": ["ActivityManager", "AndroidRuntime"]
+        }"#,
+    )
+    .expect("write a");
+    std::fs::write(
+        preset_dir.join("b.json"),
+        r#"{
+            "name": "Bluetooth",
+            "filters": ["BluetoothAdapter"]
+        }"#,
+    )
+    .expect("write b");
+    std::fs::write(
+        preset_dir.join("invalid.json"),
+        r#"{"name":"broken","filters":"bad"}"#,
+    )
+    .expect("write invalid");
+    std::fs::write(
+        home.join(".lazy_blacktea_filters.json"),
+        r#"{"legacy1":"BatteryStats","legacy2":"BluetoothAdapter"}"#,
+    )
+    .expect("write legacy map");
+
+    let presets = load_legacy_logcat_presets_from_home(home, "trace-legacy-1");
+    assert_eq!(presets.len(), 3);
+    assert_eq!(presets[0].name, "Crash");
+    assert_eq!(presets[1].name, "Bluetooth");
+    assert_eq!(presets[2].name, "Migrated Filters");
+    assert_eq!(presets[2].include, vec!["BatteryStats", "BluetoothAdapter"]);
+}
+
+#[test]
+fn load_legacy_logcat_presets_from_home_deduplicates_by_name() {
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let home = tmp.path();
+    let preset_dir = home.join(".lazy_blacktea").join("presets");
+    std::fs::create_dir_all(&preset_dir).expect("create preset dir");
+
+    std::fs::write(
+        preset_dir.join("a.json"),
+        r#"{
+            "name": "Crash",
+            "filters": ["ActivityManager"]
+        }"#,
+    )
+    .expect("write a");
+    std::fs::write(
+        preset_dir.join("b.json"),
+        r#"{
+            "name": "Crash",
+            "filters": ["BluetoothAdapter"]
+        }"#,
+    )
+    .expect("write b");
+
+    let presets = load_legacy_logcat_presets_from_home(home, "trace-legacy-2");
+    assert_eq!(presets.len(), 1);
+    assert_eq!(presets[0].name, "Crash");
+    assert_eq!(presets[0].include, vec!["ActivityManager"]);
 }
 
 #[test]

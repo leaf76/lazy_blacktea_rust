@@ -18,7 +18,9 @@ import type {
   DeviceInfo,
   FilePreview,
   HostCommandResult,
+  LegacyLogcatPreset,
   LogcatExportResult,
+  LogcatStatus,
   ScrcpyInfo,
   TerminalSessionInfo,
   UiHierarchyCaptureResult,
@@ -481,6 +483,23 @@ export const stopLogcat = async (serial: string) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<boolean>>("stop_logcat", {
     serial,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const getLogcatStatus = async (serial: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<LogcatStatus>>("get_logcat_status", {
+    serial,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const loadLegacyLogcatPresets = async () => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<LegacyLogcatPreset[]>>("load_legacy_logcat_presets", {
     trace_id: traceId,
     traceId,
   });

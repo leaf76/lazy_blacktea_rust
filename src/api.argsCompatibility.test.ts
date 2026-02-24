@@ -130,4 +130,44 @@ describe("api command args compatibility", () => {
       }),
     );
   });
+
+  it("sends trace args for getLogcatStatus", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({
+      trace_id: "trace-123",
+      data: { serial: "emulator-5554", running: true },
+    });
+
+    const { getLogcatStatus } = await import("./api");
+    await getLogcatStatus("emulator-5554");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_logcat_status",
+      expect.objectContaining({
+        serial: "emulator-5554",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
+
+  it("sends trace args for loadLegacyLogcatPresets", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: [] });
+
+    const { loadLegacyLogcatPresets } = await import("./api");
+    await loadLegacyLogcatPresets();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "load_legacy_logcat_presets",
+      expect.objectContaining({
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
 });

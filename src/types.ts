@@ -82,6 +82,17 @@ export type LogcatExportResult = {
   line_count: number;
 };
 
+export type LogcatStatus = {
+  serial: string;
+  running: boolean;
+};
+
+export type LegacyLogcatPreset = {
+  name: string;
+  include: string[];
+  exclude: string[];
+};
+
 export type CommandResponse<T> = {
   trace_id: string;
   data: T;
@@ -539,6 +550,53 @@ export type NotificationsSettings = {
   desktop_on_cancelled: boolean;
 };
 
+export type DashboardCardId =
+  | "overview"
+  | "device_profile"
+  | "capacity_battery"
+  | "connection_health";
+
+export type DashboardFieldId =
+  | "selected_count"
+  | "online_count"
+  | "unauthorized_count"
+  | "offline_count"
+  | "primary_device"
+  | "running_tasks"
+  | "brand"
+  | "model"
+  | "android_version"
+  | "api_level"
+  | "processor"
+  | "resolution"
+  | "battery_level"
+  | "memory_total"
+  | "storage_total"
+  | "wifi_state"
+  | "bt_state"
+  | "gms_version"
+  | "adb_status"
+  | "scrcpy_status"
+  | "selected_connected"
+  | "selected_ready_ratio";
+
+export type DashboardFieldPreference = {
+  id: DashboardFieldId;
+  enabled: boolean;
+  order: number;
+};
+
+export type DashboardCardPreference = {
+  id: DashboardCardId;
+  enabled: boolean;
+  order: number;
+  fields: DashboardFieldPreference[];
+};
+
+export type DashboardSettings = {
+  cards: DashboardCardPreference[];
+};
+
 export type AppConfig = {
   ui: UiSettings;
   device: DeviceSettings;
@@ -552,6 +610,7 @@ export type AppConfig = {
   screen_record: ScreenRecordSettings;
   logcat_viewer: LogcatViewerSettings;
   notifications: NotificationsSettings;
+  dashboard: DashboardSettings;
   terminal: TerminalSettings;
   command_history: string[];
   device_groups: Record<string, string[]>;

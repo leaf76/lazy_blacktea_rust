@@ -43,4 +43,15 @@ describe("buildDesktopNotificationForTask", () => {
     expect(notif!.body).toContain("Check Task Center");
     expect(notif!.body).toContain("2 devices");
   });
+
+  it("labels interrupted tasks explicitly", () => {
+    const t1 = createTask({ id: "1", kind: "bugreport", title: "Bugreport", serials: ["A"] });
+    const interrupted = tasksReducer(
+      { items: [t1], max_items: 50 },
+      { type: "TASK_SET_STATUS", id: "1", status: "interrupted" },
+    ).items[0];
+    const notif = buildDesktopNotificationForTask(interrupted);
+    expect(notif).not.toBeNull();
+    expect(notif!.body).toContain("Interrupted");
+  });
 });
