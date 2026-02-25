@@ -1,4 +1,5 @@
 import {
+  useCallback,
   memo,
   useEffect,
   useLayoutEffect,
@@ -17,6 +18,7 @@ import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "reac
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -204,6 +206,11 @@ import {
 } from "./apkInstallerState";
 import { buildGithubBugIssueUrl } from "./githubIssueReport";
 import {
+  buildLogcatPopupHash,
+  buildLogcatPopupWindowLabel,
+  parseLogcatPopupContext,
+} from "./logcatWindow";
+import {
   checkForUpdate,
   installUpdateAndRelaunch,
   readUpdateLastCheckedMs,
@@ -211,6 +218,7 @@ import {
   type UpdateCheckResult,
   type UpdaterUpdateLike,
 } from "./updater";
+import { buildLogcatPopupCandidates, partitionLogcatPopupTargets } from "./logcatPopup";
 import appPackage from "../package.json";
 import "./App.css";
 
@@ -1020,6 +1028,11 @@ function LogLiveFilterBar({
   levelsSummary,
   isPresetDirty,
   headerActions,
+  advancedOptions,
+  selectClassName,
+  compact,
+  expanded,
+  onToggleExpanded,
 }: {
   kind: LogTextChipKind;
   onKindChange: (next: LogTextChipKind) => void;
@@ -1048,6 +1061,11 @@ function LogLiveFilterBar({
   levelsSummary?: string;
   isPresetDirty?: boolean;
   headerActions?: ReactNode;
+  advancedOptions?: ReactNode;
+  selectClassName?: string;
+  compact?: boolean;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
 }) {
   const activeChips = chips ?? [];
   const shouldShowChipsRow = showChipsRow ?? true;
@@ -1063,9 +1081,11 @@ function LogLiveFilterBar({
   const presetLabel = activePresetLabel?.trim() || "None";
   const levelsLabel = levelsSummary?.trim() || "All";
   const stateLabel = hasActivePreset ? (isPresetDirty ? "Unsaved changes" : "Saved") : "No preset selected";
+  const isCollapsible = compact ?? false;
+  const isCollapsed = isCollapsible ? !(expanded ?? false) : false;
 
   return (
-    <div className="logcat-filter-grid logcat-live-filter-grid">
+    <div className={`logcat-filter-grid logcat-live-filter-grid${isCollapsed ? " is-collapsed" : ""}`}>
       <div className="panel-sub logcat-filter-bar logcat-live-filter-bar">
         <div className="logcat-filter-combined">
           <div className="logcat-filter-section">
@@ -1074,11 +1094,22 @@ function LogLiveFilterBar({
               <div className="logcat-filter-header-actions">
                 <span className="muted">{filtersCount ? `${filtersCount} filters` : "No filters"}</span>
                 {headerActions}
+                {isCollapsible && onToggleExpanded ? (
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={onToggleExpanded}
+                    aria-expanded={!isCollapsed}
+                  >
+                    {isCollapsed ? "Expand" : "Collapse"}
+                  </button>
+                ) : null}
               </div>
             </div>
             <div className="form-row">
               <label>Pattern</label>
               <select
+                className={selectClassName}
                 aria-label="Filter mode"
                 value={kind}
                 onChange={(event) => onKindChange(event.target.value as LogTextChipKind)}
@@ -1123,7 +1154,8 @@ function LogLiveFilterBar({
                 <strong>{stateLabel}</strong>
               </span>
             </div>
-            {shouldShowChipsRow && (
+            {!isCollapsed && advancedOptions ? <div className="logcat-live-filter-advanced">{advancedOptions}</div> : null}
+            {!isCollapsed && shouldShowChipsRow && (
               <div className="logcat-live-filter-chip-row">
                 {activeChips.length === 0 ? (
                   <p className="muted">No active filters yet.</p>
@@ -1172,12 +1204,13 @@ function LogLiveFilterBar({
                 )}
               </div>
             )}
-            {shouldShowPresetRow && (
+            {!isCollapsed && shouldShowPresetRow && (
               <div className="logcat-presets">
                 <div className="logcat-preset-row single">
                   <div className="logcat-preset-group left">
                     <label>Preset</label>
                     <select
+                      className={selectClassName}
                       value={nextPresetSelected}
                       onChange={(event) => onPresetSelectedChange?.(event.target.value)}
                       disabled={disabled || !onPresetSelectedChange}
@@ -1542,10 +1575,13 @@ function App() {
   const [logcatSearchCaseSensitive, setLogcatSearchCaseSensitive] = useState(false);
   const [logcatSearchOnly, setLogcatSearchOnly] = useState(false);
   const [logcatSearchOpen, setLogcatSearchOpen] = useState(false);
+  const [logcatLiveFilterExpanded, setLogcatLiveFilterExpanded] = useState(false);
   const [logcatAutoScroll, setLogcatAutoScroll] = useState(true);
   const [logcatActiveFilterSummary, setLogcatActiveFilterSummary] = useState("");
   const [logcatLastExport, setLogcatLastExport] = useState("");
-  const [logcatAdvancedOpen, setLogcatAdvancedOpen] = useState(false);
+  const [logcatClearBufferModal, setLogcatClearBufferModal] = useState<null | { serial: string }>(null);
+  const [logcatPopupSelectorOpen, setLogcatPopupSelectorOpen] = useState(false);
+  const [logcatPopupDraftSerials, setLogcatPopupDraftSerials] = useState<string[]>([]);
   const [logcatTextKind, setLogcatTextKind] = useState<LogTextChipKind>("include");
   const [logcatRunningBySerial, setLogcatRunningBySerial] = useState<Record<string, boolean>>({});
   const [logcatStatusLoadingBySerial, setLogcatStatusLoadingBySerial] = useState<Record<string, boolean>>({});
@@ -1925,6 +1961,9 @@ function App() {
 
   const location = useLocation();
   const navigate = useNavigate();
+  const logcatPopupContext = useMemo(() => parseLogcatPopupContext(location.search), [location.search]);
+  const isLogcatPopupWindow = logcatPopupContext.isPopup;
+  const logcatPopupSerial = logcatPopupContext.serial;
   const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
   const isLogcatView = location.pathname === "/logcat";
   const isPerformanceView = location.pathname === "/performance";
@@ -1935,6 +1974,33 @@ function App() {
       setBugreportLogAdvancedOpen(false);
     }
   }, [isBugreportLogViewer]);
+
+  useEffect(() => {
+    if (!isLogcatPopupWindow) {
+      return;
+    }
+    if (location.pathname !== "/logcat") {
+      navigate(`/logcat${location.search}`, { replace: true });
+      return;
+    }
+    if (!logcatPopupSerial) {
+      return;
+    }
+    setSelectedSerials((prev) => (prev.length === 1 && prev[0] === logcatPopupSerial ? prev : [logcatPopupSerial]));
+    setDevicePopoverOpen(false);
+  }, [isLogcatPopupWindow, location.pathname, location.search, navigate, logcatPopupSerial]);
+
+  const resolveSelectedSerialsForContext = useCallback(
+    (previous: string[], nextDevices: DeviceInfo[]): string[] => {
+      if (!isLogcatPopupWindow || !logcatPopupSerial) {
+        return resolveSelectedSerials(previous, nextDevices);
+      }
+      const exists = nextDevices.some((device) => device.summary.serial === logcatPopupSerial);
+      return exists ? [logcatPopupSerial] : [];
+    },
+    [isLogcatPopupWindow, logcatPopupSerial],
+  );
+
   const activeSerial = resolvePrimarySerial(selectedSerials);
   const activeLogcatRunning = activeSerial ? (logcatRunningBySerial[activeSerial] ?? false) : false;
   const activeLogcatStatusLoading = activeSerial
@@ -1944,6 +2010,14 @@ function App() {
     () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
     [devices, activeSerial],
   );
+  const popupTargetDevice = useMemo(
+    () =>
+      isLogcatPopupWindow && logcatPopupSerial
+        ? devices.find((device) => device.summary.serial === logcatPopupSerial) ?? null
+        : null,
+    [devices, isLogcatPopupWindow, logcatPopupSerial],
+  );
+  const popupTargetConnected = popupTargetDevice?.summary.state === "device";
   const latestApkInstallTask = latestApkInstallTaskId
     ? taskState.items.find((task) => task.id === latestApkInstallTaskId) ?? null
     : null;
@@ -1960,6 +2034,38 @@ function App() {
       : selectedCount === 1
         ? activeSerial ?? "No device selected"
         : `${selectedCount} devices selected`;
+  const logcatPopupCandidates = useMemo(
+    () => buildLogcatPopupCandidates(devices, selectedSerials, activeSerial ?? null),
+    [devices, selectedSerials, activeSerial],
+  );
+  const logcatPopupPreviewTargets = useMemo(
+    () => partitionLogcatPopupTargets(logcatPopupDraftSerials, devices),
+    [logcatPopupDraftSerials, devices],
+  );
+  const hasLogcatPopupSelectableCandidate = logcatPopupCandidates.some((candidate) => candidate.selectable);
+  const logcatPopupSelectableSerials = useMemo(
+    () => logcatPopupCandidates.filter((candidate) => candidate.selectable).map((candidate) => candidate.serial),
+    [logcatPopupCandidates],
+  );
+  const logcatPopupSelectedCount = logcatPopupPreviewTargets.openable.length;
+  const logcatPopupSelectableCount = logcatPopupSelectableSerials.length;
+  const logcatPopupAllSelectableSelected =
+    logcatPopupSelectableCount > 0 && logcatPopupSelectedCount === logcatPopupSelectableCount;
+
+  useEffect(() => {
+    if (!logcatPopupSelectorOpen) {
+      return;
+    }
+    if (isLogcatPopupWindow || !isLogcatView) {
+      setLogcatPopupSelectorOpen(false);
+      return;
+    }
+    const selectableSet = new Set(
+      logcatPopupCandidates.filter((candidate) => candidate.selectable).map((candidate) => candidate.serial),
+    );
+    setLogcatPopupDraftSerials((prev) => prev.filter((serial) => selectableSet.has(serial)));
+  }, [isLogcatPopupWindow, isLogcatView, logcatPopupCandidates, logcatPopupSelectorOpen]);
+
   const canStartLogcat =
     !busy &&
     !!activeSerial &&
@@ -3347,7 +3453,7 @@ function App() {
 
     // Tracking snapshots contain summaries only; keep the last known detail to avoid UI flicker.
     setDevices((prev) => mergeDeviceDetails(prev, nextDevices, { preserveMissingDetail: true }));
-    setSelectedSerials((prev) => resolveSelectedSerials(prev, nextDevices));
+    setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, nextDevices));
     if (options.allowDetailRefresh && shouldRefreshDetail) {
       scheduleDeviceDetailRefresh(800, { notifyOnError: false });
     }
@@ -3371,7 +3477,7 @@ function App() {
     try {
       const response = await listDevices(false);
       setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
-      setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
+      setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, response.data));
       scheduleDeviceDetailRefresh(800, { notifyOnError });
     } catch (error) {
       if (notifyOnError) {
@@ -3404,7 +3510,7 @@ function App() {
       }
       // listDevices(false) returns summaries only; keep the last known detail to avoid UI flicker.
       setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
-      setSelectedSerials((prev) => resolveSelectedSerials(prev, response.data));
+      setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, response.data));
       void refreshDeviceDetails({ notifyOnError: false });
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -5690,16 +5796,27 @@ function App() {
     setLogcatRetainedBySerial((prev) => ({ ...prev, [serial]: [] }));
   };
 
-  const handleLogcatClearBuffer = async () => {
+  const closeLogcatClearBufferModal = () => setLogcatClearBufferModal(null);
+
+  const handleLogcatClearBuffer = () => {
     const serial = ensureSingleSelection("logcat");
     if (!serial) {
       return;
     }
+    setLogcatClearBufferModal({ serial });
+  };
+
+  const handleLogcatClearBufferConfirm = async () => {
+    if (!logcatClearBufferModal) {
+      return;
+    }
+    const serial = logcatClearBufferModal.serial;
     setBusy(true);
     try {
       await clearLogcat(serial);
       clearLogcatLocalCache(serial);
       pushToast("Logcat buffer cleared.", "info");
+      closeLogcatClearBufferModal();
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -5740,8 +5857,139 @@ function App() {
     }
   };
 
-  const toggleLogcatAdvanced = () => {
-    setLogcatAdvancedOpen((prev) => !prev);
+  const openOrFocusLogcatPopupWindow = async (serial: string): Promise<"opened" | "focused"> => {
+    const popupLabel = buildLogcatPopupWindowLabel(serial);
+    const popupHash = buildLogcatPopupHash(serial);
+    const existing = await WebviewWindow.getByLabel(popupLabel);
+    if (existing) {
+      await existing.show();
+      await existing.unminimize();
+      await existing.setFocus();
+      return "focused";
+    }
+
+    const popupWindow = new WebviewWindow(popupLabel, {
+      title: `Logcat · ${serial}`,
+      url: popupHash,
+      width: 1120,
+      height: 720,
+      minWidth: 900,
+      minHeight: 560,
+      focus: true,
+    });
+    void popupWindow.once("tauri://error", (event) => {
+      const message =
+        typeof event.payload === "string" && event.payload.trim()
+          ? event.payload
+          : "Unable to open popup window.";
+      pushToast(message, "error");
+    });
+    return "opened";
+  };
+
+  const closeLogcatPopupSelectorModal = () => setLogcatPopupSelectorOpen(false);
+
+  const openLogcatPopupSelectorModal = () => {
+    if (!logcatPopupCandidates.length) {
+      pushToast("No devices available.", "error");
+      return;
+    }
+    const defaults = logcatPopupCandidates
+      .filter((candidate) => candidate.defaultSelected)
+      .map((candidate) => candidate.serial);
+    setLogcatPopupDraftSerials(defaults);
+    setLogcatPopupSelectorOpen(true);
+  };
+
+  const toggleLogcatPopupDraftSerial = (serial: string) => {
+    setLogcatPopupDraftSerials((prev) => {
+      const next = new Set(prev);
+      if (next.has(serial)) {
+        next.delete(serial);
+      } else {
+        next.add(serial);
+      }
+      return Array.from(next);
+    });
+  };
+
+  const selectAllLogcatPopupDraftSerials = () => {
+    setLogcatPopupDraftSerials(logcatPopupSelectableSerials);
+  };
+
+  const clearLogcatPopupDraftSerials = () => {
+    setLogcatPopupDraftSerials([]);
+  };
+
+  const openLogcatPopupsForSerials = async (serials: string[]): Promise<boolean> => {
+    const uniqueSerials = Array.from(new Set(serials.map((serial) => serial.trim()).filter(Boolean)));
+    const { openable, skipped } = partitionLogcatPopupTargets(uniqueSerials, devices);
+    if (uniqueSerials.length === 0) {
+      pushToast("Select at least one device.", "error");
+      return false;
+    }
+    if (!openable.length) {
+      pushToast("No online devices in current selection.", "error");
+      return false;
+    }
+    if (
+      openable.length > 8 &&
+      !window.confirm(`Open ${openable.length} popup windows for selected devices?`)
+    ) {
+      return false;
+    }
+
+    let opened = 0;
+    let focused = 0;
+    let failed = 0;
+
+    if (!isTauriRuntime()) {
+      openable.forEach((serial) => {
+        const popup = window.open(buildLogcatPopupHash(serial), "_blank", "noopener,noreferrer");
+        if (popup) {
+          opened += 1;
+        } else {
+          failed += 1;
+        }
+      });
+    } else {
+      const results = await Promise.allSettled(
+        openable.map(async (serial) => openOrFocusLogcatPopupWindow(serial)),
+      );
+      results.forEach((result) => {
+        if (result.status === "rejected") {
+          failed += 1;
+          return;
+        }
+        if (result.value === "focused") {
+          focused += 1;
+          return;
+        }
+        opened += 1;
+      });
+    }
+
+    const summary = [
+      opened > 0 ? `${opened} opened` : null,
+      focused > 0 ? `${focused} focused` : null,
+      skipped.length > 0 ? `${skipped.length} skipped offline` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+    if (summary) {
+      pushToast(`Popups: ${summary}.`, "info");
+    }
+    if (failed > 0) {
+      pushToast(`${failed} popup window${failed > 1 ? "s" : ""} failed to open.`, "error");
+    }
+    return true;
+  };
+
+  const handleLogcatPopupSelectorConfirm = async () => {
+    const didOpen = await openLogcatPopupsForSerials(logcatPopupDraftSerials);
+    if (didOpen) {
+      closeLogcatPopupSelectorModal();
+    }
   };
 
   const handlePerfStart = async () => {
@@ -7517,21 +7765,12 @@ function App() {
     }
   };
 
-  const handleQuickLogcatClear = async () => {
+  const handleQuickLogcatClear = () => {
     const singleSerial = ensureSingleSelection("logcat clear");
     if (!singleSerial) {
       return;
     }
-    setBusy(true);
-    try {
-      await clearLogcat(singleSerial);
-      clearLogcatLocalCache(singleSerial);
-      pushToast("Logcat cleared.", "info");
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    } finally {
-      setBusy(false);
-    }
+    setLogcatClearBufferModal({ serial: singleSerial });
   };
 
   const handleConfirmReboot = async () => {
@@ -9838,7 +10077,8 @@ function App() {
   };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isLogcatPopupWindow ? " logcat-popup-shell" : ""}`}>
+      {!isLogcatPopupWindow && (
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-title">Lazy Blacktea</span>
@@ -9894,8 +10134,10 @@ function App() {
           </div>
         </div>
       </aside>
+      )}
 
       <div className="app-main">
+        {!isLogcatPopupWindow && (
         <header className="top-bar">
           <div className="device-context">
             <div className="device-selector-row">
@@ -10159,8 +10401,9 @@ function App() {
             </span>
           </div>
         </header>
+        )}
 
-        <main className="page">
+        <main className={`page${isLogcatPopupWindow ? " logcat-popup-page" : ""}`}>
           <Routes>
             <Route path="/" element={<DashboardView />} />
             <Route path="/performance" element={<PerformanceView />} />
@@ -11794,12 +12037,24 @@ function App() {
                       <p className="muted">Filters, presets, and search for streaming logs.</p>
                     </div>
                   </div>
-	                  <section className="panel">
+	                  <section className="panel logcat-panel">
 	                    <div className="panel-header">
+                        <div className="logcat-header-main">
 	                      <div>
 	                        <h2>Logcat Stream</h2>
 	                        <span>{selectedSummaryLabel}</span>
 	                      </div>
+                          {!isLogcatPopupWindow && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={openLogcatPopupSelectorModal}
+                              disabled={busy || !hasLogcatPopupSelectableCandidate}
+                            >
+                              Open selected popup
+                            </button>
+                          )}
+                        </div>
                         <span className={`status-pill ${logcatStatusTone}`}>{logcatStatusLabel}</span>
 	                    </div>
 	                    {singleSelectionWarning && (
@@ -11808,6 +12063,14 @@ function App() {
 	                        <span>{singleSelectionWarningMessage}</span>
 	                      </div>
 	                    )}
+                      {isLogcatPopupWindow && logcatPopupSerial && !popupTargetConnected && (
+                        <div className="inline-alert error">
+                          <strong>Device disconnected</strong>
+                          <span className="muted">
+                            Target device <code>{logcatPopupSerial}</code> is not connected.
+                          </span>
+                        </div>
+                      )}
 	                    <div className="logcat-toolbar">
 	                      <div className="logcat-toolbar-row">
 	                        <div className="logcat-toolbar-cluster">
@@ -11825,20 +12088,12 @@ function App() {
                             </button>
                             <button
                               className="ghost"
-                              onClick={handleLogcatClearView}
-                              disabled={busy || !activeSerial}
-                            >
-                              Clear View
-                            </button>
-                            <button
-                              className="ghost"
                               onClick={handleLogcatExport}
                               disabled={busy || !activeSerial}
                             >
                               Export
                             </button>
                           </div>
-                          <AdvancedToggleButton open={logcatAdvancedOpen} onClick={toggleLogcatAdvanced} />
                           <label className="toggle">
                             <input
                               type="checkbox"
@@ -11859,6 +12114,7 @@ function App() {
                           </div>
                           <div className="inline-row">
                             <select
+                              className="logcat-select"
                               value={logcatSourceMode}
                               onChange={(event) =>
                                 setLogcatSourceMode(event.target.value as LogcatSourceMode)
@@ -11918,63 +12174,64 @@ function App() {
                         activePresetLabel={selectedLogcatPreset?.name}
                         levelsSummary={logLevelsSummary}
                         isPresetDirty={logcatPresetDirty}
-                      />
-                    {logcatAdvancedOpen && (
-                      <InlineAdvancedPanel title="Advanced" onClose={() => setLogcatAdvancedOpen(false)}>
-                        <div className="logcat-advanced-options">
-                          <div className="panel-sub">
-                            <h3>Levels</h3>
-                            <div className="toggle-group">
-                              {LOG_LEVELS.map((level) => (
-                                <label key={level} className="toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={logLevels[level]}
-                                  onChange={(event) =>
-                                    setLogLevels((prev) => ({
-                                      ...prev,
-                                      [level]: event.target.checked,
-                                    }))
-                                  }
-                                />
-                                {level}
-                              </label>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="panel-sub">
-                          <h3>Search Options</h3>
-                          <div className="toggle-group">
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={logcatSearchRegex}
-                                onChange={(event) => setLogcatSearchRegex(event.target.checked)}
-                              />
-                              Regex
-                            </label>
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={logcatSearchCaseSensitive}
-                                onChange={(event) => setLogcatSearchCaseSensitive(event.target.checked)}
-                              />
-                              Case sensitive
-                            </label>
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={logcatSearchOnly}
-                                onChange={(event) => setLogcatSearchOnly(event.target.checked)}
-                              />
-                              Matches only
-                            </label>
+                        selectClassName="logcat-select"
+                        compact
+                        expanded={logcatLiveFilterExpanded}
+                        onToggleExpanded={() => setLogcatLiveFilterExpanded((prev) => !prev)}
+                        advancedOptions={
+                          <div className="logcat-advanced-options">
+                            <div className="panel-sub">
+                              <h3>Levels</h3>
+                              <div className="toggle-group">
+                                {LOG_LEVELS.map((level) => (
+                                  <label key={level} className="toggle">
+                                    <input
+                                      type="checkbox"
+                                      checked={logLevels[level]}
+                                      onChange={(event) =>
+                                        setLogLevels((prev) => ({
+                                          ...prev,
+                                          [level]: event.target.checked,
+                                        }))
+                                      }
+                                    />
+                                    {level}
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="panel-sub">
+                              <h3>Search Options</h3>
+                              <div className="toggle-group">
+                                <label className="toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={logcatSearchRegex}
+                                    onChange={(event) => setLogcatSearchRegex(event.target.checked)}
+                                  />
+                                  Regex
+                                </label>
+                                <label className="toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={logcatSearchCaseSensitive}
+                                    onChange={(event) => setLogcatSearchCaseSensitive(event.target.checked)}
+                                  />
+                                  Case sensitive
+                                </label>
+                                <label className="toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={logcatSearchOnly}
+                                    onChange={(event) => setLogcatSearchOnly(event.target.checked)}
+                                  />
+                                  Matches only
+                                </label>
+                              </div>
                             </div>
                           </div>
-                        </div>
-
-                      </InlineAdvancedPanel>
-                    )}
+                        }
+                      />
                     {logcatLastExport && (
                       <div className="inline-alert info">
                         <strong>Exported</strong>
@@ -11993,6 +12250,24 @@ function App() {
                         </div>
                       )}
                     <div className="logcat-output-wrapper">
+                      <div className="logcat-output-actions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={handleLogcatClearView}
+                          disabled={busy || !activeSerial}
+                        >
+                          Clear View
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setLogcatSearchOpen((prev) => !prev)}
+                          disabled={busy}
+                        >
+                          {logcatSearchOpen ? "Close Search" : "Search"}
+                        </button>
+                      </div>
                       {logcatSearchOpen ? (
                         <div className="logcat-search-overlay">
                           <div className="logcat-search-header">
@@ -12025,21 +12300,7 @@ function App() {
                             {logcatFiltered.matchIds.length}
                           </span>
                         </div>
-                      ) : (
-                        <button
-                          type="button"
-                          className="logcat-search-toggle"
-                          onClick={() => setLogcatSearchOpen(true)}
-                          aria-label="Open search"
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path
-                              d="M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zm0-2a9 9 0 1 0 5.65 16.02l4.66 4.66a1 1 0 0 0 1.41-1.41l-4.66-4.66A9 9 0 0 0 11 2z"
-                              fill="currentColor"
-                            />
-                          </svg>
-                        </button>
-	                      )}
+                      ) : null}
                       <LogcatOutput
                         entries={logcatFiltered.lines}
                         searchPattern={logcatSearchPattern}
@@ -14210,6 +14471,157 @@ function App() {
           </Routes>
         </main>
       </div>
+
+      {logcatClearBufferModal && (
+        <div className="modal-backdrop" onClick={closeLogcatClearBufferModal}>
+          <div className="modal danger-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Clear Logcat Buffer</h3>
+                <p className="muted">This clears the active device logcat buffer and the local view cache.</p>
+              </div>
+              <button className="ghost" onClick={closeLogcatClearBufferModal} disabled={busy}>
+                Close
+              </button>
+            </div>
+            <div className="stack">
+              <div className="inline-alert error">
+                <strong>Danger zone</strong>
+                <span className="muted">This action cannot be undone.</span>
+              </div>
+              <p className="muted">
+                Device: <strong>{logcatClearBufferModal.serial}</strong>
+              </p>
+            </div>
+            <div className="button-row">
+              <button className="danger" onClick={handleLogcatClearBufferConfirm} disabled={busy}>
+                Confirm Clear
+              </button>
+              <button className="ghost" onClick={closeLogcatClearBufferModal} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {logcatPopupSelectorOpen && (
+        <div className="modal-backdrop" onClick={closeLogcatPopupSelectorModal}>
+          <div
+            className="modal confirm-modal logcat-popup-selector-modal"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <h3>Open Logcat Popups</h3>
+                <p className="muted">Mirrors global device selection.</p>
+              </div>
+              <button className="ghost" onClick={closeLogcatPopupSelectorModal} disabled={busy}>
+                Close
+              </button>
+            </div>
+
+            <div className="logcat-popup-selector-summary">
+              <span className="muted">Select devices to stream logs.</span>
+              <span className="badge">
+                {logcatPopupSelectedCount} / {logcatPopupSelectableCount} selected
+              </span>
+            </div>
+
+            <div className="logcat-popup-selector-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={selectAllLogcatPopupDraftSerials}
+                disabled={busy || !hasLogcatPopupSelectableCandidate || logcatPopupAllSelectableSelected}
+              >
+                Select All Online
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={clearLogcatPopupDraftSerials}
+                disabled={busy || logcatPopupDraftSerials.length === 0}
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="logcat-popup-selector-columns" aria-hidden="true">
+              <span>Device</span>
+              <span>Serial</span>
+              <span>Status</span>
+            </div>
+
+            <div className="logcat-popup-selector-list">
+              {logcatPopupCandidates.map((candidate) => {
+                const checked = logcatPopupDraftSerials.includes(candidate.serial);
+                const stateTone =
+                  candidate.selectable
+                    ? "ok"
+                    : candidate.state === "unauthorized"
+                      ? "error"
+                      : "warn";
+                return (
+                  <label
+                    key={candidate.serial}
+                    className={`logcat-popup-selector-row${candidate.selectable ? "" : " is-disabled"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={busy || !candidate.selectable}
+                      onChange={() => toggleLogcatPopupDraftSerial(candidate.serial)}
+                    />
+                    <span className="logcat-popup-selector-name">{candidate.name}</span>
+                    <span className="logcat-popup-selector-serial">{candidate.serial}</span>
+                    <span className={`status-pill ${stateTone}`}>
+                      {(candidate.selectable ? "online" : candidate.state).toUpperCase()}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {logcatPopupCandidates.length === 0 && (
+              <div className="inline-alert info">
+                <strong>No devices found</strong>
+                <span className="muted">Connect a device and refresh to open popup windows.</span>
+              </div>
+            )}
+            {logcatPopupCandidates.length > 0 && !hasLogcatPopupSelectableCandidate && (
+              <div className="inline-alert error">
+                <strong>No online devices</strong>
+                <span className="muted">Only devices in state "device" can open popup windows.</span>
+              </div>
+            )}
+            {hasLogcatPopupSelectableCandidate && logcatPopupPreviewTargets.openable.length === 0 && (
+              <div className="inline-alert info">
+                <strong>Select a target</strong>
+                <span className="muted">Choose at least one online device to continue.</span>
+              </div>
+            )}
+            {logcatPopupPreviewTargets.skipped.length > 0 && (
+              <p className="muted">
+                {logcatPopupPreviewTargets.skipped.length} selected device
+                {logcatPopupPreviewTargets.skipped.length > 1 ? "s are" : " is"} offline and will be skipped.
+              </p>
+            )}
+
+            <div className="button-row logcat-popup-selector-footer">
+              <button
+                onClick={handleLogcatPopupSelectorConfirm}
+                disabled={busy || logcatPopupSelectedCount === 0}
+              >
+                Open {logcatPopupSelectedCount} Popup{logcatPopupSelectedCount > 1 ? "s" : ""}
+              </button>
+              <button className="ghost" onClick={closeLogcatPopupSelectorModal} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {presetUpdateModal && (
         <div className="modal-backdrop" onClick={closePresetUpdateModal}>

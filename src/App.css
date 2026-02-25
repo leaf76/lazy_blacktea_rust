@@ -136,6 +136,10 @@ textarea {
   overflow: hidden;
 }
 
+.logcat-popup-shell {
+  grid-template-columns: 1fr;
+}
+
 .sidebar {
   background: var(--color-bg-panel);
   border-right: 1px solid var(--color-border);
@@ -241,6 +245,10 @@ textarea {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.logcat-popup-shell .app-main {
+  height: 100vh;
 }
 
 .top-bar {
@@ -660,6 +668,10 @@ textarea {
 
 .page.page-fixed {
   overflow: hidden;
+}
+
+.logcat-popup-page {
+  padding: 12px;
 }
 
 .page-section {
@@ -3693,6 +3705,19 @@ textarea:disabled {
   font-size: 14px;
 }
 
+.logcat-header-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.logcat-header-main > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .logcat-panel .panel-header span {
   font-size: 11px;
 }
@@ -3730,6 +3755,24 @@ textarea:disabled {
   padding: 4px 8px;
 }
 
+.logcat-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-color: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 1px),
+    calc(100% - 9px) calc(50% - 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+
 .logcat-panel button {
   padding: 5px 9px;
   font-size: 11px;
@@ -3754,9 +3797,17 @@ textarea:disabled {
   position: relative;
 }
 
+.logcat-output-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
 .logcat-search-overlay {
   position: absolute;
-  top: 8px;
+  top: 40px;
   right: 8px;
   display: flex;
   flex-direction: column;
@@ -3792,32 +3843,6 @@ textarea:disabled {
 .logcat-search-overlay input {
   min-width: 140px;
   flex: 1;
-}
-
-.logcat-search-toggle {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 32px;
-  height: 32px;
-  border-radius: 999px;
-  border: 1px solid var(--color-border);
-  background: rgba(10, 16, 30, 0.85);
-  color: var(--color-text);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  z-index: 2;
-}
-
-.logcat-search-toggle svg {
-  width: 16px;
-  height: 16px;
-}
-
-.logcat-search-toggle:hover {
-  background: rgba(15, 23, 42, 0.95);
 }
 
 .logcat-filter-grid {
@@ -3966,6 +3991,24 @@ textarea:disabled {
   color: inherit;
 }
 
+.logcat-live-filter-advanced {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.logcat-live-filter-advanced .panel-sub {
+  padding: 6px 8px;
+}
+
+.logcat-live-filter-grid.is-collapsed .logcat-filter-bar {
+  gap: 6px;
+}
+
+.logcat-live-filter-grid.is-collapsed .logcat-filter-header {
+  min-height: 24px;
+}
+
 .logcat-live-filter-chip-row {
   display: flex;
   align-items: center;
@@ -4072,6 +4115,10 @@ textarea:disabled {
   }
 
   .logcat-advanced-options {
+    grid-template-columns: 1fr;
+  }
+
+  .logcat-live-filter-advanced {
     grid-template-columns: 1fr;
   }
 }
@@ -4570,6 +4617,105 @@ textarea:disabled {
   gap: 12px;
 }
 
+.logcat-popup-selector-modal {
+  width: min(620px, 100%);
+  max-height: min(82vh, 760px);
+}
+
+.logcat-popup-selector-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.logcat-popup-selector-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.logcat-popup-selector-columns {
+  display: grid;
+  grid-template-columns: 28px minmax(120px, 1fr) minmax(140px, 200px) auto;
+  gap: 10px;
+  align-items: center;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 12px;
+}
+
+.logcat-popup-selector-columns span:first-child {
+  visibility: hidden;
+}
+
+.logcat-popup-selector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(44vh, 360px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.modal .logcat-popup-selector-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--color-bg-subtle);
+  transition: border-color 140ms ease, background-color 140ms ease;
+  grid-template-columns: 28px minmax(120px, 1fr) minmax(140px, 200px) auto;
+}
+
+.modal .logcat-popup-selector-row:hover:not(.is-disabled) {
+  border-color: var(--color-accent);
+  background: var(--color-bg-panel);
+}
+
+.modal .logcat-popup-selector-row input[type="checkbox"] {
+  margin: 0;
+}
+
+.logcat-popup-selector-row.is-disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+.logcat-popup-selector-name {
+  font-size: 12px;
+  color: var(--color-text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logcat-popup-selector-serial {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal .logcat-popup-selector-row .status-pill {
+  justify-self: end;
+}
+
+.logcat-popup-selector-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--color-border);
+  padding-top: 10px;
+}
+
 .pairing-content {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -4660,6 +4806,43 @@ textarea:disabled {
 
   .device-popover-list {
     max-height: min(240px, 55vh);
+  }
+
+  .logcat-header-main {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .logcat-popup-selector-columns {
+    display: none;
+  }
+
+  .modal .logcat-popup-selector-row {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "check name status"
+      "check serial status";
+    row-gap: 4px;
+    column-gap: 10px;
+    align-items: start;
+  }
+
+  .modal .logcat-popup-selector-row input[type="checkbox"] {
+    grid-area: check;
+    margin-top: 2px;
+  }
+
+  .logcat-popup-selector-name {
+    grid-area: name;
+  }
+
+  .logcat-popup-selector-serial {
+    grid-area: serial;
+  }
+
+  .modal .logcat-popup-selector-row .status-pill {
+    grid-area: status;
+    align-self: start;
   }
 }
 
