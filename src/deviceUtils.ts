@@ -28,6 +28,24 @@ export const resolveSelectedSerials = (previous: string[], devices: DeviceInfo[]
   return preferred ? [preferred.summary.serial] : [];
 };
 
+export const resolvePrimarySerial = (selectedSerials: string[]): string | null => {
+  return selectedSerials[0] ?? null;
+};
+
+export const formatPrimaryDeviceLabel = (
+  serial: string | null | undefined,
+  device: DeviceInfo | null | undefined,
+): string => {
+  if (!serial) {
+    return "Unknown device";
+  }
+  const name = device?.detail?.model ?? device?.summary.model ?? "";
+  if (!name || name === serial) {
+    return serial;
+  }
+  return `${name} (${serial})`;
+};
+
 export const reduceSelectionToOne = (previous: string[], devices: DeviceInfo[]): string[] => {
   if (!devices.length) {
     return [];

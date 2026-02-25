@@ -181,9 +181,11 @@ import { buildDesktopNotificationForTask, detectNewlyCompletedTasks } from "./ta
 import {
   applyDeviceDetailPatch,
   filterDevicesBySearch,
+  formatPrimaryDeviceLabel,
   formatDeviceInfoMarkdown,
   mergeDeviceDetails,
   reduceSelectionToOne,
+  resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
   selectSerialsForGroup,
@@ -1912,8 +1914,7 @@ function App() {
     path: string;
     overwrite: boolean;
     existingNames: string[];
-    selection_count: number;
-  }>({ pathname: "/", serial: "", path: "/sdcard", overwrite: true, existingNames: [], selection_count: 0 });
+  }>({ pathname: "/", serial: "", path: "/sdcard", overwrite: true, existingNames: [] });
   const apkDragContextRef = useRef<{ pathname: string; mode: "single" | "multiple" | "bundle" }>({
     pathname: "/",
     mode: "single",
@@ -1934,7 +1935,7 @@ function App() {
       setBugreportLogAdvancedOpen(false);
     }
   }, [isBugreportLogViewer]);
-  const activeSerial = selectedSerials[0];
+  const activeSerial = resolvePrimarySerial(selectedSerials);
   const activeLogcatRunning = activeSerial ? (logcatRunningBySerial[activeSerial] ?? false) : false;
   const activeLogcatStatusLoading = activeSerial
     ? (logcatStatusLoadingBySerial[activeSerial] ?? false)
@@ -1961,24 +1962,24 @@ function App() {
         : `${selectedCount} devices selected`;
   const canStartLogcat =
     !busy &&
-    selectedSerials.length === 1 &&
+    !!activeSerial &&
     !activeLogcatStatusLoading &&
     !activeLogcatRunning;
   const canStopLogcat =
     !busy &&
-    selectedSerials.length === 1 &&
+    !!activeSerial &&
     !activeLogcatStatusLoading &&
     activeLogcatRunning;
   const logcatStatusLabel =
-    selectedSerials.length !== 1
-      ? "Select one device"
+    !activeSerial
+      ? "Select a device"
       : activeLogcatStatusLoading
         ? "Checking..."
         : activeLogcatRunning
           ? "Running"
           : "Stopped";
   const logcatStatusTone =
-    selectedSerials.length !== 1
+    !activeSerial
       ? "idle"
       : activeLogcatStatusLoading
         ? "busy"
@@ -1996,7 +1997,10 @@ function App() {
       ),
     [location.pathname],
   );
-  const singleSelectionWarning = requiresSingleSelection && selectedCount > 1;
+  const singleSelectionWarning = requiresSingleSelection && selectedCount > 1 && !!activeSerial;
+  const singleSelectionWarningMessage = singleSelectionWarning
+    ? `Multiple devices selected. Using primary device: ${formatPrimaryDeviceLabel(activeSerial, activeDevice)}.`
+    : "";
   useEffect(() => {
     const prevSerial = perfLastSerialRef.current;
     const prevNetSerial = netLastSerialRef.current;
@@ -2224,9 +2228,8 @@ function App() {
       path: filesPath,
       overwrite: filesOverwriteEnabled,
       existingNames: files.map((entry) => entry.name),
-      selection_count: selectedSerials.length,
     };
-  }, [activeSerial, files, filesOverwriteEnabled, filesPath, location.pathname, selectedSerials]);
+  }, [activeSerial, files, filesOverwriteEnabled, filesPath, location.pathname]);
 
   useEffect(() => {
     apkDragContextRef.current = {
@@ -2698,7 +2701,7 @@ function App() {
     if (!isUiInspectorView) {
       return;
     }
-    if (selectedSerials.length !== 1 || !activeSerial) {
+    if (!activeSerial) {
       setUiAutoSyncEnabled(false);
       return;
     }
@@ -2743,7 +2746,7 @@ function App() {
       stopped = true;
       uiAutoSyncTokenRef.current = token + 1;
     };
-  }, [activeSerial, isUiInspectorView, selectedSerials.length, uiAutoSyncEnabled, uiAutoSyncIntervalMs]);
+  }, [activeSerial, isUiInspectorView, uiAutoSyncEnabled, uiAutoSyncIntervalMs]);
 
   const [uiHoveredNodeIndex, setUiHoveredNodeIndex] = useState<number>(-1);
   const [uiSelectedNodeIndex, setUiSelectedNodeIndex] = useState<number>(-1);
@@ -2879,12 +2882,8 @@ function App() {
   ]);
 
   const ensureSingleSelection = (context: string) => {
-    if (!selectedSerials.length) {
-      pushToast(`Select one device for ${context}.`, "error");
-      return null;
-    }
-    if (selectedSerials.length > 1) {
-      pushToast(`${context} supports only one device.`, "error");
+    if (!activeSerial) {
+      pushToast(`Select a device for ${context}.`, "error");
       return null;
     }
     return activeSerial;
@@ -5592,11 +5591,11 @@ function App() {
   };
 
   useEffect(() => {
-    if (!isLogcatView || selectedSerials.length !== 1 || !activeSerial) {
+    if (!isLogcatView || !activeSerial) {
       return;
     }
     void refreshLogcatStatus(activeSerial, { silent: true });
-  }, [isLogcatView, selectedSerials.length, activeSerial]);
+  }, [isLogcatView, activeSerial]);
 
   const handleLogcatStart = async () => {
     const serial = ensureSingleSelection("logcat");
@@ -6663,7 +6662,7 @@ function App() {
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
-        serial: activeSerial,
+        serial,
         patch: { status: "error", message: formatError(error), progress: null },
       });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
@@ -6715,8 +6714,8 @@ function App() {
         if (!payload.paths.length) {
           return;
         }
-        if (filesCtx.selection_count !== 1 || !filesCtx.serial) {
-          pushToast("Select one device for file upload.", "error");
+        if (!filesCtx.serial) {
+          pushToast("Select a device for file upload.", "error");
           return;
         }
         const existing = new Set(filesCtx.existingNames);
@@ -7055,7 +7054,7 @@ function App() {
     return sum % 6;
   };
 
-  const appsSerial = selectedSerials.length === 1 ? selectedSerials[0] : null;
+  const appsSerial = activeSerial;
   const getAppIconKey = (serial: string, packageName: string) => `${serial}::${packageName}`;
 
   const pumpAppIconQueue = () => {
@@ -7178,9 +7177,6 @@ function App() {
     if (busy) {
       return;
     }
-    if (singleSelectionWarning) {
-      return;
-    }
     if (apps.length > 0) {
       return;
     }
@@ -7190,7 +7186,7 @@ function App() {
     }
     appsAutoLoadKeyRef.current = key;
     void handleLoadApps();
-  }, [location.pathname, appsSerial, appsThirdPartyOnly, appsIncludeVersions, apps.length, busy, singleSelectionWarning]);
+  }, [location.pathname, appsSerial, appsThirdPartyOnly, appsIncludeVersions, apps.length, busy]);
 
   const loadMoreApps = () => {
     if (!appsCanLoadMoreRef.current) {
@@ -8096,10 +8092,10 @@ function App() {
       description: screenRecordRemote
         ? "Finish and save the ongoing screen recording."
         : "Record the device screen for a short clip.",
-      hint: "Single device",
+      hint: "Primary device",
       tone: "primary",
       onClick: handleQuickScreenRecord,
-      disabled: busy || selectedSerials.length !== 1,
+      disabled: busy || !activeSerial,
     },
     {
       id: "logcat-clear",
@@ -8107,7 +8103,7 @@ function App() {
       description: "Clear the logcat buffer for the primary device.",
       hint: "Primary device",
       onClick: handleQuickLogcatClear,
-      disabled: busy || selectedSerials.length !== 1,
+      disabled: busy || !activeSerial,
     },
     {
       id: "mirror",
@@ -9221,9 +9217,8 @@ function App() {
         })
       : netRows;
 
-    const canStartNet =
-      !!serial && !busy && selectedSerials.length === 1 && deviceStatus === "device" && !netState.running;
-    const canStopNet = !!serial && !busy && selectedSerials.length === 1 && netState.running;
+    const canStartNet = !!serial && !busy && deviceStatus === "device" && !netState.running;
+    const canStopNet = !!serial && !busy && netState.running;
     const netIntervalBadge =
       netProfilerIntervalMs >= 1000
         ? `Interval ${Math.round(netProfilerIntervalMs / 1000)}s`
@@ -9584,7 +9579,7 @@ function App() {
           <section className="panel empty-state">
             <div>
               <h2>Select a device</h2>
-              <p className="muted">Choose a single online device to start monitoring.</p>
+              <p className="muted">Choose an online device to start monitoring.</p>
             </div>
             <div className="button-row">
               <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
@@ -9665,8 +9660,8 @@ function App() {
         : Number.NaN,
     );
 
-    const canStart = !busy && selectedSerials.length === 1 && deviceStatus === "device" && !state.running;
-    const canStop = !busy && selectedSerials.length === 1 && state.running;
+    const canStart = !busy && !!activeSerial && deviceStatus === "device" && !state.running;
+    const canStop = !busy && !!activeSerial && state.running;
 
 	    return (
 	      <div className="page-section">
@@ -9685,8 +9680,8 @@ function App() {
 
 	        {singleSelectionWarning && (
 	          <div className="inline-alert info">
-	            <strong>Single device required</strong>
-	            <span>Keep only one device selected (Device Context: Single) to start or stop monitoring.</span>
+	            <strong>Primary device in use</strong>
+	            <span>{singleSelectionWarningMessage}</span>
 	          </div>
 	        )}
 
@@ -9809,7 +9804,7 @@ function App() {
           <section className="panel empty-state">
             <div>
               <h2>Select a device</h2>
-              <p className="muted">Choose a single online device to start profiling.</p>
+              <p className="muted">Choose an online device to start profiling.</p>
             </div>
             <div className="button-row">
               <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
@@ -9832,8 +9827,8 @@ function App() {
 
         {singleSelectionWarning && (
           <div className="inline-alert info">
-            <strong>Single device required</strong>
-            <span>Keep only one device selected (Device Context: Single) to start or stop profiling.</span>
+            <strong>Primary device in use</strong>
+            <span>{singleSelectionWarningMessage}</span>
           </div>
         )}
 
@@ -10112,7 +10107,8 @@ function App() {
                 </div>
                 {singleSelectionWarning && (
                   <div className="inline-alert info">
-                    This page requires a single device. Keep only one selected.
+                    <strong>Primary device in use</strong>
+                    <span>{singleSelectionWarningMessage}</span>
                   </div>
                 )}
               </div>
@@ -10762,7 +10758,7 @@ function App() {
                           <button type="button" className="danger" onClick={requestRebootConfirm} disabled={busy || selectedCount === 0}>
                             Reboot…
                           </button>
-                          <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount !== 1}>
+                          <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount === 0}>
                             Copy Device Info
                           </button>
                         </div>
@@ -11282,8 +11278,8 @@ function App() {
 	                    </div>
 	                    {singleSelectionWarning && (
 	                      <div className="inline-alert info">
-	                        <strong>Single device required</strong>
-	                        <span>Keep only one device selected (Device Context: Single) to use this page.</span>
+	                        <strong>Primary device in use</strong>
+	                        <span>{singleSelectionWarningMessage}</span>
 	                      </div>
 	                    )}
 	                    <div className="form-row">
@@ -11293,20 +11289,20 @@ function App() {
 	                        onChange={(event) => setFilesPath(event.target.value)}
                         placeholder="/sdcard"
                       />
-                      <button className="ghost" onClick={handleFilesGoUp} disabled={busy || selectedSerials.length !== 1}>
+                      <button className="ghost" onClick={handleFilesGoUp} disabled={busy || !activeSerial}>
                         Up
                       </button>
-                      <button onClick={() => void handleFilesRefresh()} disabled={busy || selectedSerials.length !== 1}>
+                      <button onClick={() => void handleFilesRefresh()} disabled={busy || !activeSerial}>
                         Go
                       </button>
                       <button
                         className="ghost"
                         onClick={openFilesMkdirModal}
-                        disabled={busy || selectedSerials.length !== 1}
+                        disabled={busy || !activeSerial}
                       >
                         New folder
                       </button>
-                      <button onClick={handleFileUpload} disabled={busy || selectedSerials.length !== 1}>
+                      <button onClick={handleFileUpload} disabled={busy || !activeSerial}>
                         Upload
                       </button>
                       <label className="toggle">
@@ -11326,7 +11322,7 @@ function App() {
                             <button
                               className="ghost file-breadcrumb"
                               onClick={() => void handleFilesRefresh(crumb.path)}
-                              disabled={busy || selectedSerials.length !== 1}
+                              disabled={busy || !activeSerial}
                               aria-label={`Go to ${crumb.path}`}
                             >
                               {crumb.label}
@@ -11395,7 +11391,7 @@ function App() {
                                   className={`file-card${isSelected ? " is-selected" : ""}`}
                                   onContextMenu={(event) => openFilesContextMenu(event, entry)}
                                   onDoubleClick={() => {
-                                    if (busy || selectedSerials.length !== 1) {
+                                    if (busy || !activeSerial) {
                                       return;
                                     }
                                     if (entry.is_dir) {
@@ -11446,7 +11442,7 @@ function App() {
                                 className={`file-row${isSelected ? " is-selected" : ""}`}
                                 onContextMenu={(event) => openFilesContextMenu(event, entry)}
                                 onDoubleClick={() => {
-                                  if (busy || selectedSerials.length !== 1) {
+                                  if (busy || !activeSerial) {
                                     return;
                                   }
                                   if (entry.is_dir) {
@@ -11524,8 +11520,8 @@ function App() {
                         <h3>Preview</h3>
 
                         {(() => {
-                          if (selectedSerials.length !== 1) {
-                            return <p className="muted">Select one device to preview files.</p>;
+                          if (!activeSerial) {
+                            return <p className="muted">Select a device to preview files.</p>;
                           }
                           if (filesSelectedPaths.length !== 1) {
                             return <p className="muted">Select one file to preview.</p>;
@@ -11607,20 +11603,20 @@ function App() {
                         <button
                           className="ghost"
                           onClick={() => setFilesSelectedPaths([])}
-                          disabled={busy || selectedSerials.length !== 1 || !hasFileSelection}
+                          disabled={busy || !activeSerial || !hasFileSelection}
                         >
                           Clear selection
                         </button>
                         <button
                           onClick={handleFilesPullSelected}
-                          disabled={busy || selectedSerials.length !== 1 || !hasFileSelection}
+                          disabled={busy || !activeSerial || !hasFileSelection}
                         >
                           Download selected
                         </button>
                         <button
                           className="danger"
                           onClick={openFilesDeleteSelectedModal}
-                          disabled={busy || selectedSerials.length !== 1 || !hasFileSelection}
+                          disabled={busy || !activeSerial || !hasFileSelection}
                         >
                           Delete selected
                         </button>
@@ -11669,7 +11665,7 @@ function App() {
                                       setFilesContextMenu(null);
                                       void handleFilesRefresh(entry.path);
                                     }}
-                                    disabled={busy || selectedSerials.length !== 1}
+                                    disabled={busy || !activeSerial}
                                   >
                                     Open folder
                                   </button>
@@ -11682,7 +11678,7 @@ function App() {
                                         setFilesContextMenu(null);
                                         void handleFilePull(entry);
                                       }}
-                                      disabled={busy || selectedSerials.length !== 1}
+                                      disabled={busy || !activeSerial}
                                     >
                                       Download
                                     </button>
@@ -11693,7 +11689,7 @@ function App() {
                                         setFilesContextMenu(null);
                                         void handleFilePreview(entry);
                                       }}
-                                      disabled={busy || selectedSerials.length !== 1 || !previewable}
+                                      disabled={busy || !activeSerial || !previewable}
                                       title={previewable ? "" : "Preview is supported for image and text files."}
                                     >
                                       Preview
@@ -11708,7 +11704,7 @@ function App() {
                                     openFilesRenameModal(entry);
                                     setFilesContextMenu(null);
                                   }}
-                                  disabled={busy || selectedSerials.length !== 1}
+                                  disabled={busy || !activeSerial}
                                 >
                                   Rename
                                 </button>
@@ -11719,7 +11715,7 @@ function App() {
                                     openFilesDeleteModal(entry);
                                     setFilesContextMenu(null);
                                   }}
-                                  disabled={busy || selectedSerials.length !== 1}
+                                  disabled={busy || !activeSerial}
                                 >
                                   Delete
                                 </button>
@@ -11808,8 +11804,8 @@ function App() {
 	                    </div>
 	                    {singleSelectionWarning && (
 	                      <div className="inline-alert info">
-	                        <strong>Single device required</strong>
-	                        <span>Keep only one device selected (Device Context: Single) to start streaming logs.</span>
+	                        <strong>Primary device in use</strong>
+	                        <span>{singleSelectionWarningMessage}</span>
 	                      </div>
 	                    )}
 	                    <div className="logcat-toolbar">
@@ -11824,20 +11820,20 @@ function App() {
                             </button>
                           </div>
                           <div className="logcat-button-group">
-                            <button onClick={handleLogcatClearBuffer} disabled={busy || selectedSerials.length !== 1}>
+                            <button onClick={handleLogcatClearBuffer} disabled={busy || !activeSerial}>
                               Clear Buffer
                             </button>
                             <button
                               className="ghost"
                               onClick={handleLogcatClearView}
-                              disabled={busy || selectedSerials.length !== 1}
+                              disabled={busy || !activeSerial}
                             >
                               Clear View
                             </button>
                             <button
                               className="ghost"
                               onClick={handleLogcatExport}
-                              disabled={busy || selectedSerials.length !== 1}
+                              disabled={busy || !activeSerial}
                             >
                               Export
                             </button>
@@ -11985,7 +11981,7 @@ function App() {
                         <span>{logcatLastExport}</span>
                       </div>
                     )}
-                    {selectedSerials.length === 1 &&
+                    {activeSerial &&
                       activeLogcatRunning &&
                       !activeLogcatStatusLoading &&
                       logcatFiltered.lines.length === 0 && (
@@ -12072,10 +12068,10 @@ function App() {
 	                        <span>{selectedSummaryLabel}</span>
 	                      </div>
 	                      <div className="button-row compact">
-	                        <button onClick={handleUiInspect} disabled={busy || selectedSerials.length !== 1}>
+	                        <button onClick={handleUiInspect} disabled={busy || !activeSerial}>
 	                          Refresh
 	                        </button>
-	                        <button className="ghost" onClick={handleUiExport} disabled={busy || selectedSerials.length !== 1}>
+	                        <button className="ghost" onClick={handleUiExport} disabled={busy || !activeSerial}>
 	                          Export
 	                        </button>
 	                        <select
@@ -12083,7 +12079,7 @@ function App() {
 	                          title="Auto sync interval"
 	                          value={uiAutoSyncIntervalMs}
 	                          onChange={(event) => setUiAutoSyncIntervalMs(Number(event.target.value))}
-	                          disabled={selectedSerials.length !== 1}
+	                          disabled={!activeSerial}
 	                        >
 	                          <option value={500}>0.5s</option>
 	                          <option value={1000}>1s</option>
@@ -12093,7 +12089,7 @@ function App() {
 	                          type="button"
 	                          className={`ghost ${uiAutoSyncEnabled ? "active" : ""}`}
 	                          onClick={handleUiAutoSyncToggle}
-	                          disabled={selectedSerials.length !== 1}
+	                          disabled={!activeSerial}
 	                          title="Automatically refresh screenshot and hierarchy"
 	                        >
 	                          Auto Sync
@@ -12102,10 +12098,8 @@ function App() {
 	                    </div>
 	                    {singleSelectionWarning && (
 	                      <div className="inline-alert info">
-	                        <strong>Single device required</strong>
-	                        <span>
-	                          Keep only one device selected (Device Context: Single) to use Refresh, Export, and Auto Sync.
-	                        </span>
+	                        <strong>Primary device in use</strong>
+	                        <span>{singleSelectionWarningMessage}</span>
 	                      </div>
 	                    )}
 	                    {uiExportResult && (
@@ -12359,8 +12353,8 @@ function App() {
 	                    </div>
 	                    {singleSelectionWarning && (
 	                      <div className="inline-alert info">
-	                        <strong>Single device required</strong>
-	                        <span>Keep only one device selected (Device Context: Single) to load and manage apps.</span>
+	                        <strong>Primary device in use</strong>
+	                        <span>{singleSelectionWarningMessage}</span>
 	                      </div>
 	                    )}
 	                    <div className="toolbar">
@@ -12385,7 +12379,7 @@ function App() {
                         />
                         Include versions
                       </label>
-                      <button onClick={handleLoadApps} disabled={busy || selectedSerials.length !== 1}>
+                      <button onClick={handleLoadApps} disabled={busy || !activeSerial}>
                         Load Apps
                       </button>
 	                      {(() => {
@@ -12574,13 +12568,13 @@ function App() {
 	                            <div className="button-row compact">
 	                              <button
 	                                onClick={() => void handleAppDoubleClick(selectedApp)}
-	                                disabled={busy || selectedSerials.length !== 1}
+	                                disabled={busy || !activeSerial}
 	                              >
 	                                Launch
 	                              </button>
 	                              <button
 	                                onClick={() => handleAppAction("info")}
-	                                disabled={busy || selectedSerials.length !== 1}
+	                                disabled={busy || !activeSerial}
 	                              >
 	                                Open Info
 	                              </button>
@@ -12588,31 +12582,31 @@ function App() {
 	                            <div className="button-row compact">
 	                              <button
 	                                onClick={() => handleAppAction("forceStop")}
-	                                disabled={busy || selectedSerials.length !== 1}
+	                                disabled={busy || !activeSerial}
 	                              >
 	                                Force Stop
 	                              </button>
-	                              <button onClick={() => handleAppAction("clear")} disabled={busy || selectedSerials.length !== 1}>
+	                              <button onClick={() => handleAppAction("clear")} disabled={busy || !activeSerial}>
 	                                Clear Data
 	                              </button>
 	                              <button
 	                                className="ghost"
 	                                onClick={() => handleAppAction("enable")}
-	                                disabled={busy || selectedSerials.length !== 1}
+	                                disabled={busy || !activeSerial}
 	                              >
 	                                Enable
 	                              </button>
 	                              <button
 	                                className="ghost"
 	                                onClick={() => handleAppAction("disable")}
-	                                disabled={busy || selectedSerials.length !== 1}
+	                                disabled={busy || !activeSerial}
 	                              >
 	                                Disable
 	                              </button>
 	                              <button
 	                                className="danger"
 	                                onClick={() => handleAppAction("uninstall")}
-	                                disabled={busy || selectedSerials.length !== 1}
+	                                disabled={busy || !activeSerial}
 	                              >
 	                                Uninstall
 	                              </button>
@@ -12655,7 +12649,7 @@ function App() {
 	                            type="button"
 	                            className="context-menu-item"
 	                            onClick={() => void handleAppDoubleClick(appsContextMenu.app)}
-	                            disabled={busy || selectedSerials.length !== 1}
+	                            disabled={busy || !activeSerial}
 	                          >
 	                            Launch
 	                          </button>
@@ -12663,7 +12657,7 @@ function App() {
 	                            type="button"
 	                            className="context-menu-item"
 	                            onClick={() => void handleContextForceStop(appsContextMenu.app)}
-	                            disabled={busy || selectedSerials.length !== 1}
+	                            disabled={busy || !activeSerial}
 	                          >
 	                            Force Stop
 	                          </button>
@@ -12671,7 +12665,7 @@ function App() {
 	                            type="button"
 	                            className="context-menu-item"
 	                            onClick={() => void handleAppAction("clear")}
-	                            disabled={busy || selectedSerials.length !== 1}
+	                            disabled={busy || !activeSerial}
 	                          >
 	                            Clear Data
 	                          </button>
@@ -12679,7 +12673,7 @@ function App() {
 	                            type="button"
 	                            className="context-menu-item"
 	                            onClick={() => void handleAppAction("info")}
-	                            disabled={busy || selectedSerials.length !== 1}
+	                            disabled={busy || !activeSerial}
 	                          >
 	                            Open Info
 	                          </button>
@@ -12688,7 +12682,7 @@ function App() {
 	                            type="button"
 	                            className="context-menu-item"
 	                            onClick={() => void handleAppAction("enable")}
-	                            disabled={busy || selectedSerials.length !== 1}
+	                            disabled={busy || !activeSerial}
 	                          >
 	                            Enable
 	                          </button>
@@ -12696,7 +12690,7 @@ function App() {
 	                            type="button"
 	                            className="context-menu-item"
 	                            onClick={() => void handleAppAction("disable")}
-	                            disabled={busy || selectedSerials.length !== 1}
+	                            disabled={busy || !activeSerial}
 	                          >
 	                            Disable
 	                          </button>
@@ -12722,7 +12716,7 @@ function App() {
 	                            type="button"
 	                            className="context-menu-item danger"
 	                            onClick={() => void handleAppAction("uninstall")}
-	                            disabled={busy || selectedSerials.length !== 1}
+	                            disabled={busy || !activeSerial}
 	                          >
 	                            Uninstall
 	                          </button>
@@ -13404,10 +13398,11 @@ function App() {
                     </div>
                   </div>
                   <BluetoothMonitorPage
-                    serial={selectedSerials.length === 1 ? selectedSerials[0] : null}
+                    serial={activeSerial}
                     serialLabel={selectedSummaryLabel}
                     busy={busy}
                     singleSelectionWarning={singleSelectionWarning}
+                    singleSelectionWarningMessage={singleSelectionWarningMessage}
                     onToggleMonitor={handleBluetoothMonitor}
                   />
                 </div>

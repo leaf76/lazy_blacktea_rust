@@ -30,6 +30,7 @@ type Props = {
   serialLabel: string;
   busy: boolean;
   singleSelectionWarning: boolean;
+  singleSelectionWarningMessage: string;
   onToggleMonitor: (enable: boolean) => Promise<boolean>;
 };
 
@@ -94,6 +95,7 @@ export const BluetoothMonitorPage = ({
   serialLabel,
   busy,
   singleSelectionWarning,
+  singleSelectionWarningMessage,
   onToggleMonitor,
 }: Props) => {
   const serialRef = useRef<string | null>(serial);
@@ -359,8 +361,8 @@ export const BluetoothMonitorPage = ({
 
       {singleSelectionWarning && (
         <div className="inline-alert info">
-          <strong>Single device required</strong>
-          <span>Keep only one device selected (Device Context: Single) to use this page.</span>
+          <strong>Primary device in use</strong>
+          <span>{singleSelectionWarningMessage}</span>
         </div>
       )}
 

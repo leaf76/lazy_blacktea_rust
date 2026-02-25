@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   applyDeviceDetailPatch,
   filterDevicesBySearch,
+  formatPrimaryDeviceLabel,
   formatDeviceInfoMarkdown,
   mergeDeviceDetails,
   reduceSelectionToOne,
+  resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
   selectSerialsForGroup,
@@ -91,6 +93,22 @@ describe("deviceUtils", () => {
     const resolved = resolveSelectedSerials(["missing"], devices);
 
     expect(resolved).toEqual(["bravo"]);
+  });
+
+  it("resolves primary serial from the first selected device", () => {
+    expect(resolvePrimarySerial([])).toBeNull();
+    expect(resolvePrimarySerial(["alpha"])).toBe("alpha");
+    expect(resolvePrimarySerial(["alpha", "bravo"])).toBe("alpha");
+  });
+
+  it("formats primary device label with model and serial", () => {
+    const device: DeviceInfo = {
+      summary: { serial: "alpha", state: "device", model: "Pixel 8" },
+      detail: { serial: "alpha", model: "Pixel 8 Pro" },
+    };
+    expect(formatPrimaryDeviceLabel("alpha", device)).toBe("Pixel 8 Pro (alpha)");
+    expect(formatPrimaryDeviceLabel("alpha", null)).toBe("alpha");
+    expect(formatPrimaryDeviceLabel(null, null)).toBe("Unknown device");
   });
 
   it("formats device info as a markdown list", () => {
