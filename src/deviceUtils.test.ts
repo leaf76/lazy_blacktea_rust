@@ -9,6 +9,7 @@ import {
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
+  shouldEnableConnectivityForSelection,
   selectSerialsForGroup,
 } from "./deviceUtils";
 import type { DeviceInfo } from "./types";
@@ -207,5 +208,30 @@ describe("deviceUtils", () => {
 
   it("inserts target as primary when target is not in selection", () => {
     expect(setPrimarySelection(["alpha", "bravo"], "charlie")).toEqual(["charlie", "alpha", "bravo"]);
+  });
+
+  it("uses force-enable strategy for connectivity quick actions", () => {
+    const devices: DeviceInfo[] = [
+      {
+        summary: { serial: "alpha", state: "device" },
+        detail: { serial: "alpha", wifi_is_on: true, bt_is_on: true },
+      },
+      {
+        summary: { serial: "bravo", state: "device" },
+        detail: { serial: "bravo", wifi_is_on: false, bt_is_on: true },
+      },
+      {
+        summary: { serial: "charlie", state: "offline" },
+        detail: null,
+      },
+    ];
+
+    expect(shouldEnableConnectivityForSelection(devices, ["alpha"], "wifi_is_on")).toBe(false);
+    expect(shouldEnableConnectivityForSelection(devices, ["alpha", "bravo"], "wifi_is_on")).toBe(true);
+    expect(shouldEnableConnectivityForSelection(devices, ["alpha", "charlie"], "wifi_is_on")).toBe(true);
+    expect(shouldEnableConnectivityForSelection(devices, ["charlie"], "wifi_is_on")).toBe(true);
+    expect(shouldEnableConnectivityForSelection(devices, [], "wifi_is_on")).toBe(true);
+    expect(shouldEnableConnectivityForSelection(devices, ["missing"], "wifi_is_on")).toBe(true);
+    expect(shouldEnableConnectivityForSelection(devices, ["alpha", "bravo"], "bt_is_on")).toBe(false);
   });
 });

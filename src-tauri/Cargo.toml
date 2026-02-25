@@ -1,6 +1,6 @@
 [package]
 name = "lazy_blacktea_rust"
-version = "0.0.58"
+version = "0.0.59"
 description = "Lazy Blacktea (Rust + Tauri)"
 authors = ["cy76"]
 edition = "2021"

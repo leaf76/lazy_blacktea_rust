@@ -190,6 +190,7 @@ import {
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
+  shouldEnableConnectivityForSelection,
   selectSerialsForGroup,
 } from "./deviceUtils";
 import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
@@ -264,6 +265,8 @@ type TerminalDeviceState = {
 type QuickActionId =
   | "screenshot"
   | "reboot"
+  | "wifi-toggle"
+  | "bluetooth-toggle"
   | "record"
   | "logcat-clear"
   | "mirror";
@@ -4987,9 +4990,20 @@ function App() {
       pushToast("Select at least one device.", "error");
       return;
     }
+    const onlineSerialSet = new Set(
+      devices
+        .filter((device) => device.summary.state === "device")
+        .map((device) => device.summary.serial),
+    );
+    const targetSerials = selectedSerials.filter((serial) => onlineSerialSet.has(serial));
+    const skippedCount = selectedSerials.length - targetSerials.length;
+    if (!targetSerials.length) {
+      pushToast("No online devices selected.", "error");
+      return;
+    }
     setBusy(true);
     try {
-      const response = await setWifiState(selectedSerials, enable);
+      const response = await setWifiState(targetSerials, enable);
       const successes = response.data.filter((item) => item.exit_code === 0).map((item) => item.serial);
       const failures = response.data.filter((item) => item.exit_code !== 0);
       if (successes.length) {
@@ -4997,9 +5011,19 @@ function App() {
         scheduleDeviceDetailRefresh(800, { notifyOnError: false });
       }
       if (failures.length) {
-        pushToast(`WiFi ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).`, "error");
+        pushToast(
+          `WiFi ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).${
+            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+          }`,
+          "error",
+        );
       } else {
-        pushToast(enable ? "WiFi enabled." : "WiFi disabled.", "info");
+        pushToast(
+          `${enable ? "WiFi enabled." : "WiFi disabled."}${
+            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+          }`,
+          "info",
+        );
       }
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -5013,9 +5037,20 @@ function App() {
       pushToast("Select at least one device.", "error");
       return;
     }
+    const onlineSerialSet = new Set(
+      devices
+        .filter((device) => device.summary.state === "device")
+        .map((device) => device.summary.serial),
+    );
+    const targetSerials = selectedSerials.filter((serial) => onlineSerialSet.has(serial));
+    const skippedCount = selectedSerials.length - targetSerials.length;
+    if (!targetSerials.length) {
+      pushToast("No online devices selected.", "error");
+      return;
+    }
     setBusy(true);
     try {
-      const response = await setBluetoothState(selectedSerials, enable);
+      const response = await setBluetoothState(targetSerials, enable);
       const successes = response.data.filter((item) => item.exit_code === 0).map((item) => item.serial);
       const failures = response.data.filter((item) => item.exit_code !== 0);
       if (successes.length) {
@@ -5024,11 +5059,18 @@ function App() {
       }
       if (failures.length) {
         pushToast(
-          `Bluetooth ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).`,
+          `Bluetooth ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).${
+            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+          }`,
           "error",
         );
       } else {
-        pushToast(enable ? "Bluetooth enabled." : "Bluetooth disabled.", "info");
+        pushToast(
+          `${enable ? "Bluetooth enabled." : "Bluetooth disabled."}${
+            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+          }`,
+          "info",
+        );
       }
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -8299,6 +8341,33 @@ function App() {
     appsCanLoadMoreRef.current = canLoadMoreApps;
   }, [filteredApps.length, canLoadMoreApps]);
 
+  const wifiToggleEnable = shouldEnableConnectivityForSelection(
+    devices,
+    selectedSerials,
+    "wifi_is_on",
+  );
+  const bluetoothToggleEnable = shouldEnableConnectivityForSelection(
+    devices,
+    selectedSerials,
+    "bt_is_on",
+  );
+  const selectedOfflineCount = selectedSerials.reduce((total, serial) => {
+    const summary = devices.find((device) => device.summary.serial === serial)?.summary;
+    return total + (!summary || summary.state !== "device" ? 1 : 0);
+  }, 0);
+  const connectivitySkipNote =
+    selectedOfflineCount > 0
+      ? ` ${selectedOfflineCount} offline device${selectedOfflineCount > 1 ? "s" : ""} will be skipped.`
+      : "";
+
+  const handleQuickWifiToggle = () => {
+    void handleToggleWifi(wifiToggleEnable);
+  };
+
+  const handleQuickBluetoothToggle = () => {
+    void handleToggleBluetooth(bluetoothToggleEnable);
+  };
+
   const dashboardActions: Array<{
     id: DashboardActionId;
     title: string;
@@ -8323,6 +8392,22 @@ function App() {
       description: "Restart selected devices.",
       hint: "Multi-device",
       onClick: requestRebootConfirm,
+      disabled: busy || selectedSerials.length === 0,
+    },
+    {
+      id: "wifi-toggle",
+      title: wifiToggleEnable ? "Enable Wi-Fi" : "Disable Wi-Fi",
+      description: `Toggle Wi-Fi for selected devices.${connectivitySkipNote}`,
+      hint: "Multi-device",
+      onClick: handleQuickWifiToggle,
+      disabled: busy || selectedSerials.length === 0,
+    },
+    {
+      id: "bluetooth-toggle",
+      title: bluetoothToggleEnable ? "Enable Bluetooth" : "Disable Bluetooth",
+      description: `Toggle Bluetooth for selected devices.${connectivitySkipNote}`,
+      hint: "Multi-device",
+      onClick: handleQuickBluetoothToggle,
       disabled: busy || selectedSerials.length === 0,
     },
     {
@@ -8379,6 +8464,12 @@ function App() {
       actionIds: ["reboot", "mirror"],
     },
     {
+      id: "connectivity",
+      title: "Connectivity",
+      description: "Network and radio toggles.",
+      actionIds: ["wifi-toggle", "bluetooth-toggle"],
+    },
+    {
       id: "debug",
       title: "Debug",
       description: "Logcat and diagnostics.",
@@ -8391,6 +8482,320 @@ function App() {
       actionIds: ["apk-installer"],
     },
   ];
+
+  const handleQuickActionsSelectAll = () => {
+    if (devices.length === 0) {
+      return;
+    }
+    if (deviceSelectionMode === "single") {
+      setSelectedSerials([devices[0].summary.serial]);
+      return;
+    }
+    setSelectedSerials(devices.map((device) => device.summary.serial));
+  };
+
+  const renderQuickActionGroups = () => (
+    <div className="quick-actions">
+      {dashboardActionGroups.map((group) => (
+        <div key={group.id} className="quick-action-group" role="group" aria-labelledby={`quick-action-group-${group.id}`}>
+          <div className="quick-action-group-header">
+            <div>
+              <span className="quick-action-group-overline">Batch Category</span>
+              <h3 id={`quick-action-group-${group.id}`}>{group.title}</h3>
+              <p className="muted">{group.description}</p>
+            </div>
+            <span className="badge">{group.actionIds.length} actions</span>
+          </div>
+          <div className="quick-action-grid">
+            {group.actionIds.map((actionId) => {
+              const action = dashboardActions.find((item) => item.id === actionId);
+              if (!action) {
+                return null;
+              }
+              return (
+                <button
+                  key={action.id}
+                  className={`quick-action${action.tone === "primary" ? " is-primary" : ""}`}
+                  onClick={action.onClick}
+                  disabled={action.disabled}
+                >
+                  <span className="quick-action-title">
+                    <span>{action.title}</span>
+                    {action.hint && <span className="quick-action-hint">{action.hint}</span>}
+                  </span>
+                  <span className="muted">{action.description}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const QuickActionsView = () => {
+    const selectedOnlineCount = selectedSerials.reduce((total, serial) => {
+      const summary = devices.find((device) => device.summary.serial === serial)?.summary;
+      return total + (summary?.state === "device" ? 1 : 0);
+    }, 0);
+    const isShortDeviceList = devices.length <= 2;
+
+    if (adbInfo && !adbInfo.available) {
+      return (
+        <div className="page-section quick-actions-page">
+          <div className="page-header">
+            <div>
+              <h1>Quick Actions</h1>
+              <p className="muted">ADB is required to run device actions.</p>
+            </div>
+          </div>
+          <section className="panel empty-state">
+            <div className="inline-alert error">
+              <strong>ADB not available</strong>
+              <span>
+                Configure the full path to the ADB executable in Settings or install Android Platform
+                Tools and ensure <code>adb</code> is on your PATH.
+              </span>
+              <span className="muted">
+                Current command: <code>{adbInfo.command_path || "adb"}</code>
+              </span>
+              {adbInfo.error && <span className="muted">Error: {adbInfo.error}</span>}
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={() => navigate("/settings")} disabled={busy}>
+                Open Settings
+              </button>
+              <button onClick={refreshDevices} disabled={busy}>
+                Retry
+              </button>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    if (!hasDevices) {
+      return (
+        <div className="page-section quick-actions-page">
+          <div className="page-header">
+            <div>
+              <h1>Quick Actions</h1>
+              <p className="muted">Connect at least one device to run quick actions.</p>
+            </div>
+          </div>
+          <section className="panel empty-state">
+            <div>
+              <h2>Connect a device to get started</h2>
+              <p className="muted">
+                Plug in via USB or pair wirelessly, then use this page for fast screenshot, reboot,
+                mirroring, and install flows.
+              </p>
+              <ol className="step-list">
+                <li>Enable Developer Options and USB/Wireless Debugging.</li>
+                <li>Connect the device via USB or open Wireless Debugging.</li>
+                <li>Pair using QR or pairing code, then refresh the device list.</li>
+              </ol>
+            </div>
+            <div className="button-row">
+              <button onClick={openPairingModal} disabled={busy}>
+                Wireless Pairing
+              </button>
+              <button className="ghost" onClick={refreshDevices} disabled={busy}>
+                Refresh Devices
+              </button>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    return (
+      <div className="page-section quick-actions-page">
+        <div className="page-header">
+          <div>
+            <h1>Quick Actions</h1>
+            <p className="muted">Fast actions with compact device selection.</p>
+          </div>
+          <div className="page-actions">
+            <button className="ghost" onClick={refreshDevices} disabled={busy}>
+              Refresh Devices
+            </button>
+            <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+              Manage Devices
+            </button>
+          </div>
+        </div>
+
+        {selectedSerials.length > 1 && (
+          <div className="quick-actions-batch-strip" role="status" aria-live="polite">
+            <strong>Batch Mode</strong>
+            <span>
+              {selectedSerials.length} selected • {selectedOnlineCount} online devices ready for multi-device actions.
+            </span>
+          </div>
+        )}
+
+        <div className="quick-actions-layout">
+          <section className="panel card quick-actions-devices-panel">
+            <div className="quick-actions-devices-toolbar">
+              <div className="quick-actions-devices-toolbar-main">
+                <div className="quick-actions-devices-heading">
+                  <h2>Devices</h2>
+                  <p className="muted">Select one or more devices, then run actions.</p>
+                </div>
+                <div className="toggle-group" role="group" aria-label="Selection mode">
+                  <button
+                    type="button"
+                    className={`toggle${deviceSelectionMode === "single" ? " active" : ""}`}
+                    onClick={() => handleSetDeviceSelectionMode("single")}
+                    disabled={busy}
+                  >
+                    Single
+                  </button>
+                  <button
+                    type="button"
+                    className={`toggle${deviceSelectionMode === "multi" ? " active" : ""}`}
+                    onClick={() => handleSetDeviceSelectionMode("multi")}
+                    disabled={busy}
+                  >
+                    Multi
+                  </button>
+                </div>
+              </div>
+              <div className="quick-actions-devices-toolbar-meta">
+                <div className="quick-actions-device-counts" aria-live="polite">
+                  <span className="badge">{selectedCount} selected</span>
+                  <span className="badge">{selectedOnlineCount} online</span>
+                </div>
+                <div
+                  className="quick-actions-device-controls-actions"
+                  role="group"
+                  aria-label="Device bulk selection actions"
+                >
+                  <button className="ghost" onClick={handleQuickActionsSelectAll} disabled={busy || devices.length === 0}>
+                    Select All
+                  </button>
+                  <button
+                    className="ghost"
+                    onClick={clearSelection}
+                    disabled={busy || devices.length === 0}
+                    title={devices.length === 0 ? "No devices detected." : "Keep one device selected."}
+                  >
+                    Keep One
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p className="muted quick-actions-shortcut-note">
+              Tip: focus the device list and press Ctrl/Cmd + A to select all based on current mode.
+            </p>
+
+            <div
+              className={`quick-actions-device-list${isShortDeviceList ? " is-short-list" : ""}`}
+              role="region"
+              aria-label="Quick actions device list"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+                  event.preventDefault();
+                  handleQuickActionsSelectAll();
+                }
+              }}
+            >
+              {devices.map((device) => {
+                const serial = device.summary.serial;
+                const detail = device.detail;
+                const name = detail?.model ?? device.summary.model ?? serial;
+                const isSelected = selectedSerials.includes(serial);
+                const isActive = serial === activeSerial;
+                const stateTone =
+                  device.summary.state === "device"
+                    ? "ok"
+                    : device.summary.state === "unauthorized"
+                      ? "error"
+                      : "warn";
+
+                return (
+                  <div
+                    key={serial}
+                    className={`quick-actions-device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
+                    onClick={(event) => {
+                      const target = event.target as HTMLElement | null;
+                      if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
+                        return;
+                      }
+                      toggleDeviceInContextPopover(serial);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      const target = event.target as HTMLElement | null;
+                      if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
+                        return;
+                      }
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleDeviceInContextPopover(serial);
+                      }
+                    }}
+                  >
+                    <label className="device-check" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={() => toggleDeviceInContextPopover(serial)}
+                        disabled={busy}
+                        aria-label={`Select ${name}`}
+                      />
+                    </label>
+                    <div className="quick-actions-device-meta">
+                      <span className="quick-actions-device-name">{name}</span>
+                      <span className="quick-actions-device-serial">{serial}</span>
+                    </div>
+                    <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
+                    <button
+                      type="button"
+                      className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (!isActive) {
+                          handleSelectActiveSerial(serial);
+                        }
+                      }}
+                      disabled={busy || isActive}
+                      aria-label={isActive ? `${name} is primary device` : `Set ${name} as primary device`}
+                    >
+                      {isActive ? "Primary" : "Set Primary"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="panel card quick-actions-panel">
+            <div className="card-header">
+              <div>
+                <h2>Quick Actions</h2>
+                <p className="muted">One-click actions using saved Settings defaults. Reboot still asks for confirmation.</p>
+              </div>
+              <span className="badge">
+                {selectedSerials.length ? `${selectedSerials.length} devices` : "Select device"}
+              </span>
+            </div>
+            {selectedSerials.length === 0 && (
+              <div className="inline-alert info">
+                <strong>Select a device</strong>
+                <span className="muted">Use the device list on this page to enable quick actions.</span>
+              </div>
+            )}
+            {renderQuickActionGroups()}
+          </section>
+        </div>
+      </div>
+    );
+  };
 
   const dashboardCardClassMap: Record<DashboardCardId, string> = {
     overview: "dashboard-hero",
@@ -8457,7 +8862,7 @@ function App() {
           <div className="page-header">
             <div>
               <h1>Dashboard</h1>
-              <p className="muted">Connect a device to unlock quick actions and diagnostics.</p>
+              <p className="muted">Connect a device to unlock dashboard insights and diagnostics.</p>
             </div>
           </div>
           <section className="panel empty-state">
@@ -8465,7 +8870,7 @@ function App() {
               <h2>Connect a device to get started</h2>
               <p className="muted">
                 Plug in via USB or pair wirelessly. Once connected, you will see the device overview
-                and quick actions here.
+                and health cards here.
               </p>
               <ol className="step-list">
                 <li>Enable Developer Options and USB/Wireless Debugging.</li>
@@ -8491,11 +8896,14 @@ function App() {
         <div className="page-header">
           <div>
             <h1>Dashboard</h1>
-            <p className="muted">Overview, quick actions, and device health.</p>
+            <p className="muted">Overview and device health.</p>
           </div>
           <div className="page-actions">
             <button className="ghost" onClick={openDashboardConfig} disabled={busy || !config}>
               Configure
+            </button>
+            <button className="ghost" onClick={() => navigate("/quick-actions")} disabled={busy}>
+              Quick Actions
             </button>
             <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
               Manage Devices
@@ -8548,59 +8956,6 @@ function App() {
               )}
             </section>
           ))}
-
-          <section className="panel card dashboard-actions">
-            <div className="card-header">
-              <div>
-                <h2>Quick Actions</h2>
-                <p className="muted">One-click actions using saved Settings defaults. Reboot still asks for confirmation.</p>
-              </div>
-              <span className="badge">
-                {selectedSerials.length ? `${selectedSerials.length} devices` : "Select device"}
-              </span>
-            </div>
-            {selectedSerials.length === 0 && (
-              <div className="inline-alert info">
-                <strong>Select a device</strong>
-                <span className="muted">Use the device picker in the top bar to enable quick actions.</span>
-              </div>
-            )}
-            <div className="quick-actions">
-              {dashboardActionGroups.map((group) => (
-                <div key={group.id} className="quick-action-group">
-                  <div className="quick-action-group-header">
-                    <div>
-                      <h3>{group.title}</h3>
-                      <p className="muted">{group.description}</p>
-                    </div>
-                    <span className="badge">{group.actionIds.length} actions</span>
-                  </div>
-                  <div className="quick-action-grid">
-                    {group.actionIds.map((actionId) => {
-                      const action = dashboardActions.find((item) => item.id === actionId);
-                      if (!action) {
-                        return null;
-                      }
-                      return (
-                        <button
-                          key={action.id}
-                          className={`quick-action${action.tone === "primary" ? " is-primary" : ""}`}
-                          onClick={action.onClick}
-                          disabled={action.disabled}
-                        >
-                          <span className="quick-action-title">
-                            <span>{action.title}</span>
-                            {action.hint && <span className="quick-action-hint">{action.hint}</span>}
-                          </span>
-                          <span className="muted">{action.description}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
         </div>
         {dashboardConfigOpen && (
           <div className="dashboard-config-backdrop" role="presentation" onClick={closeDashboardConfig}>
@@ -10090,6 +10445,7 @@ function App() {
             <NavLink to="/" end>
               Dashboard
             </NavLink>
+            <NavLink to="/quick-actions">Quick Actions</NavLink>
             <NavLink to="/devices">Device Manager</NavLink>
             <NavLink to="/bluetooth">Bluetooth Monitor</NavLink>
           </div>
@@ -10356,7 +10712,7 @@ function App() {
               </div>
             )}
           </div>
-          <div className="top-actions">
+          <div className="top-actions top-actions-deemphasized">
             <button
               className="ghost"
               onClick={handleQuickScreenshot}
@@ -10406,6 +10762,7 @@ function App() {
         <main className={`page${isLogcatPopupWindow ? " logcat-popup-page" : ""}`}>
           <Routes>
             <Route path="/" element={<DashboardView />} />
+            <Route path="/quick-actions" element={<QuickActionsView />} />
             <Route path="/performance" element={<PerformanceView />} />
             <Route path="/network" element={<NetworkView />} />
             <Route

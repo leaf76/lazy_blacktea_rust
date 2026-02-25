@@ -3,6 +3,7 @@ import { formatBytes } from "./perf";
 
 type DeviceDetailPatch = Partial<Omit<DeviceDetail, "serial">>;
 type DeviceValue = string | number | boolean | null | undefined;
+type ConnectivityFlagKey = "wifi_is_on" | "bt_is_on";
 
 const formatDeviceValue = (value: DeviceValue): string => {
   if (value === null || value === undefined || value === "") {
@@ -167,4 +168,22 @@ export const selectSerialsForGroup = (
     return serials;
   }
   return serials.filter((serial) => groupMap[serial] === group);
+};
+
+export const shouldEnableConnectivityForSelection = (
+  devices: DeviceInfo[],
+  selectedSerials: string[],
+  key: ConnectivityFlagKey,
+): boolean => {
+  if (!selectedSerials.length) {
+    return true;
+  }
+  const deviceBySerial = new Map(devices.map((device) => [device.summary.serial, device]));
+  for (const serial of selectedSerials) {
+    const value = deviceBySerial.get(serial)?.detail?.[key];
+    if (value !== true) {
+      return true;
+    }
+  }
+  return false;
 };
