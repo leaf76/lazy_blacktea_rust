@@ -1025,6 +1025,32 @@ fn build_bugreport_filename(serial: &str, device_model: Option<&str>, timestamp:
     format!("bugreport_{safe_device_name}_{safe_serial}_{timestamp}.zip")
 }
 
+fn build_ui_export_bundle_base_name(serial: &str, timestamp: &str) -> String {
+    let safe_serial = sanitize_filename_component(serial);
+    let serial_component = if safe_serial.trim().is_empty() {
+        "device".to_string()
+    } else {
+        safe_serial
+    };
+    format!("ui_export_{serial_component}_{timestamp}")
+}
+
+fn resolve_unique_ui_export_bundle_dir(parent: &Path, base_name: &str) -> PathBuf {
+    let initial = parent.join(base_name);
+    if !initial.exists() {
+        return initial;
+    }
+
+    let mut suffix = 2usize;
+    loop {
+        let candidate = parent.join(format!("{base_name}_{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 fn parse_string_array_from_json(value: Option<&serde_json::Value>, limit: usize) -> Vec<String> {
     let Some(items) = value.and_then(serde_json::Value::as_array) else {
         return Vec::new();
@@ -4807,13 +4833,19 @@ pub fn export_ui_hierarchy(
         AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
     })?;
 
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let xml_path =
-        PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.xml", serial, timestamp));
-    let html_path =
-        PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.html", serial, timestamp));
-    let screenshot_path =
-        PathBuf::from(&resolved_dir).join(format!("ui_hierarchy_{}_{}.png", serial, timestamp));
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let base_bundle_name = build_ui_export_bundle_base_name(&serial, &timestamp);
+    let resolved_parent = PathBuf::from(&resolved_dir);
+    let bundle_dir = resolve_unique_ui_export_bundle_dir(&resolved_parent, &base_bundle_name);
+    fs::create_dir_all(&bundle_dir).map_err(|err| {
+        AppError::system(
+            format!("Failed to create export bundle dir: {err}"),
+            &trace_id,
+        )
+    })?;
+    let xml_path = bundle_dir.join("hierarchy.xml");
+    let html_path = bundle_dir.join("hierarchy.html");
+    let screenshot_path = bundle_dir.join("screenshot.png");
 
     let output = Command::new(&adb_program)
         .args(["-s", &serial, "exec-out", "uiautomator", "dump", "/dev/tty"])
@@ -4888,6 +4920,7 @@ pub fn export_ui_hierarchy(
         trace_id,
         data: UiHierarchyExportResult {
             serial,
+            bundle_dir: bundle_dir.to_string_lossy().to_string(),
             xml_path: xml_path.to_string_lossy().to_string(),
             html_path: html_path.to_string_lossy().to_string(),
             screenshot_path: screenshot_path.to_string_lossy().to_string(),

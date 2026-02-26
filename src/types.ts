@@ -71,6 +71,7 @@ export type UiHierarchyCaptureResult = {
 
 export type UiHierarchyExportResult = {
   serial: string;
+  bundle_dir: string;
   xml_path: string;
   html_path: string;
   screenshot_path: string;

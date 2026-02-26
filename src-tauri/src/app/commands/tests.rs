@@ -636,6 +636,34 @@ fn build_bugreport_filename_falls_back_to_serial_when_model_unavailable() {
 }
 
 #[test]
+fn build_ui_export_bundle_base_name_sanitizes_serial() {
+    let base_name = build_ui_export_bundle_base_name("192.168.0.1:5555", "20260226_120004");
+    assert_eq!(base_name, "ui_export_192.168.0.1_5555_20260226_120004");
+}
+
+#[test]
+fn build_ui_export_bundle_base_name_uses_fallback_when_serial_is_empty() {
+    let base_name = build_ui_export_bundle_base_name("   ", "20260226_120005");
+    assert_eq!(base_name, "ui_export_device_20260226_120005");
+}
+
+#[test]
+fn resolve_unique_ui_export_bundle_dir_appends_suffix_when_collision_exists() {
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let parent = tmp.path();
+    let base = "ui_export_emulator-5554_20260226_120006";
+    std::fs::create_dir_all(parent.join(base)).expect("create existing dir");
+    std::fs::create_dir_all(parent.join(format!("{base}_2"))).expect("create second existing dir");
+
+    let resolved = resolve_unique_ui_export_bundle_dir(parent, base);
+    let resolved_name = resolved
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("bundle dir name");
+    assert_eq!(resolved_name, format!("{base}_3"));
+}
+
+#[test]
 fn prepare_bugreport_logcat_inner_rejects_empty_path() {
     let err = prepare_bugreport_logcat_inner(" ", "trace-8").expect_err("err");
     assert_eq!(err.code, "ERR_VALIDATION");

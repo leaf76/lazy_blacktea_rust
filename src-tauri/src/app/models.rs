@@ -83,6 +83,7 @@ pub struct UiHierarchyCaptureResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiHierarchyExportResult {
     pub serial: String,
+    pub bundle_dir: String,
     pub xml_path: String,
     pub html_path: String,
     pub screenshot_path: String,

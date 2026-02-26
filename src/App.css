@@ -4953,6 +4953,12 @@ textarea:disabled {
   margin: 0;
 }
 
+.inspector-hierarchy-controls {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .ui-frame {
   border: none;
   min-height: 520px;

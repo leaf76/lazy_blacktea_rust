@@ -220,6 +220,7 @@ import {
   type BugreportCardStatus,
 } from "./bugreportPage";
 import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
+import { buildUiInspectorXmlView, filterUiInspectorXmlLines } from "./uiInspectorXml";
 import {
   applyDroppedPaths,
   sanitizeMultiPathsForStorage,
@@ -1819,6 +1820,7 @@ function App() {
   const [uiScreenshotDataUrl, setUiScreenshotDataUrl] = useState("");
   const [uiScreenshotError, setUiScreenshotError] = useState("");
   const [uiInspectorTab, setUiInspectorTab] = useState<"hierarchy" | "xml">("hierarchy");
+  const [uiXmlViewMode, setUiXmlViewMode] = useState<"raw" | "pretty">("raw");
   const [uiInspectorSearch, setUiInspectorSearch] = useState("");
   const [filteredUiXml, setFilteredUiXml] = useState("");
   const [uiExportResult, setUiExportResult] = useState("");
@@ -2841,6 +2843,8 @@ function App() {
 
   const uiScreenshotSrc = uiScreenshotDataUrl;
   const uiNodesParse = useMemo(() => parseUiNodes(uiXml), [uiXml]);
+  const uiXmlView = useMemo(() => buildUiInspectorXmlView(uiXml), [uiXml]);
+  const uiActiveXmlView = uiXmlViewMode === "pretty" ? uiXmlView.pretty : uiXmlView.raw;
   const uiFilterTokenRef = useRef(0);
   const uiAutoSyncTokenRef = useRef(0);
 
@@ -2860,17 +2864,14 @@ function App() {
         return;
       }
       if (!query) {
-        setFilteredUiXml(uiXml);
+        setFilteredUiXml(uiActiveXmlView);
         return;
       }
-      const next = uiXml
-        .split("\n")
-        .filter((line) => line.toLowerCase().includes(query))
-        .join("\n");
+      const next = filterUiInspectorXmlLines(uiActiveXmlView, query);
       setFilteredUiXml(next);
     }, delay);
     return () => window.clearTimeout(handle);
-  }, [uiXml, uiInspectorSearch]);
+  }, [uiActiveXmlView, uiInspectorSearch]);
 
   useEffect(() => {
     if (!uiScreenshotSrc) {
@@ -7621,12 +7622,26 @@ function App() {
     setBusy(true);
     try {
       const response = await exportUiHierarchy(serial, config?.file_gen_output_path || config?.output_path);
-      setUiExportResult(response.data.html_path);
+      setUiExportResult(response.data.bundle_dir || response.data.html_path);
       pushToast("UI inspector export completed.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleUiCopyXml = async () => {
+    const content = filteredUiXml.trim();
+    if (!content) {
+      pushToast("No XML to copy.", "error");
+      return;
+    }
+    try {
+      await writeText(content);
+      pushToast(`XML ${uiXmlViewMode === "pretty" ? "pretty" : "raw"} view copied.`, "info");
+    } catch (error) {
+      pushToast(`Copy failed: ${formatError(error)}`, "error");
     }
   };
 
@@ -13310,7 +13325,7 @@ function App() {
 	                      </div>
 	                      <div className="button-row compact">
 	                        <button onClick={handleUiInspect} disabled={busy || !activeSerial}>
-	                          Refresh
+	                          Sync
 	                        </button>
 	                        <button className="ghost" onClick={handleUiExport} disabled={busy || !activeSerial}>
 	                          Export
@@ -13525,21 +13540,51 @@ function App() {
                       <div className="panel-sub">
                         <div className="panel-header">
                           <h3>Hierarchy</h3>
-                          <div className="toggle-group">
-                            <button
-                              type="button"
-                              className={`toggle ${uiInspectorTab === "hierarchy" ? "active" : ""}`}
-                              onClick={() => setUiInspectorTab("hierarchy")}
-                            >
-                              Tree
-                            </button>
-                            <button
-                              type="button"
-                              className={`toggle ${uiInspectorTab === "xml" ? "active" : ""}`}
-                              onClick={() => setUiInspectorTab("xml")}
-                            >
-                              XML
-                            </button>
+                          <div className="button-row compact inspector-hierarchy-controls">
+                            <div className="toggle-group">
+                              <button
+                                type="button"
+                                className={`toggle ${uiInspectorTab === "hierarchy" ? "active" : ""}`}
+                                onClick={() => setUiInspectorTab("hierarchy")}
+                              >
+                                Tree
+                              </button>
+                              <button
+                                type="button"
+                                className={`toggle ${uiInspectorTab === "xml" ? "active" : ""}`}
+                                onClick={() => setUiInspectorTab("xml")}
+                              >
+                                XML
+                              </button>
+                            </div>
+                            {uiInspectorTab === "xml" && (
+                              <>
+                                <div className="toggle-group">
+                                  <button
+                                    type="button"
+                                    className={`toggle ${uiXmlViewMode === "raw" ? "active" : ""}`}
+                                    onClick={() => setUiXmlViewMode("raw")}
+                                  >
+                                    Raw
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`toggle ${uiXmlViewMode === "pretty" ? "active" : ""}`}
+                                    onClick={() => setUiXmlViewMode("pretty")}
+                                  >
+                                    Pretty
+                                  </button>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() => void handleUiCopyXml()}
+                                  disabled={!filteredUiXml.trim()}
+                                >
+                                  Copy
+                                </button>
+                              </>
+                            )}
                           </div>
                         </div>
                         <div className="form-row">
@@ -13563,13 +13608,21 @@ function App() {
                             <p className="muted">Capture UI hierarchy to preview the structure.</p>
                           )
                         ) : (
-                          <div className="output-block inspector-xml">
-                            {filteredUiXml ? (
-                              <pre>{filteredUiXml}</pre>
-                            ) : (
-                              <p className="muted">No XML captured.</p>
+                          <>
+                            {uiXmlViewMode === "pretty" && uiXml.trim() && !uiXmlView.prettyAvailable && (
+                              <div className="inline-alert info">
+                                <strong>Pretty unavailable</strong>
+                                <span>Showing raw XML because this capture could not be formatted.</span>
+                              </div>
                             )}
-                          </div>
+                            <div className="output-block inspector-xml">
+                              {filteredUiXml ? (
+                                <pre>{filteredUiXml}</pre>
+                              ) : (
+                                <p className="muted">No XML captured.</p>
+                              )}
+                            </div>
+                          </>
                         )}
                       </div>
                     </div>
