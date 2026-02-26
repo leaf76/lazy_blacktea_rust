@@ -288,6 +288,8 @@ pub struct NotificationsSettings {
     pub desktop_on_error: bool,
     #[serde(default)]
     pub desktop_on_cancelled: bool,
+    #[serde(default = "default_true")]
+    pub in_app_modal_enabled: bool,
 }
 
 impl Default for NotificationsSettings {
@@ -299,6 +301,7 @@ impl Default for NotificationsSettings {
             desktop_on_success: false,
             desktop_on_error: true,
             desktop_on_cancelled: false,
+            in_app_modal_enabled: true,
         }
     }
 }
@@ -763,6 +766,7 @@ mod tests {
         assert!(!parsed.notifications.desktop_on_success);
         assert!(parsed.notifications.desktop_on_error);
         assert!(!parsed.notifications.desktop_on_cancelled);
+        assert!(parsed.notifications.in_app_modal_enabled);
     }
 
     #[test]

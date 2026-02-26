@@ -548,6 +548,7 @@ export type NotificationsSettings = {
   desktop_on_success: boolean;
   desktop_on_error: boolean;
   desktop_on_cancelled: boolean;
+  in_app_modal_enabled: boolean;
 };
 
 export type DashboardCardId =

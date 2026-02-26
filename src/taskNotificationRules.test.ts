@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createTask, tasksReducer } from "./tasks";
-import { buildDesktopNotificationForTask, detectNewlyCompletedTasks } from "./taskNotificationRules";
+import {
+  buildDesktopNotificationForTask,
+  buildTaskCompletionNotice,
+  detectNewlyCompletedTasks,
+} from "./taskNotificationRules";
 
 describe("detectNewlyCompletedTasks", () => {
   it("detects running -> success transition", () => {
@@ -53,5 +57,41 @@ describe("buildDesktopNotificationForTask", () => {
     const notif = buildDesktopNotificationForTask(interrupted);
     expect(notif).not.toBeNull();
     expect(notif!.body).toContain("Interrupted");
+  });
+});
+
+describe("buildTaskCompletionNotice", () => {
+  it("returns null for running tasks", () => {
+    const task = createTask({ id: "1", kind: "shell", title: "Shell", serials: ["A"] });
+    expect(buildTaskCompletionNotice(task)).toBeNull();
+  });
+
+  it("returns a detailed payload for completed tasks", () => {
+    const running = createTask({ id: "1", kind: "apk_install", title: "Install APK", serials: ["A", "B"] });
+    const withA = tasksReducer(
+      { items: [running], max_items: 50 },
+      { type: "TASK_UPDATE_DEVICE", id: "1", serial: "A", patch: { status: "success" } },
+    );
+    const withB = tasksReducer(withA, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "B",
+      patch: { status: "success" },
+    });
+    const completed = tasksReducer(withB, {
+      type: "TASK_RECOMPUTE_STATUS",
+      id: "1",
+      finished_at: 1700000000000,
+    }).items[0];
+
+    const payload = buildTaskCompletionNotice(completed);
+    expect(payload).not.toBeNull();
+    expect(payload!.taskId).toBe("1");
+    expect(payload!.status).toBe("success");
+    expect(payload!.title).toBe("Install APK");
+    expect(payload!.statusLabel).toBe("Success");
+    expect(payload!.countsLabel).toContain("2 devices");
+    expect(payload!.summary.counts.success).toBe(2);
+    expect(payload!.finishedAt).toBe(1700000000000);
   });
 });

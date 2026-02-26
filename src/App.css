@@ -5034,6 +5034,10 @@ textarea:disabled {
   font-size: 18px;
 }
 
+.task-completion-modal {
+  width: min(560px, 100%);
+}
+
 .action-targets {
   padding: 6px 10px;
   border-radius: 10px;

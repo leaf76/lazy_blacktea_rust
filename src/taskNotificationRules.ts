@@ -7,6 +7,19 @@ export type DesktopTaskNotification = {
   body: string;
 };
 
+export type TaskCompletionNotice = {
+  taskId: string;
+  status: Exclude<TaskStatus, "running">;
+  title: string;
+  taskKind: TaskItem["kind"];
+  statusLabel: string;
+  countsLabel: string;
+  body: string;
+  summary: ReturnType<typeof summarizeTask>;
+  traceId: string | null;
+  finishedAt: number | null;
+};
+
 export const isTerminalTaskStatus = (status: TaskStatus): status is Exclude<TaskStatus, "running"> =>
   status !== "running";
 
@@ -22,8 +35,7 @@ export const detectNewlyCompletedTasks = (prevItems: TaskItem[], nextItems: Task
   });
 };
 
-const buildCountsLabel = (task: TaskItem): string => {
-  const summary = summarizeTask(task);
+const buildCountsLabel = (summary: ReturnType<typeof summarizeTask>): string => {
   const total = summary.serials.length;
   const parts: string[] = [];
 
@@ -46,18 +58,38 @@ const buildStatusLabel = (status: Exclude<TaskStatus, "running">): string => {
 };
 
 export const buildDesktopNotificationForTask = (task: TaskItem): DesktopTaskNotification | null => {
+  const payload = buildTaskCompletionNotice(task);
+  if (!payload) {
+    return null;
+  }
+  return {
+    taskId: payload.taskId,
+    status: payload.status,
+    title: payload.title,
+    body: payload.body,
+  };
+};
+
+export const buildTaskCompletionNotice = (task: TaskItem): TaskCompletionNotice | null => {
   if (!isTerminalTaskStatus(task.status)) {
     return null;
   }
 
+  const summary = summarizeTask(task);
   const statusLabel = buildStatusLabel(task.status);
-  const countsLabel = buildCountsLabel(task);
+  const countsLabel = buildCountsLabel(summary);
   const body = `${statusLabel} - ${countsLabel}. Check Task Center.`;
 
   return {
     taskId: task.id,
     status: task.status,
     title: task.title,
+    taskKind: task.kind,
+    statusLabel,
+    countsLabel,
     body,
+    summary,
+    traceId: task.trace_id ?? null,
+    finishedAt: task.finished_at ?? null,
   };
 };

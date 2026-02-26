@@ -185,7 +185,12 @@ import {
   type TaskKind,
   type TaskStatus,
 } from "./tasks";
-import { buildDesktopNotificationForTask, detectNewlyCompletedTasks } from "./taskNotificationRules";
+import {
+  buildDesktopNotificationForTask,
+  buildTaskCompletionNotice,
+  detectNewlyCompletedTasks,
+  type TaskCompletionNotice,
+} from "./taskNotificationRules";
 import {
   applyDeviceDetailPatch,
   filterDevicesBySearch,
@@ -1539,6 +1544,7 @@ function App() {
   const [updateLastCheckedMs, setUpdateLastCheckedMs] = useState<number | null>(() => readUpdateLastCheckedMs());
   const [updateLastCheckSource, setUpdateLastCheckSource] = useState<"auto" | "manual" | null>(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [taskCompletionNotices, setTaskCompletionNotices] = useState<TaskCompletionNotice[]>([]);
   const applyUpdateCheckResult = (source: "auto" | "manual", result: UpdateCheckResult) => {
     if (result.status === "update_available") {
       setUpdateAvailable(result.update);
@@ -2754,6 +2760,7 @@ function App() {
     () => taskState.items.filter((task) => task.status === "running").length,
     [taskState.items],
   );
+  const activeTaskCompletionNotice = taskCompletionNotices[0] ?? null;
 
   useEffect(() => {
     if (!logcatPresetSelected) {
@@ -3405,6 +3412,34 @@ function App() {
     });
   };
 
+  const maybeShowTaskCompletionModal = (task: TaskItem) => {
+    const settings = config?.notifications;
+    if (!settings?.enabled || !settings.in_app_modal_enabled) {
+      return;
+    }
+
+    const payload = buildTaskCompletionNotice(task);
+    if (!payload) {
+      return;
+    }
+
+    setTaskCompletionNotices((prev) => {
+      if (prev.some((notice) => notice.taskId === payload.taskId)) {
+        return prev;
+      }
+      return [...prev, payload];
+    });
+  };
+
+  const closeTaskCompletionModal = () => {
+    setTaskCompletionNotices((prev) => prev.slice(1));
+  };
+
+  const openTaskCenterFromCompletionModal = () => {
+    closeTaskCompletionModal();
+    navigate("/tasks");
+  };
+
   useEffect(() => {
     const prev = prevTaskItemsRef.current;
     const next = taskState.items;
@@ -3420,6 +3455,7 @@ function App() {
       }
       notifiedTaskIdsRef.current.add(task.id);
       void maybeNotifyTaskCompletion(task);
+      maybeShowTaskCompletionModal(task);
     });
 
     prevTaskItemsRef.current = next;
@@ -3635,6 +3671,13 @@ function App() {
   useEffect(() => {
     configRef.current = config;
   }, [config]);
+
+  useEffect(() => {
+    if (config?.notifications.enabled && config.notifications.in_app_modal_enabled) {
+      return;
+    }
+    setTaskCompletionNotices((prev) => (prev.length > 0 ? [] : prev));
+  }, [config?.notifications.enabled, config?.notifications.in_app_modal_enabled]);
 
   useEffect(() => {
     return () => {
@@ -14400,7 +14443,32 @@ function App() {
                               Enable notifications
                             </label>
                             <div className="muted settings-hint">
-                              Controls desktop notifications for task completion.
+                              Controls task completion alerts.
+                            </div>
+
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.notifications.in_app_modal_enabled}
+                                disabled={!config.notifications.enabled}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          notifications: {
+                                            ...prev.notifications,
+                                            in_app_modal_enabled: event.target.checked,
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              In-app completion modal
+                            </label>
+                            <div className="muted settings-hint">
+                              Show an in-app modal when tracked tasks complete.
                             </div>
 
                             <label className="toggle">
@@ -15005,6 +15073,74 @@ function App() {
           </Routes>
         </main>
       </div>
+
+      {activeTaskCompletionNotice && (
+        <div className="modal-backdrop" onClick={closeTaskCompletionModal}>
+          <div className="modal confirm-modal task-completion-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Task Completed</h3>
+                <p className="muted">
+                  {activeTaskCompletionNotice.finishedAt
+                    ? new Date(activeTaskCompletionNotice.finishedAt).toLocaleString()
+                    : "Just now"}{" "}
+                  • {activeTaskCompletionNotice.taskKind}
+                  {activeTaskCompletionNotice.traceId ? ` • ${activeTaskCompletionNotice.traceId}` : ""}
+                </p>
+              </div>
+              <button className="ghost" onClick={closeTaskCompletionModal}>
+                Close
+              </button>
+            </div>
+
+            <div className="inline-row">
+              <strong>{activeTaskCompletionNotice.title}</strong>
+              <span
+                className={`status-pill ${
+                  activeTaskCompletionNotice.status === "success"
+                    ? "ok"
+                    : activeTaskCompletionNotice.status === "cancelled" ||
+                        activeTaskCompletionNotice.status === "interrupted"
+                      ? "warn"
+                      : "error"
+                }`}
+              >
+                {activeTaskCompletionNotice.statusLabel}
+              </span>
+            </div>
+
+            <p className="muted">{activeTaskCompletionNotice.body}</p>
+            <div className="task-summary">
+              <span className="badge">{activeTaskCompletionNotice.summary.serials.length} devices</span>
+              {activeTaskCompletionNotice.summary.counts.success > 0 && (
+                <span className="badge">{activeTaskCompletionNotice.summary.counts.success} success</span>
+              )}
+              {activeTaskCompletionNotice.summary.counts.error > 0 && (
+                <span className="badge">{activeTaskCompletionNotice.summary.counts.error} error</span>
+              )}
+              {activeTaskCompletionNotice.summary.counts.cancelled > 0 && (
+                <span className="badge">{activeTaskCompletionNotice.summary.counts.cancelled} cancelled</span>
+              )}
+              {activeTaskCompletionNotice.summary.counts.interrupted > 0 && (
+                <span className="badge">{activeTaskCompletionNotice.summary.counts.interrupted} interrupted</span>
+              )}
+            </div>
+            {taskCompletionNotices.length > 1 && (
+              <p className="muted">
+                {taskCompletionNotices.length - 1} more completion alert
+                {taskCompletionNotices.length - 1 > 1 ? "s" : ""} queued.
+              </p>
+            )}
+
+            <div className="button-row">
+              <button onClick={openTaskCenterFromCompletionModal}>View Task Center</button>
+              <button className="ghost" onClick={closeTaskCompletionModal}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {logcatClearBufferModal && (
         <div className="modal-backdrop" onClick={closeLogcatClearBufferModal}>
