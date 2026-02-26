@@ -4,6 +4,17 @@ import { formatBytes } from "./perf";
 type DeviceDetailPatch = Partial<Omit<DeviceDetail, "serial">>;
 type DeviceValue = string | number | boolean | null | undefined;
 type ConnectivityFlagKey = "wifi_is_on" | "bt_is_on";
+export type DeviceQuickMenuSource = "device_manager" | "quick_actions" | "task";
+export type DeviceQuickMenuAction = "set_primary" | "copy_device_info" | "open_output";
+type ContextMenuPositionParams = {
+  anchorX: number;
+  anchorY: number;
+  menuWidth: number;
+  menuHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  margin?: number;
+};
 
 const formatDeviceValue = (value: DeviceValue): string => {
   if (value === null || value === undefined || value === "") {
@@ -168,6 +179,52 @@ export const selectSerialsForGroup = (
     return serials;
   }
   return serials.filter((serial) => groupMap[serial] === group);
+};
+
+export const buildDeviceQuickMenuActions = (
+  source: DeviceQuickMenuSource,
+  outputPath?: string | null,
+): DeviceQuickMenuAction[] => {
+  const actions: DeviceQuickMenuAction[] = ["set_primary", "copy_device_info"];
+  if (source === "task" && Boolean(outputPath?.trim())) {
+    actions.push("open_output");
+  }
+  return actions;
+};
+
+export const computeContextMenuPosition = ({
+  anchorX,
+  anchorY,
+  menuWidth,
+  menuHeight,
+  viewportWidth,
+  viewportHeight,
+  margin = 10,
+}: ContextMenuPositionParams): { top: number; left: number } => {
+  const safeWidth = Math.max(1, menuWidth);
+  const safeHeight = Math.max(1, menuHeight);
+  const safeMargin = Math.max(0, margin);
+
+  let left = anchorX;
+  let top = anchorY;
+
+  if (left + safeWidth + safeMargin > viewportWidth) {
+    left = anchorX - safeWidth;
+  }
+  if (top + safeHeight + safeMargin > viewportHeight) {
+    top = anchorY - safeHeight;
+  }
+
+  const maxLeft = Math.max(safeMargin, viewportWidth - safeWidth - safeMargin);
+  const maxTop = Math.max(safeMargin, viewportHeight - safeHeight - safeMargin);
+
+  left = Math.min(Math.max(left, safeMargin), maxLeft);
+  top = Math.min(Math.max(top, safeMargin), maxTop);
+
+  return {
+    top: Math.round(top),
+    left: Math.round(left),
+  };
 };
 
 export const shouldEnableConnectivityForSelection = (

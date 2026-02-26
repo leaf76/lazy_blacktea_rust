@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   applyDeviceDetailPatch,
+  buildDeviceQuickMenuActions,
+  computeContextMenuPosition,
   filterDevicesBySearch,
   formatPrimaryDeviceLabel,
   formatDeviceInfoMarkdown,
@@ -233,5 +235,70 @@ describe("deviceUtils", () => {
     expect(shouldEnableConnectivityForSelection(devices, [], "wifi_is_on")).toBe(true);
     expect(shouldEnableConnectivityForSelection(devices, ["missing"], "wifi_is_on")).toBe(true);
     expect(shouldEnableConnectivityForSelection(devices, ["alpha", "bravo"], "bt_is_on")).toBe(false);
+  });
+
+  it("builds task quick-menu actions with output option only when output path is present", () => {
+    expect(buildDeviceQuickMenuActions("task", "/tmp/report.zip")).toEqual([
+      "set_primary",
+      "copy_device_info",
+      "open_output",
+    ]);
+    expect(buildDeviceQuickMenuActions("task", "   ")).toEqual([
+      "set_primary",
+      "copy_device_info",
+    ]);
+    expect(buildDeviceQuickMenuActions("task")).toEqual(["set_primary", "copy_device_info"]);
+  });
+
+  it("builds non-task quick-menu actions without output option", () => {
+    expect(buildDeviceQuickMenuActions("device_manager", "/tmp/report.zip")).toEqual([
+      "set_primary",
+      "copy_device_info",
+    ]);
+    expect(buildDeviceQuickMenuActions("quick_actions", "/tmp/report.zip")).toEqual([
+      "set_primary",
+      "copy_device_info",
+    ]);
+  });
+
+  it("computes context-menu position without overflow in normal viewport area", () => {
+    const pos = computeContextMenuPosition({
+      anchorX: 300,
+      anchorY: 200,
+      menuWidth: 180,
+      menuHeight: 120,
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      margin: 10,
+    });
+    expect(pos).toEqual({ left: 300, top: 200 });
+  });
+
+  it("flips and clamps context-menu position at the bottom-right corner", () => {
+    const pos = computeContextMenuPosition({
+      anchorX: 1260,
+      anchorY: 700,
+      menuWidth: 220,
+      menuHeight: 180,
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      margin: 10,
+    });
+    expect(pos.left).toBe(1040);
+    expect(pos.top).toBe(520);
+  });
+
+  it("clamps context-menu position when viewport is smaller than menu", () => {
+    const pos = computeContextMenuPosition({
+      anchorX: 4,
+      anchorY: 4,
+      menuWidth: 500,
+      menuHeight: 300,
+      viewportWidth: 320,
+      viewportHeight: 240,
+      margin: 10,
+    });
+    expect(pos.left).toBe(10);
+    expect(pos.top).toBe(10);
   });
 });

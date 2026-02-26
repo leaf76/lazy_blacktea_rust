@@ -193,6 +193,8 @@ import {
 } from "./taskNotificationRules";
 import {
   applyDeviceDetailPatch,
+  buildDeviceQuickMenuActions,
+  computeContextMenuPosition,
   filterDevicesBySearch,
   formatPrimaryDeviceLabel,
   formatDeviceInfoMarkdown,
@@ -203,6 +205,7 @@ import {
   setPrimarySelection,
   shouldEnableConnectivityForSelection,
   selectSerialsForGroup,
+  type DeviceQuickMenuSource,
 } from "./deviceUtils";
 import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
 import { bugreportLogLineMatches, buildBugreportLogFindPattern } from "./bugreportLogFind";
@@ -1829,12 +1832,18 @@ function App() {
     x: number;
     y: number;
     serial: string;
+    source: DeviceQuickMenuSource;
+    outputPath: string | null;
   } | null>(null);
   const [deviceCommandMenu, setDeviceCommandMenu] = useState<{
     x: number;
     y: number;
     kind: "select_group" | "wifi" | "bluetooth";
   } | null>(null);
+  const deviceContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const deviceContextMenuTriggerRef = useRef<HTMLElement | null>(null);
+  const deviceContextMenuWasOpenRef = useRef(false);
+  const deviceQuickSelectionHintShownRef = useRef(false);
   const [searchText, setSearchText] = useState("");
   const [apkPath, setApkPath] = useState("");
   const [apkBundlePath, setApkBundlePath] = useState("");
@@ -2041,6 +2050,9 @@ function App() {
     : null;
   const hasDevices = devices.length > 0;
   const selectedCount = selectedSerials.length;
+  const deviceContextMenuActions = deviceContextMenu
+    ? buildDeviceQuickMenuActions(deviceContextMenu.source, deviceContextMenu.outputPath)
+    : [];
   const selectedConnectedCount = selectedSerials.reduce(
     (total, serial) => total + (terminalBySerial[serial]?.connected ? 1 : 0),
     0,
@@ -3036,6 +3048,13 @@ function App() {
     if (!deviceContextMenu) {
       return;
     }
+    deviceContextMenuWasOpenRef.current = true;
+    const focusFrame = window.requestAnimationFrame(() => {
+      const firstItem = deviceContextMenuRef.current?.querySelector<HTMLButtonElement>(
+        ".context-menu-item:not(:disabled)",
+      );
+      firstItem?.focus();
+    });
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setDeviceContextMenu(null);
@@ -3045,9 +3064,25 @@ function App() {
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("scroll", handleScroll, true);
     return () => {
+      window.cancelAnimationFrame(focusFrame);
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("scroll", handleScroll, true);
     };
+  }, [deviceContextMenu]);
+
+  useEffect(() => {
+    if (deviceContextMenu) {
+      return;
+    }
+    if (!deviceContextMenuWasOpenRef.current) {
+      return;
+    }
+    deviceContextMenuWasOpenRef.current = false;
+    const trigger = deviceContextMenuTriggerRef.current;
+    if (trigger && document.contains(trigger)) {
+      trigger.focus();
+    }
+    deviceContextMenuTriggerRef.current = null;
   }, [deviceContextMenu]);
 
   useEffect(() => {
@@ -3280,6 +3315,9 @@ function App() {
     };
 
     const handleContextMenu = (event: MouseEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
       if (!hasRunningTasksRef.current) {
         return;
       }
@@ -4658,6 +4696,119 @@ function App() {
     }
     setSelectedSerials((prev) => (prev.length === 1 && prev[0] === serial ? prev : [serial]));
   };
+
+  const isContextMenuShortcut = (event: ReactKeyboardEvent<HTMLElement>) =>
+    event.key === "ContextMenu" || (event.shiftKey && event.key === "F10");
+
+  const openDeviceQuickContextMenu = (
+    serial: string,
+    options?: {
+      source?: DeviceQuickMenuSource;
+      outputPath?: string | null;
+      rowIndex?: number | null;
+      triggerElement?: HTMLElement | null;
+      anchorX?: number;
+      anchorY?: number;
+      showSelectionHint?: boolean;
+    },
+  ) => {
+    const triggerElement = options?.triggerElement ?? null;
+    const rect = triggerElement?.getBoundingClientRect();
+    const anchorX = options?.anchorX ?? (rect ? rect.right - 12 : 24);
+    const anchorY = options?.anchorY ?? (rect ? rect.top + Math.min(rect.height, 20) : 24);
+
+    deviceContextMenuTriggerRef.current = triggerElement;
+
+    if (options?.showSelectionHint && !deviceQuickSelectionHintShownRef.current) {
+      deviceQuickSelectionHintShownRef.current = true;
+      pushToast("Right-click selects this device for quick actions.", "info");
+    }
+
+    setSelectedSerials([serial]);
+    if (typeof options?.rowIndex === "number") {
+      lastSelectedIndexRef.current = options.rowIndex;
+    } else {
+      lastSelectedIndexRef.current = null;
+    }
+    setDeviceCommandMenu(null);
+    setDeviceContextMenu({
+      x: anchorX,
+      y: anchorY,
+      serial,
+      source: options?.source ?? "device_manager",
+      outputPath: options?.outputPath ?? null,
+    });
+  };
+
+  const openDeviceQuickContextMenuFromPointer = (
+    event: ReactMouseEvent<HTMLElement>,
+    serial: string,
+    options?: {
+      source?: DeviceQuickMenuSource;
+      outputPath?: string | null;
+      rowIndex?: number | null;
+      showSelectionHint?: boolean;
+    },
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openDeviceQuickContextMenu(serial, {
+      ...options,
+      triggerElement: event.currentTarget,
+      anchorX: event.clientX,
+      anchorY: event.clientY,
+    });
+  };
+
+  const openDeviceQuickContextMenuFromKeyboard = (
+    event: ReactKeyboardEvent<HTMLElement>,
+    serial: string,
+    options?: {
+      source?: DeviceQuickMenuSource;
+      outputPath?: string | null;
+      rowIndex?: number | null;
+    },
+  ) => {
+    if (!isContextMenuShortcut(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    openDeviceQuickContextMenu(serial, {
+      ...options,
+      triggerElement: event.currentTarget,
+    });
+  };
+
+  const deviceContextMenuPosition = deviceContextMenu
+    ? computeContextMenuPosition({
+        anchorX: deviceContextMenu.x,
+        anchorY: deviceContextMenu.y,
+        menuWidth: 210,
+        menuHeight: Math.max(48, 14 + deviceContextMenuActions.length * 36),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        margin: 10,
+      })
+    : null;
+
+  const deviceCommandMenuPosition = deviceCommandMenu
+    ? (() => {
+        const itemCount =
+          deviceCommandMenu.kind === "select_group"
+            ? 1 + (groupOptions.length === 0 ? 1 : groupOptions.length)
+            : 2;
+        return computeContextMenuPosition({
+          anchorX: deviceCommandMenu.x,
+          anchorY: deviceCommandMenu.y,
+          menuWidth: deviceCommandMenu.kind === "select_group" ? 260 : 190,
+          menuHeight: Math.max(48, 14 + itemCount * 36),
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          margin: 10,
+        });
+      })()
+    : null;
 
   const handleDeviceRowSelect = (
     event: React.MouseEvent<HTMLElement>,
@@ -8838,11 +8989,23 @@ function App() {
                       if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
                         return;
                       }
+                      if (isContextMenuShortcut(event)) {
+                        openDeviceQuickContextMenuFromKeyboard(event, serial, {
+                          source: "quick_actions",
+                        });
+                        return;
+                      }
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
                         toggleDeviceInContextPopover(serial);
                       }
                     }}
+                    onContextMenu={(event) =>
+                      openDeviceQuickContextMenuFromPointer(event, serial, {
+                        source: "quick_actions",
+                        showSelectionHint: true,
+                      })
+                    }
                   >
                     <label className="device-check" onClick={(event) => event.stopPropagation()}>
                       <input
@@ -11073,7 +11236,24 @@ function App() {
                                         ? "warn"
                                         : "error";
                                 return (
-                                  <div key={serial} className="task-device-row">
+                                  <div
+                                    key={serial}
+                                    className="task-device-row"
+                                    tabIndex={0}
+                                    onKeyDown={(event) =>
+                                      openDeviceQuickContextMenuFromKeyboard(event, serial, {
+                                        source: "task",
+                                        outputPath: entry.output_path ?? null,
+                                      })
+                                    }
+                                    onContextMenu={(event) =>
+                                      openDeviceQuickContextMenuFromPointer(event, serial, {
+                                        source: "task",
+                                        outputPath: entry.output_path ?? null,
+                                        showSelectionHint: true,
+                                      })
+                                    }
+                                  >
                                     <div className="task-device-main">
                                       <strong>{serial}</strong>
                                       <span className={`status-pill ${entryTone}`}>{entry.status}</span>
@@ -11255,6 +11435,24 @@ function App() {
                               key={serial}
                               className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
                               onClick={(event) => handleDeviceRowSelect(event, serial, index)}
+                              tabIndex={0}
+                              onKeyDown={(event) => {
+                                const target = event.target as HTMLElement | null;
+                                if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
+                                  return;
+                                }
+                                openDeviceQuickContextMenuFromKeyboard(event, serial, {
+                                  source: "device_manager",
+                                  rowIndex: index,
+                                });
+                              }}
+                              onContextMenu={(event) =>
+                                openDeviceQuickContextMenuFromPointer(event, serial, {
+                                  source: "device_manager",
+                                  rowIndex: index,
+                                  showSelectionHint: true,
+                                })
+                              }
                             >
                               <label className="device-check" onClick={(event) => event.stopPropagation()}>
                                 <input
@@ -11340,9 +11538,10 @@ function App() {
                                   type="button"
                                   className="ghost icon-only"
                                   onClick={(e) => {
-                                    e.stopPropagation();
-                                    setDeviceCommandMenu(null);
-                                    setDeviceContextMenu({ x: e.clientX, y: e.clientY, serial });
+                                    openDeviceQuickContextMenuFromPointer(e, serial, {
+                                      source: "device_manager",
+                                      rowIndex: index,
+                                    });
                                   }}
                                   disabled={busy}
                                   title="Device actions"
@@ -11362,32 +11561,51 @@ function App() {
                           onClick={() => setDeviceContextMenu(null)}
                         />
                         <div
+                          ref={deviceContextMenuRef}
                           className="context-menu"
                           style={{
-                            top: deviceContextMenu.y,
-                            left: Math.max(10, deviceContextMenu.x - 160),
+                            top: deviceContextMenuPosition?.top ?? deviceContextMenu.y,
+                            left: deviceContextMenuPosition?.left ?? deviceContextMenu.x,
                           }}
                         >
-                          <button
-                            type="button"
-                            className="context-menu-item"
-                            onClick={() => {
-                              handleSelectActiveSerial(deviceContextMenu.serial);
-                              setDeviceContextMenu(null);
-                            }}
-                          >
-                            Set Primary
-                          </button>
-                          <button
-                            type="button"
-                            className="context-menu-item"
-                            onClick={() => {
-                              void handleCopyDeviceInfoSpecific(deviceContextMenu.serial);
-                              setDeviceContextMenu(null);
-                            }}
-                          >
-                            Copy Device Info
-                          </button>
+                          {deviceContextMenuActions.includes("set_primary") && (
+                            <button
+                              type="button"
+                              className="context-menu-item"
+                              onClick={() => {
+                                handleSelectActiveSerial(deviceContextMenu.serial);
+                                setDeviceContextMenu(null);
+                              }}
+                            >
+                              Set Primary
+                            </button>
+                          )}
+                          {deviceContextMenuActions.includes("copy_device_info") && (
+                            <button
+                              type="button"
+                              className="context-menu-item"
+                              onClick={() => {
+                                void handleCopyDeviceInfoSpecific(deviceContextMenu.serial);
+                                setDeviceContextMenu(null);
+                              }}
+                            >
+                              Copy Device Info
+                            </button>
+                          )}
+                          {deviceContextMenuActions.includes("open_output") && (
+                            <button
+                              type="button"
+                              className="context-menu-item"
+                              onClick={() => {
+                                if (deviceContextMenu.outputPath) {
+                                  void openPath(deviceContextMenu.outputPath);
+                                }
+                                setDeviceContextMenu(null);
+                              }}
+                            >
+                              Open output
+                            </button>
+                          )}
                         </div>
                       </>
                     )}
@@ -11398,8 +11616,8 @@ function App() {
                         <div
                           className="context-menu"
                           style={{
-                            top: deviceCommandMenu.y,
-                            left: Math.max(10, deviceCommandMenu.x - 160),
+                            top: deviceCommandMenuPosition?.top ?? deviceCommandMenu.y,
+                            left: deviceCommandMenuPosition?.left ?? deviceCommandMenu.x,
                           }}
                         >
                           {deviceCommandMenu.kind === "select_group" ? (
@@ -12048,7 +12266,24 @@ function App() {
                                             ? "warn"
                                             : "error";
                                     return (
-                                      <div key={serial} className="task-device-row">
+                                      <div
+                                        key={serial}
+                                        className="task-device-row"
+                                        tabIndex={0}
+                                        onKeyDown={(event) =>
+                                          openDeviceQuickContextMenuFromKeyboard(event, serial, {
+                                            source: "task",
+                                            outputPath: entry.output_path ?? null,
+                                          })
+                                        }
+                                        onContextMenu={(event) =>
+                                          openDeviceQuickContextMenuFromPointer(event, serial, {
+                                            source: "task",
+                                            outputPath: entry.output_path ?? null,
+                                            showSelectionHint: true,
+                                          })
+                                        }
+                                      >
                                         <div className="task-device-main">
                                           <strong>{serial}</strong>
                                           <span className={`status-pill ${entryTone}`}>{entry.status}</span>
@@ -13641,7 +13876,24 @@ function App() {
                                       ? "warn"
                                       : "error";
                               return (
-                                <div key={entry.serial} className="task-device-row">
+                                <div
+                                  key={entry.serial}
+                                  className="task-device-row"
+                                  tabIndex={0}
+                                  onKeyDown={(event) =>
+                                    openDeviceQuickContextMenuFromKeyboard(event, entry.serial, {
+                                      source: "task",
+                                      outputPath: entry.output_path ?? null,
+                                    })
+                                  }
+                                  onContextMenu={(event) =>
+                                    openDeviceQuickContextMenuFromPointer(event, entry.serial, {
+                                      source: "task",
+                                      outputPath: entry.output_path ?? null,
+                                      showSelectionHint: true,
+                                    })
+                                  }
+                                >
                                   <div className="task-device-main">
                                     <strong>{entry.serial}</strong>
                                     <span className={`status-pill ${entryTone}`}>{entry.status}</span>
