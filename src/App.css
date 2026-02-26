@@ -3013,12 +3013,63 @@ button.ghost.icon-only {
   box-shadow: inset 0 0 0 1px var(--nav-active-border);
 }
 
+.files-nav-row,
+.files-action-row {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-subtle);
+}
+
+.files-nav-row {
+  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--color-bg-subtle) 62%);
+}
+
+.files-nav-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 360px;
+  min-width: min(100%, 320px);
+}
+
+.files-up-button {
+  min-width: 58px;
+}
+
+.files-path-input {
+  flex: 1 1 320px;
+  min-width: 180px;
+  height: var(--form-control-height);
+  font-family: var(--font-code);
+}
+
+.files-go-button {
+  min-width: 64px;
+}
+
+.files-action-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1 1 320px;
+}
+
+.files-action-controls .toggle {
+  margin-left: auto;
+}
+
 .file-breadcrumbs {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-top: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-panel);
 }
 
 .file-breadcrumbs-label {
@@ -3066,6 +3117,10 @@ button.ghost.icon-only {
 @media (max-width: 1100px) {
   .files-split {
     grid-template-columns: 1fr;
+  }
+
+  .files-action-controls .toggle {
+    margin-left: 0;
   }
 }
 
@@ -5275,6 +5330,16 @@ textarea:disabled {
   .dashboard-variant-value {
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+
+  .files-nav-controls,
+  .files-action-controls {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .files-action-controls .toggle {
+    margin-left: 0;
   }
 
   .app-shell {

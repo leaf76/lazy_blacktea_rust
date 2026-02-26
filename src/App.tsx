@@ -12102,38 +12102,66 @@ function App() {
 	                        <span>{singleSelectionWarningMessage}</span>
 	                      </div>
 	                    )}
-	                    <div className="form-row">
+	                    <div className="form-row files-nav-row">
 	                      <label>Device path</label>
+                        <div className="files-nav-controls">
+	                      <button
+                          className="ghost files-up-button"
+                          onClick={handleFilesGoUp}
+                          disabled={busy || !activeSerial}
+                          title="Go to parent directory"
+                          aria-label="Go to parent directory"
+                        >
+                          Up
+                        </button>
 	                      <input
+                          className="files-path-input"
 	                        value={filesPath}
 	                        onChange={(event) => setFilesPath(event.target.value)}
-                        placeholder="/sdcard"
-                      />
-                      <button className="ghost" onClick={handleFilesGoUp} disabled={busy || !activeSerial}>
-                        Up
-                      </button>
-                      <button onClick={() => void handleFilesRefresh()} disabled={busy || !activeSerial}>
-                        Go
-                      </button>
-                      <button
-                        className="ghost"
-                        onClick={openFilesMkdirModal}
-                        disabled={busy || !activeSerial}
-                      >
-                        New folder
-                      </button>
-                      <button onClick={handleFileUpload} disabled={busy || !activeSerial}>
-                        Upload
-                      </button>
-                      <label className="toggle">
-                        <input
-                          type="checkbox"
-                          checked={filesOverwriteEnabled}
-                          onChange={(event) => setFilesOverwriteEnabled(event.target.checked)}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter") {
+                              return;
+                            }
+                            event.preventDefault();
+                            if (busy || !activeSerial) {
+                              return;
+                            }
+                            void handleFilesRefresh();
+                          }}
+                          placeholder="/sdcard"
                         />
-                        Overwrite existing
-                      </label>
-                    </div>
+                        <button
+                          className="files-go-button"
+                          onClick={() => void handleFilesRefresh()}
+                          disabled={busy || !activeSerial}
+                        >
+                          Go
+                        </button>
+                        </div>
+                      </div>
+                      <div className="form-row files-action-row">
+                        <label>Actions</label>
+                        <div className="files-action-controls">
+                          <button
+                            className="ghost"
+                            onClick={openFilesMkdirModal}
+                            disabled={busy || !activeSerial}
+                          >
+                            New folder
+                          </button>
+                          <button onClick={handleFileUpload} disabled={busy || !activeSerial}>
+                            Upload
+                          </button>
+                          <label className="toggle">
+                            <input
+                              type="checkbox"
+                              checked={filesOverwriteEnabled}
+                              onChange={(event) => setFilesOverwriteEnabled(event.target.checked)}
+                            />
+                            Overwrite existing
+                          </label>
+                        </div>
+                      </div>
                     <div className="file-breadcrumbs">
                       <span className="file-breadcrumbs-label">Breadcrumbs</span>
                       <div className="file-breadcrumbs-trail">
@@ -12194,7 +12222,7 @@ function App() {
                         ref={filesListRef}
                       >
                         {files.length === 0 ? (
-                          <p className="muted">No files loaded. Click Go to load the folder.</p>
+                          <p className="muted">No files loaded. Press Enter in Device path or click Go.</p>
                         ) : filteredFiles.length === 0 ? (
                           <p className="muted">No matches. Clear the filter to see all items.</p>
                         ) : (
