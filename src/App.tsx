@@ -159,6 +159,12 @@ import {
   toggleDashboardField,
   type DashboardCardView,
 } from "./dashboardConfig";
+import {
+  buildDashboardCardMarkdown,
+  buildDashboardFieldMarkdown,
+  buildDashboardVariantMarkdown,
+  buildDashboardVisibleMarkdown,
+} from "./dashboardCopy";
 import { buildLinePath, extractNetSeries, sliceSnapshotsByWindowMs } from "./netProfiler";
 import {
   initialPairingState,
@@ -1893,6 +1899,8 @@ function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [dashboardConfigOpen, setDashboardConfigOpen] = useState(false);
   const [dashboardDraft, setDashboardDraft] = useState<DashboardSettings>(buildDefaultDashboardSettings());
+  const [dashboardCopiedKey, setDashboardCopiedKey] = useState<string | null>(null);
+  const [dashboardVariantExpanded, setDashboardVariantExpanded] = useState<Record<string, boolean>>({});
   const [pairingState, dispatchPairing] = useReducer(pairingReducer, initialPairingState);
   const [rebootConfirmOpen, setRebootConfirmOpen] = useState(false);
   const [rebootConfirmMode, setRebootConfirmMode] = useState<RebootMode>("normal");
@@ -1928,6 +1936,7 @@ function App() {
   const deviceTrackingFallbackInFlightRef = useRef(false);
   const deviceTrackingStartedAtRef = useRef<number>(0);
   const busyRef = useRef(false);
+  const dashboardCopyTimerRef = useRef<number | null>(null);
   const adbInfoRef = useRef<AdbInfo | null>(null);
   const devicesRef = useRef<DeviceInfo[]>([]);
   const configRef = useRef<AppConfig | null>(null);
@@ -3626,6 +3635,14 @@ function App() {
   useEffect(() => {
     configRef.current = config;
   }, [config]);
+
+  useEffect(() => {
+    return () => {
+      if (dashboardCopyTimerRef.current !== null) {
+        window.clearTimeout(dashboardCopyTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (dashboardConfigOpen) {
@@ -8315,6 +8332,51 @@ function App() {
     }
   };
 
+  const markDashboardCopied = (copiedKey: string) => {
+    setDashboardCopiedKey(copiedKey);
+    if (dashboardCopyTimerRef.current !== null) {
+      window.clearTimeout(dashboardCopyTimerRef.current);
+    }
+    dashboardCopyTimerRef.current = window.setTimeout(() => {
+      setDashboardCopiedKey((current) => (current === copiedKey ? null : current));
+      dashboardCopyTimerRef.current = null;
+    }, 1800);
+  };
+
+  const copyDashboardText = async (
+    text: string,
+    successMessage: string,
+    copiedKey: string,
+  ) => {
+    try {
+      await writeText(text);
+      markDashboardCopied(copiedKey);
+      pushToast(successMessage, "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const getDashboardVariantKey = (cardId: DashboardCardId, fieldId: DashboardFieldId): string =>
+    `${cardId}:${fieldId}`;
+
+  const isDashboardVariantVisible = (cardId: DashboardCardId, fieldId: DashboardFieldId): boolean =>
+    Boolean(dashboardVariantExpanded[getDashboardVariantKey(cardId, fieldId)]);
+
+  const setDashboardVariantOpen = (
+    cardId: DashboardCardId,
+    fieldId: DashboardFieldId,
+    open: boolean,
+  ) => {
+    const key = getDashboardVariantKey(cardId, fieldId);
+    setDashboardVariantExpanded((current) => {
+      if (Boolean(current[key]) === open) {
+        return current;
+      }
+      return { ...current, [key]: open };
+    });
+  };
+
   const filteredApps = useMemo(() => {
     const query = appsFilter.trim().toLowerCase();
     if (!query) {
@@ -8821,6 +8883,45 @@ function App() {
       dashboardSettings,
     );
     const editableCards = normalizeDashboardSettings(dashboardDraft).cards;
+    const handleCopyDashboardField = (card: DashboardCardView, field: DashboardCardView["fields"][number]) => {
+      const key = `field:${card.id}:${field.id}`;
+      const markdown = buildDashboardFieldMarkdown(card.title, field.label, field.value);
+      void copyDashboardText(markdown, `${field.label} copied.`, key);
+    };
+
+    const handleCopyDashboardVariant = (
+      card: DashboardCardView,
+      field: DashboardCardView["fields"][number],
+      variant: DashboardCardView["fields"][number]["variants"][number],
+    ) => {
+      const key = `variant:${card.id}:${field.id}:${variant.serial}`;
+      const markdown = buildDashboardVariantMarkdown(
+        card.title,
+        field.label,
+        variant.serial,
+        variant.value,
+      );
+      void copyDashboardText(markdown, `${field.label} (${variant.serial}) copied.`, key);
+    };
+
+    const handleCopyDashboardCard = (card: DashboardCardView) => {
+      const key = `card:${card.id}`;
+      const markdown = buildDashboardCardMarkdown(card, {
+        isFieldVariantVisible: isDashboardVariantVisible,
+      });
+      void copyDashboardText(markdown, `${card.title} copied.`, key);
+    };
+
+    const handleCopyDashboardVisible = () => {
+      const markdown = buildDashboardVisibleMarkdown(dashboardCards, {
+        isFieldVariantVisible: isDashboardVariantVisible,
+      });
+      if (!markdown) {
+        pushToast("Nothing visible to copy.", "error");
+        return;
+      }
+      void copyDashboardText(markdown, "Visible dashboard info copied.", "visible");
+    };
 
     if (adbInfo && !adbInfo.available) {
       return (
@@ -8899,6 +9000,9 @@ function App() {
             <p className="muted">Overview and device health.</p>
           </div>
           <div className="page-actions">
+            <button onClick={handleCopyDashboardVisible} disabled={dashboardCards.length === 0}>
+              {dashboardCopiedKey === "visible" ? "Copied" : "Copy Visible"}
+            </button>
             <button className="ghost" onClick={openDashboardConfig} disabled={busy || !config}>
               Configure
             </button>
@@ -8916,42 +9020,115 @@ function App() {
             <span className="muted">Select one or more devices from the top device picker to populate dashboard cards.</span>
           </div>
         )}
+        <div className="dashboard-toolbar" role="status" aria-live="polite">
+          <div className="dashboard-toolbar-stats">
+            <span className="dashboard-toolbar-stat">
+              <strong>{selectedSerials.length}</strong>
+              <span>Selected</span>
+            </span>
+            <span className="dashboard-toolbar-stat">
+              <strong>{selectedConnectedCount}</strong>
+              <span>Connected</span>
+            </span>
+            <span className="dashboard-toolbar-stat">
+              <strong>{runningTaskCount}</strong>
+              <span>Running Tasks</span>
+            </span>
+          </div>
+          <p className="muted">Click any value or copy button to copy that information.</p>
+        </div>
         <div className="dashboard-grid">
           {dashboardCards.map((card) => (
             <section
               key={card.id}
               className={`panel card dashboard-info-card ${dashboardCardClassMap[card.id] ?? ""}`}
             >
-              <div className="card-header">
+              <div className="card-header dashboard-card-header">
                 <div>
                   <h2>{card.title}</h2>
                   <p className="muted">{card.description}</p>
                 </div>
-                <span className="badge">{card.fields.length} fields</span>
+                <div className="dashboard-card-actions">
+                  <span className="badge">{card.fields.length} fields</span>
+                  <button
+                    className={`ghost dashboard-copy-button ${dashboardCopiedKey === `card:${card.id}` ? "is-copied" : ""}`}
+                    onClick={() => handleCopyDashboardCard(card)}
+                    aria-label={`Copy ${card.title} card`}
+                  >
+                    {dashboardCopiedKey === `card:${card.id}` ? "Copied" : "Copy Card"}
+                  </button>
+                </div>
               </div>
               {card.fields.length === 0 ? (
                 <p className="muted">No fields enabled for this card. Open Configure to enable fields.</p>
               ) : (
-                <div className="summary-grid summary-grid-hero">
-                  {card.fields.map((field) => (
-                    <div key={field.id}>
-                      <span className="muted">{field.label}</span>
-                      <strong>{field.value}</strong>
-                      {field.variants.length > 0 && (
-                        <details className="dashboard-variants">
-                          <summary className="muted">View per device</summary>
-                          <div className="dashboard-variants-list">
-                            {field.variants.map((variant) => (
-                              <div key={`${field.id}-${variant.serial}`} className="dashboard-variant-row">
-                                <code>{variant.serial}</code>
-                                <span>{variant.value}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      )}
-                    </div>
-                  ))}
+                <div className="dashboard-fields-grid">
+                  {card.fields.map((field) => {
+                    const fieldCopyKey = `field:${card.id}:${field.id}`;
+                    const variantsOpen = isDashboardVariantVisible(card.id, field.id);
+                    return (
+                      <article
+                        key={field.id}
+                        className={`dashboard-field ${dashboardCopiedKey === fieldCopyKey ? "is-copied" : ""}`}
+                      >
+                        <div className="dashboard-field-header">
+                          <span className="muted">{field.label}</span>
+                          <button
+                            className={`ghost dashboard-copy-button ${dashboardCopiedKey === fieldCopyKey ? "is-copied" : ""}`}
+                            onClick={() => handleCopyDashboardField(card, field)}
+                            aria-label={`Copy ${card.title} ${field.label}`}
+                          >
+                            {dashboardCopiedKey === fieldCopyKey ? "Copied" : "Copy"}
+                          </button>
+                        </div>
+                        <button
+                          className="dashboard-field-value"
+                          onClick={() => handleCopyDashboardField(card, field)}
+                          aria-label={`Copy ${field.label} value`}
+                        >
+                          <strong>{field.value}</strong>
+                        </button>
+                        {field.variants.length > 0 && (
+                          <details
+                            className="dashboard-variants"
+                            open={variantsOpen}
+                            onToggle={(event) =>
+                              setDashboardVariantOpen(card.id, field.id, event.currentTarget.open)
+                            }
+                          >
+                            <summary className="dashboard-variants-summary muted">View per device</summary>
+                            <div className="dashboard-variants-list">
+                              {field.variants.map((variant) => {
+                                const variantCopyKey = `variant:${card.id}:${field.id}:${variant.serial}`;
+                                return (
+                                  <div
+                                    key={`${field.id}-${variant.serial}`}
+                                    className={`dashboard-variant-row ${dashboardCopiedKey === variantCopyKey ? "is-copied" : ""}`}
+                                  >
+                                    <code>{variant.serial}</code>
+                                    <button
+                                      className="dashboard-variant-value"
+                                      onClick={() => handleCopyDashboardVariant(card, field, variant)}
+                                      aria-label={`Copy ${field.label} for ${variant.serial}`}
+                                    >
+                                      {variant.value}
+                                    </button>
+                                    <button
+                                      className={`ghost dashboard-copy-button ${dashboardCopiedKey === variantCopyKey ? "is-copied" : ""}`}
+                                      onClick={() => handleCopyDashboardVariant(card, field, variant)}
+                                      aria-label={`Copy ${variant.serial} value`}
+                                    >
+                                      {dashboardCopiedKey === variantCopyKey ? "Copied" : "Copy"}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                        )}
+                      </article>
+                    );
+                  })}
                 </div>
               )}
             </section>
