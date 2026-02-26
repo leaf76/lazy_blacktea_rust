@@ -123,21 +123,51 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -n "${{ matrix.target }}" ]; then
-            npm run tauri build -- --config src-tauri/tauri.updater.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
-          else
-            npm run tauri build -- --config src-tauri/tauri.updater.conf.json --bundles "${{ matrix.bundles }}"
-          fi
+          run_build() {
+            if [ -n "${{ matrix.target }}" ]; then
+              npm run tauri build -- --config src-tauri/tauri.updater.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
+            else
+              npm run tauri build -- --config src-tauri/tauri.updater.conf.json --bundles "${{ matrix.bundles }}"
+            fi
+          }
+
+          for attempt in 1 2 3; do
+            if run_build; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Tauri build failed after 3 attempts."
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 20))
+            echo "Tauri build failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
+            sleep "$sleep_seconds"
+          done
 
       - name: Build Tauri bundles (unsigned)
         if: ${{ env.HAS_SIGNING_KEY != 'true' }}
         run: |
           set -euo pipefail
-          if [ -n "${{ matrix.target }}" ]; then
-            npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
-          else
-            npm run tauri build -- --bundles "${{ matrix.bundles }}"
-          fi
+          run_build() {
+            if [ -n "${{ matrix.target }}" ]; then
+              npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
+            else
+              npm run tauri build -- --bundles "${{ matrix.bundles }}"
+            fi
+          }
+
+          for attempt in 1 2 3; do
+            if run_build; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Tauri build failed after 3 attempts."
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 20))
+            echo "Tauri build failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
+            sleep "$sleep_seconds"
+          done
 
       - name: Zip macOS .app bundle(s)
         if: runner.os == 'macOS'
