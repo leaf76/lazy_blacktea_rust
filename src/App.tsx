@@ -213,6 +213,12 @@ import {
   findRunningBugreportTaskIdForSerial,
   resolveBugreportPanelTaskId,
 } from "./bugreportTaskRecovery";
+import {
+  buildBugreportDeviceCards,
+  getBugreportGenerateLabel,
+  summarizeBugreportCards,
+  type BugreportCardStatus,
+} from "./bugreportPage";
 import { parseUiNodes, pickUiNodeAtPoint } from "./ui_bounds";
 import {
   applyDroppedPaths,
@@ -294,6 +300,24 @@ const SHARED_LOG_FILTERS_STORAGE_KEY = "lazy_blacktea_shared_log_filters_v1";
 const LOGCAT_PRESETS_STORAGE_KEY = "logcat_presets";
 const LOGCAT_PRESETS_LEGACY_MIGRATION_KEY = "lazy_blacktea_logcat_presets_migrated_v1";
 const BUGREPORT_PRESETS_STORAGE_KEY = "bugreport_log_presets_v1";
+
+const BUGREPORT_STATUS_LABEL: Record<BugreportCardStatus, string> = {
+  idle: "Idle",
+  running: "Running",
+  success: "Success",
+  error: "Error",
+  cancelled: "Cancelled",
+  interrupted: "Interrupted",
+};
+
+const BUGREPORT_STATUS_TONE: Record<BugreportCardStatus, "idle" | "busy" | "ok" | "warn" | "error"> = {
+  idle: "idle",
+  running: "busy",
+  success: "ok",
+  error: "error",
+  cancelled: "warn",
+  interrupted: "warn",
+};
 
 type StoredSharedLogFiltersV1 = {
   levels?: Record<string, unknown>;
@@ -1548,6 +1572,7 @@ function App() {
   const [updateLastCheckSource, setUpdateLastCheckSource] = useState<"auto" | "manual" | null>(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [taskCompletionNotices, setTaskCompletionNotices] = useState<TaskCompletionNotice[]>([]);
+  const [taskCompletionPathsExpanded, setTaskCompletionPathsExpanded] = useState(false);
   const applyUpdateCheckResult = (source: "auto" | "manual", result: UpdateCheckResult) => {
     if (result.status === "update_available") {
       setUpdateAvailable(result.update);
@@ -1879,7 +1904,6 @@ function App() {
   }, [appIconsByKey]);
   const appIconQueueRef = useRef<{ key: string; serial: string; app: AppInfo }[]>([]);
   const appIconInFlightRef = useRef(0);
-  const [bugreportProgress, setBugreportProgress] = useState<number | null>(null);
   const [bugreportResult, setBugreportResult] = useState<BugreportResult | null>(null);
   const [latestBugreportTaskId, setLatestBugreportTaskId] = useState<string | null>(null);
   const [bugreportLogSourcePath, setBugreportLogSourcePath] = useState("");
@@ -2242,18 +2266,29 @@ function App() {
     }
     return Object.values(latestBugreportTask.devices).sort((a, b) => a.serial.localeCompare(b.serial));
   }, [latestBugreportTask]);
-  const latestBugreportProgress = useMemo(() => {
-    if (!latestBugreportEntries.length) {
-      return null;
-    }
-    const values = latestBugreportEntries
-      .map((entry) => entry.progress)
-      .filter((value): value is number => value != null);
-    if (!values.length) {
-      return null;
-    }
-    return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
-  }, [latestBugreportEntries]);
+  const bugreportCards = useMemo(
+    () => buildBugreportDeviceCards(selectedSerials, devices, latestBugreportTask),
+    [selectedSerials, devices, latestBugreportTask],
+  );
+  const bugreportCardSummary = useMemo(
+    () => summarizeBugreportCards(bugreportCards),
+    [bugreportCards],
+  );
+  const bugreportGenerateLabel = useMemo(
+    () => getBugreportGenerateLabel(bugreportCardSummary.selected, bugreportCardSummary.running),
+    [bugreportCardSummary.selected, bugreportCardSummary.running],
+  );
+  const bugreportOutputPaths = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          bugreportCards
+            .map((card) => card.output_path)
+            .filter((path): path is string => Boolean(path)),
+        ),
+      ),
+    [bugreportCards],
+  );
   const bugreportAnalysisTargets = useMemo(() => {
     const entries = latestBugreportEntries.filter((entry) => entry.output_path);
     if (entries.length > 0) {
@@ -2773,6 +2808,18 @@ function App() {
     [taskState.items],
   );
   const activeTaskCompletionNotice = taskCompletionNotices[0] ?? null;
+  const activeCompletionOutputPaths = activeTaskCompletionNotice?.outputPaths ?? [];
+  const visibleCompletionOutputPaths = useMemo(
+    () =>
+      taskCompletionPathsExpanded
+        ? activeCompletionOutputPaths
+        : activeCompletionOutputPaths.slice(0, 3),
+    [activeCompletionOutputPaths, taskCompletionPathsExpanded],
+  );
+
+  useEffect(() => {
+    setTaskCompletionPathsExpanded(false);
+  }, [activeTaskCompletionNotice?.taskId]);
 
   useEffect(() => {
     if (!logcatPresetSelected) {
@@ -3470,12 +3517,30 @@ function App() {
   };
 
   const closeTaskCompletionModal = () => {
+    setTaskCompletionPathsExpanded(false);
     setTaskCompletionNotices((prev) => prev.slice(1));
   };
 
   const openTaskCenterFromCompletionModal = () => {
     closeTaskCompletionModal();
     navigate("/tasks");
+  };
+
+  const handleOpenCompletionOutputPath = async (path: string) => {
+    try {
+      await openPath(path);
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleCopyCompletionOutputPath = async (path: string) => {
+    try {
+      await writeText(path);
+      pushToast("Path copied.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
   };
 
   useEffect(() => {
@@ -4536,9 +4601,6 @@ function App() {
     });
     const unlistenBugreportProgress = listen<BugreportProgress>("bugreport-progress", (event) => {
       const payload = event.payload;
-      if (!activeSerial || payload.serial === activeSerial) {
-        setBugreportProgress(payload.progress);
-      }
       const taskId = findRunningBugreportTaskIdForSerial(taskStateRef.current.items, payload.serial);
       if (taskId) {
         dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: payload.trace_id });
@@ -4558,7 +4620,6 @@ function App() {
       const payload = event.payload as { trace_id?: string; result?: BugreportResult };
       if (payload?.result) {
         setBugreportResult(payload.result);
-        setBugreportProgress(payload.result.progress ?? null);
       }
       const serial = payload?.result?.serial;
       if (!serial) {
@@ -5437,105 +5498,184 @@ function App() {
     }
   };
 
-	  const handleBugreport = async () => {
-	    if (!selectedSerials.length) {
-	      pushToast("Select at least one device for bugreport.", "error");
-	      return;
-	    }
-	    let outputDir = config?.output_path || "";
-	    if (!outputDir) {
-      const selected = await openDialog({
-        title: "Select output folder",
-        directory: true,
-        multiple: false,
-      });
-      if (!selected || Array.isArray(selected)) {
-        return;
-	      }
-	      outputDir = selected;
-	    }
-	    const serials = Array.from(new Set(selectedSerials));
-	    const taskId = beginTask({
-	      kind: "bugreport",
-	      title: `Bugreport (${serials.length})`,
-	      serials,
-	    });
-	    setLatestBugreportTaskId(taskId);
-	    setBugreportResult(null);
-	    serials.forEach((serial) => {
-	      dispatchTasks({
-	        type: "TASK_UPDATE_DEVICE",
-	        id: taskId,
-	        serial,
-	        patch: { status: "running", progress: 0, message: "Starting bugreport…" },
-	      });
-	    });
-	    setBusy(true);
-	    setBugreportProgress(0);
-	    try {
-	      const results = await Promise.all(
-	        serials.map(async (serial) => {
-	          try {
-	            const response = await generateBugreport(serial, outputDir);
-	            setBugreportResult(response.data);
-	            return { serial, ok: true };
-	          } catch (error) {
-	            return { serial, ok: false, error };
-	          }
-	        }),
-	      );
-	      const failed = results.filter((item) => !item.ok);
-	      failed.forEach((item) => {
-	        dispatchTasks({
-	          type: "TASK_UPDATE_DEVICE",
-	          id: taskId,
-	          serial: item.serial,
-	          patch: { status: "error", progress: null, message: formatError(item.error) },
-	        });
-	        dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
-	      });
-	      pushToast(
-	        failed.length
-	          ? `Bugreport completed with ${failed.length} failures.`
-	          : `Bugreport completed for ${serials.length} device${serials.length > 1 ? "s" : ""}.`,
-	        failed.length ? "error" : "info",
-	      );
-	    } finally {
-	      setBusy(false);
-	    }
-	  };
+  const pickBugreportOutputDir = async (): Promise<string | null> => {
+    const configured = config?.output_path?.trim() ?? "";
+    if (configured) {
+      return configured;
+    }
+    const selected = await openDialog({
+      title: "Select output folder",
+      directory: true,
+      multiple: false,
+    });
+    if (!selected || Array.isArray(selected)) {
+      return null;
+    }
+    return selected;
+  };
 
-  const handleCancelBugreport = async () => {
-    if (!selectedSerials.length) {
+  const runBugreportForSerials = async (
+    serialsInput: string[],
+    options?: {
+      title?: string;
+      notifySuccess?: boolean;
+      setAsLatest?: boolean;
+    },
+  ) => {
+    const serials = Array.from(new Set(serialsInput.map((serial) => serial.trim()).filter(Boolean)));
+    if (!serials.length) {
+      pushToast("Select at least one device for bugreport.", "error");
+      return;
+    }
+
+    const outputDir = await pickBugreportOutputDir();
+    if (!outputDir) {
+      return;
+    }
+
+    const taskId = beginTask({
+      kind: "bugreport",
+      title: options?.title ?? `Bugreport (${serials.length})`,
+      serials,
+    });
+    if (options?.setAsLatest ?? true) {
+      setLatestBugreportTaskId(taskId);
+    }
+    setBugreportResult(null);
+    serials.forEach((serial) => {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: { status: "running", progress: 0, message: "Starting bugreport..." },
+      });
+    });
+
+    setBusy(true);
+    try {
+      const results = await Promise.all(
+        serials.map(async (serial) => {
+          try {
+            const response = await generateBugreport(serial, outputDir);
+            setBugreportResult(response.data);
+            return { serial, ok: true };
+          } catch (error) {
+            return { serial, ok: false, error };
+          }
+        }),
+      );
+
+      const failed = results.filter((item) => !item.ok);
+      failed.forEach((item) => {
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial: item.serial,
+          patch: { status: "error", progress: null, message: formatError(item.error) },
+        });
+      });
+      if (failed.length > 0) {
+        dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
+      }
+
+      if (options?.notifySuccess !== false || failed.length > 0) {
+        pushToast(
+          failed.length
+            ? `Bugreport completed with ${failed.length} failures.`
+            : `Bugreport completed for ${serials.length} device${serials.length > 1 ? "s" : ""}.`,
+          failed.length ? "error" : "info",
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelBugreportForSerials = async (serialsInput: string[]) => {
+    const serials = Array.from(new Set(serialsInput.map((serial) => serial.trim()).filter(Boolean)));
+    if (!serials.length) {
       pushToast("Select at least one device to cancel bugreport.", "error");
       return;
     }
-	    const serials = [...selectedSerials];
-	    try {
-	      await Promise.all(
-	        serials.map(async (serial) => {
-	          try {
-	            await cancelBugreport(serial);
-	            const taskId = findRunningBugreportTaskIdForSerial(taskStateRef.current.items, serial);
-	            if (taskId) {
-	              dispatchTasks({
-	                type: "TASK_UPDATE_DEVICE",
-	                id: taskId,
-	                serial,
-	                patch: { status: "cancelled", message: "Bugreport cancel requested." },
-	              });
-	              dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
-	            }
-	          } catch (error) {
-	            pushToast(formatError(error), "error");
-	          }
-	        }),
-	      );
-	      pushToast("Bugreport cancel requested.", "info");
-	    } catch (error) {
-	      pushToast(formatError(error), "error");
-	    }
-	  };
+
+    try {
+      await Promise.all(
+        serials.map(async (serial) => {
+          try {
+            await cancelBugreport(serial);
+            const taskId = findRunningBugreportTaskIdForSerial(taskStateRef.current.items, serial);
+            if (taskId) {
+              dispatchTasks({
+                type: "TASK_UPDATE_DEVICE",
+                id: taskId,
+                serial,
+                patch: { status: "cancelled", message: "Bugreport cancel requested." },
+              });
+              dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
+            }
+          } catch (error) {
+            pushToast(formatError(error), "error");
+          }
+        }),
+      );
+      pushToast(
+        serials.length === 1 ? "Bugreport cancel requested for 1 device." : "Bugreport cancel requested.",
+        "info",
+      );
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleBugreport = async () => {
+    if (!selectedSerials.length) {
+      pushToast("Select at least one device for bugreport.", "error");
+      return;
+    }
+    await runBugreportForSerials(selectedSerials, {
+      notifySuccess: true,
+      setAsLatest: true,
+    });
+  };
+
+  const handleRetryBugreport = async (serial: string) => {
+    await runBugreportForSerials([serial], {
+      title: `Bugreport Retry (${serial})`,
+      notifySuccess: true,
+      setAsLatest: true,
+    });
+  };
+
+  const handleCancelBugreport = async () => {
+    await cancelBugreportForSerials(selectedSerials);
+  };
+
+  const handleOpenBugreportOutputs = async () => {
+    const paths = Array.from(new Set(bugreportOutputPaths));
+    if (!paths.length) {
+      pushToast("No bugreport outputs available yet.", "error");
+      return;
+    }
+
+    let failed = 0;
+    for (const path of paths) {
+      try {
+        await openPath(path);
+      } catch (error) {
+        failed += 1;
+        pushToast(formatError(error), "error");
+      }
+    }
+
+    if (!failed) {
+      pushToast(`Opened ${paths.length} output path${paths.length > 1 ? "s" : ""}.`, "info");
+    } else if (failed < paths.length) {
+      pushToast(
+        `Opened ${paths.length - failed}/${paths.length} output path${paths.length > 1 ? "s" : ""}.`,
+        "error",
+      );
+    }
+  };
 
   const normalizeSharedLogFilterInput = (
     rawValue: string,
@@ -13831,108 +13971,170 @@ function App() {
             <Route
               path="/bugreport"
               element={
-                <div className="page-section">
+                <div className="page-section bugreport-page">
                   <div className="page-header">
                     <div>
                       <h1>Bugreport</h1>
-                      <p className="muted">Generate bugreports with progress tracking.</p>
+                      <p className="muted">Batch bugreport generation with per-device progress and recovery actions.</p>
                     </div>
                   </div>
                   <div className="stack">
-                    <section className="panel">
-                      <div className="panel-header">
-                        <h2>Bugreport</h2>
-                        <span>{selectedSummaryLabel}</span>
-                      </div>
-                      <div className="button-row">
-                        <button onClick={handleBugreport} disabled={busy || selectedSerials.length === 0}>
-                          Generate Bugreport
-                        </button>
-                        <button onClick={handleCancelBugreport} disabled={busy || selectedSerials.length === 0}>
-                          Cancel
-                        </button>
-                      </div>
-                      {latestBugreportTask ? (
-                        <div className="stack">
-                          <div className="progress">
-                            <div className="progress-bar">
-                              <div
-                                className="progress-fill"
-                                style={{ width: `${latestBugreportProgress ?? 0}%` }}
-                              />
-                            </div>
-                            <span>
-                              {latestBugreportProgress != null ? `${latestBugreportProgress}%` : "Idle"}
-                            </span>
+                    {bugreportCardSummary.selected > 0 ? (
+                      <section className="panel bugreport-panel">
+                        <div className="panel-header">
+                          <h2>Batch Run</h2>
+                          <span>{selectedSummaryLabel}</span>
+                        </div>
+                        <div className="bugreport-toolbar">
+                          <div className="bugreport-toolbar-copy">
+                            <p className="muted">
+                              Target devices come from the global selector in the top bar.
+                            </p>
                           </div>
-                          <div className="task-devices">
-                            {latestBugreportEntries.map((entry) => {
-                              const entryTone =
-                                entry.status === "running"
-                                  ? "busy"
-                                  : entry.status === "success"
-                                    ? "ok"
-                                    : entry.status === "cancelled" || entry.status === "interrupted"
-                                      ? "warn"
-                                      : "error";
-                              return (
-                                <div
-                                  key={entry.serial}
-                                  className="task-device-row"
-                                  tabIndex={0}
-                                  onKeyDown={(event) =>
-                                    openDeviceQuickContextMenuFromKeyboard(event, entry.serial, {
-                                      source: "task",
-                                      outputPath: entry.output_path ?? null,
-                                    })
-                                  }
-                                  onContextMenu={(event) =>
-                                    openDeviceQuickContextMenuFromPointer(event, entry.serial, {
-                                      source: "task",
-                                      outputPath: entry.output_path ?? null,
-                                      showSelectionHint: true,
-                                    })
-                                  }
-                                >
-                                  <div className="task-device-main">
-                                    <strong>{entry.serial}</strong>
-                                    <span className={`status-pill ${entryTone}`}>{entry.status}</span>
-                                    {entry.progress != null && (
-                                      <span className="muted">{Math.round(entry.progress)}%</span>
-                                    )}
-                                    {entry.message && <span className="muted">{entry.message}</span>}
-                                  </div>
-                                  <div className="task-device-meta">
-                                    {entry.output_path && (
-                                      <button className="ghost" onClick={() => openPath(entry.output_path!)}>
-                                        Open output
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                              );
-                            })}
+                          <div className="button-row compact bugreport-toolbar-actions">
+                            <button
+                              onClick={() => void handleBugreport()}
+                              disabled={busy || bugreportCardSummary.selected === 0 || bugreportCardSummary.running > 0}
+                            >
+                              {bugreportGenerateLabel}
+                            </button>
+                            <button
+                              className="ghost"
+                              onClick={() => void handleCancelBugreport()}
+                              disabled={bugreportCardSummary.running === 0}
+                            >
+                              Cancel Running
+                            </button>
+                            <button
+                              className="ghost"
+                              onClick={() => void handleOpenBugreportOutputs()}
+                              disabled={busy || bugreportOutputPaths.length === 0}
+                            >
+                              Open Outputs ({bugreportOutputPaths.length})
+                            </button>
                           </div>
                         </div>
-                      ) : (
-                        <>
-                          <div className="progress">
-                            <div className="progress-bar">
-                              <div className="progress-fill" style={{ width: `${bugreportProgress ?? 0}%` }} />
-                            </div>
-                            <span>{bugreportProgress != null ? `${bugreportProgress}%` : "Idle"}</span>
-                          </div>
-                          {bugreportResult && (
-                            <div className="output-block">
-                              <h3>Last Result</h3>
-                              <p>Status: {bugreportResult.success ? "Success" : "Failed"}</p>
-                              <p>Output: {bugreportResult.output_path ?? "--"}</p>
-                              <p>Error: {bugreportResult.error ?? "--"}</p>
-                            </div>
+
+                        <div className="bugreport-batch-strip" role="status" aria-live="polite">
+                          <strong>Batch Status</strong>
+                          <span className="badge">{bugreportCardSummary.selected} selected</span>
+                          <span className="badge">{bugreportCardSummary.online} online</span>
+                          <span className="badge">{bugreportCardSummary.running} running</span>
+                          <span className="badge">{bugreportCardSummary.success} success</span>
+                          <span className="badge">{bugreportCardSummary.error} errors</span>
+                          {(bugreportCardSummary.cancelled > 0 || bugreportCardSummary.interrupted > 0) && (
+                            <span className="badge">
+                              {bugreportCardSummary.cancelled + bugreportCardSummary.interrupted} cancelled/interrupted
+                            </span>
                           )}
-                        </>
-                      )}
-                    </section>
+                        </div>
+
+                        {bugreportCardSummary.offline > 0 && (
+                          <div className="inline-alert info">
+                            <strong>{bugreportCardSummary.offline} offline device(s) selected.</strong>
+                            <span>They remain visible here and will fail or be skipped until they reconnect.</span>
+                          </div>
+                        )}
+
+                        <div className="bugreport-card-grid" role="list">
+                          {bugreportCards.map((card) => {
+                            const statusTone = BUGREPORT_STATUS_TONE[card.status];
+                            const statusLabel = BUGREPORT_STATUS_LABEL[card.status];
+                            const progressValue =
+                              card.progress ?? (card.status === "running" ? 36 : card.status === "success" ? 100 : 0);
+                            const progressLabel =
+                              card.progress != null
+                                ? `${card.progress}%`
+                                : card.status === "running"
+                                  ? "Running..."
+                                  : statusLabel;
+                            return (
+                              <article
+                                key={card.serial}
+                                role="listitem"
+                                className={`bugreport-card bugreport-card-${card.status}`}
+                                tabIndex={0}
+                                onKeyDown={(event) =>
+                                  openDeviceQuickContextMenuFromKeyboard(event, card.serial, {
+                                    source: "task",
+                                    outputPath: card.output_path,
+                                  })
+                                }
+                                onContextMenu={(event) =>
+                                  openDeviceQuickContextMenuFromPointer(event, card.serial, {
+                                    source: "task",
+                                    outputPath: card.output_path,
+                                    showSelectionHint: true,
+                                  })
+                                }
+                              >
+                                <div className="bugreport-card-head">
+                                  <div className="bugreport-card-title">
+                                    <strong>{card.display_name}</strong>
+                                    <span className="muted">
+                                      <code>{card.serial}</code> · {card.online ? "Online" : "Offline"}
+                                    </span>
+                                  </div>
+                                  <span className={`status-pill ${statusTone}`}>{statusLabel}</span>
+                                </div>
+                                <div className="bugreport-card-progress">
+                                  <div className="progress-bar">
+                                    <div
+                                      className={`progress-fill${
+                                        card.status === "running" && card.progress == null
+                                          ? " bugreport-progress-indeterminate"
+                                          : ""
+                                      }`}
+                                      style={{ width: `${progressValue}%` }}
+                                    />
+                                  </div>
+                                  <span className="muted">{progressLabel}</span>
+                                </div>
+                                {card.message && <p className="muted bugreport-card-message">{card.message}</p>}
+                                <div className="button-row compact bugreport-card-actions">
+                                  {card.output_path && (
+                                    <button className="ghost" onClick={() => openPath(card.output_path!)}>
+                                      Open output
+                                    </button>
+                                  )}
+                                  {card.can_cancel && (
+                                    <button
+                                      className="ghost"
+                                      onClick={() => void cancelBugreportForSerials([card.serial])}
+                                    >
+                                      Cancel
+                                    </button>
+                                  )}
+                                  {card.can_retry && (
+                                    <button onClick={() => void handleRetryBugreport(card.serial)} disabled={busy}>
+                                      Retry
+                                    </button>
+                                  )}
+                                </div>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    ) : (
+                      <section className="panel empty-state bugreport-empty-state">
+                        <div>
+                          <h2>No devices selected</h2>
+                          <p className="muted">
+                            Use the top global device selector to choose targets, or open Device Manager to adjust
+                            selection.
+                          </p>
+                        </div>
+                        <div className="button-row">
+                          <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+                            Go to Device Manager
+                          </button>
+                          <button onClick={refreshDevices} disabled={busy}>
+                            Refresh Devices
+                          </button>
+                        </div>
+                      </section>
+                    )}
                   </div>
                 </div>
               }
@@ -15405,6 +15607,44 @@ function App() {
                 <span className="badge">{activeTaskCompletionNotice.summary.counts.interrupted} interrupted</span>
               )}
             </div>
+            {activeCompletionOutputPaths.length > 0 && (
+              <div className="task-completion-output">
+                <div className="task-completion-output-header">
+                  <strong>Output Paths</strong>
+                  {activeCompletionOutputPaths.length > 3 && (
+                    <button
+                      className="ghost"
+                      onClick={() => setTaskCompletionPathsExpanded((prev) => !prev)}
+                      aria-expanded={taskCompletionPathsExpanded}
+                    >
+                      {taskCompletionPathsExpanded
+                        ? "Show less"
+                        : `Show all (${activeCompletionOutputPaths.length})`}
+                    </button>
+                  )}
+                </div>
+                <div className="task-completion-output-list" role="list">
+                  {visibleCompletionOutputPaths.map((item) => (
+                    <div className="task-completion-output-row" role="listitem" key={`${item.serial}:${item.path}`}>
+                      <div className="task-completion-output-main">
+                        <span className="badge">{item.serial}</span>
+                        <span className="task-completion-output-path muted" title={item.path}>
+                          {item.path}
+                        </span>
+                      </div>
+                      <div className="button-row compact task-completion-output-actions">
+                        <button className="ghost" onClick={() => void handleOpenCompletionOutputPath(item.path)}>
+                          Open
+                        </button>
+                        <button className="ghost" onClick={() => void handleCopyCompletionOutputPath(item.path)}>
+                          Copy path
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {taskCompletionNotices.length > 1 && (
               <p className="muted">
                 {taskCompletionNotices.length - 1} more completion alert

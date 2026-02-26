@@ -70,13 +70,18 @@ describe("buildTaskCompletionNotice", () => {
     const running = createTask({ id: "1", kind: "apk_install", title: "Install APK", serials: ["A", "B"] });
     const withA = tasksReducer(
       { items: [running], max_items: 50 },
-      { type: "TASK_UPDATE_DEVICE", id: "1", serial: "A", patch: { status: "success" } },
+      {
+        type: "TASK_UPDATE_DEVICE",
+        id: "1",
+        serial: "A",
+        patch: { status: "success", output_path: "/tmp/A.apk" },
+      },
     );
     const withB = tasksReducer(withA, {
       type: "TASK_UPDATE_DEVICE",
       id: "1",
       serial: "B",
-      patch: { status: "success" },
+      patch: { status: "success", output_path: "/tmp/B.apk" },
     });
     const completed = tasksReducer(withB, {
       type: "TASK_RECOMPUTE_STATUS",
@@ -93,5 +98,21 @@ describe("buildTaskCompletionNotice", () => {
     expect(payload!.countsLabel).toContain("2 devices");
     expect(payload!.summary.counts.success).toBe(2);
     expect(payload!.finishedAt).toBe(1700000000000);
+    expect(payload!.outputPaths).toEqual([
+      { serial: "A", path: "/tmp/A.apk" },
+      { serial: "B", path: "/tmp/B.apk" },
+    ]);
+  });
+
+  it("returns empty outputPaths when no device has output path", () => {
+    const running = createTask({ id: "2", kind: "shell", title: "Shell", serials: ["C"] });
+    const completed = tasksReducer(
+      { items: [running], max_items: 50 },
+      { type: "TASK_SET_STATUS", id: "2", status: "success", finished_at: 1700000000001 },
+    ).items[0];
+
+    const payload = buildTaskCompletionNotice(completed);
+    expect(payload).not.toBeNull();
+    expect(payload!.outputPaths).toEqual([]);
   });
 });

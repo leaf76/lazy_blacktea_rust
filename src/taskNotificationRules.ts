@@ -16,6 +16,7 @@ export type TaskCompletionNotice = {
   countsLabel: string;
   body: string;
   summary: ReturnType<typeof summarizeTask>;
+  outputPaths: Array<{ serial: string; path: string }>;
   traceId: string | null;
   finishedAt: number | null;
 };
@@ -57,6 +58,19 @@ const buildStatusLabel = (status: Exclude<TaskStatus, "running">): string => {
   return "Error";
 };
 
+const collectOutputPaths = (task: TaskItem): Array<{ serial: string; path: string }> => {
+  return Object.entries(task.devices)
+    .map(([serial, entry]) => {
+      const path = entry.output_path?.trim() ?? "";
+      if (!path) {
+        return null;
+      }
+      return { serial, path };
+    })
+    .filter((item): item is { serial: string; path: string } => item !== null)
+    .sort((left, right) => left.serial.localeCompare(right.serial));
+};
+
 export const buildDesktopNotificationForTask = (task: TaskItem): DesktopTaskNotification | null => {
   const payload = buildTaskCompletionNotice(task);
   if (!payload) {
@@ -79,6 +93,7 @@ export const buildTaskCompletionNotice = (task: TaskItem): TaskCompletionNotice 
   const statusLabel = buildStatusLabel(task.status);
   const countsLabel = buildCountsLabel(summary);
   const body = `${statusLabel} - ${countsLabel}. Check Task Center.`;
+  const outputPaths = collectOutputPaths(task);
 
   return {
     taskId: task.id,
@@ -89,6 +104,7 @@ export const buildTaskCompletionNotice = (task: TaskItem): TaskCompletionNotice 
     countsLabel,
     body,
     summary,
+    outputPaths,
     traceId: task.trace_id ?? null,
     finishedAt: task.finished_at ?? null,
   };

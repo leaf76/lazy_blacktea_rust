@@ -5017,6 +5017,146 @@ textarea:disabled {
   margin-top: 8px;
 }
 
+.bugreport-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bugreport-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.bugreport-toolbar-copy {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.bugreport-toolbar-actions {
+  flex-wrap: wrap;
+}
+
+.bugreport-batch-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--dashboard-hero-border);
+  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--color-bg-subtle) 65%);
+}
+
+.bugreport-batch-strip strong {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.bugreport-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.bugreport-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--color-bg-subtle);
+}
+
+.bugreport-card-running {
+  border-color: var(--alert-info-border);
+}
+
+.bugreport-card-success {
+  border-color: rgba(22, 163, 74, 0.45);
+  background: linear-gradient(160deg, rgba(22, 163, 74, 0.12), var(--color-bg-subtle) 60%);
+}
+
+.bugreport-card-error {
+  border-color: var(--alert-error-border);
+}
+
+.bugreport-card-cancelled,
+.bugreport-card-interrupted {
+  border-color: rgba(217, 119, 6, 0.45);
+}
+
+.bugreport-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bugreport-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.bugreport-card-title strong,
+.bugreport-card-title code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bugreport-card-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bugreport-card-progress .progress-bar {
+  flex: 1 1 auto;
+}
+
+.bugreport-card-message {
+  margin: 0;
+}
+
+.bugreport-card-actions {
+  justify-content: flex-end;
+}
+
+.bugreport-progress-indeterminate {
+  width: 36% !important;
+  animation: bugreportProgressIndeterminate 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes bugreportProgressIndeterminate {
+  from {
+    transform: translateX(-8%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (max-width: 980px) {
+  .bugreport-toolbar-actions {
+    width: 100%;
+  }
+
+  .bugreport-toolbar-actions button {
+    flex: 1 1 200px;
+  }
+
+  .bugreport-card-grid {
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  }
+}
+
 .task-devices {
   display: flex;
   flex-direction: column;
@@ -5091,6 +5231,68 @@ textarea:disabled {
 
 .task-completion-modal {
   width: min(560px, 100%);
+}
+
+.task-completion-output {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px;
+  background: var(--color-bg-subtle);
+}
+
+.task-completion-output-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.task-completion-output-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-completion-output-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  padding: 8px 10px;
+  background: var(--color-bg-panel);
+}
+
+.task-completion-output-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-completion-output-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-completion-output-actions {
+  flex-wrap: nowrap;
+}
+
+@media (max-width: 760px) {
+  .task-completion-output-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .task-completion-output-actions {
+    justify-content: flex-end;
+  }
 }
 
 .action-targets {
