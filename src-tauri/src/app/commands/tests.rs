@@ -601,6 +601,41 @@ fn validate_generate_bugreport_inputs_rejects_empty_output_dir() {
 }
 
 #[test]
+fn build_bugreport_filename_prefers_device_model_and_includes_serial() {
+    let filename =
+        build_bugreport_filename("emulator-5554", Some("Pixel 8 Pro"), "20260226_120000");
+    assert_eq!(
+        filename,
+        "bugreport_Pixel_8_Pro_emulator-5554_20260226_120000.zip"
+    );
+}
+
+#[test]
+fn build_bugreport_filename_sanitizes_model_and_serial() {
+    let filename = build_bugreport_filename(
+        "192.168.0.1:5555",
+        Some("Galaxy/S24 Ultra"),
+        "20260226_120001",
+    );
+    assert_eq!(
+        filename,
+        "bugreport_Galaxy_S24_Ultra_192.168.0.1_5555_20260226_120001.zip"
+    );
+}
+
+#[test]
+fn build_bugreport_filename_falls_back_to_serial_when_model_missing() {
+    let filename = build_bugreport_filename("ABC:123", Some("   "), "20260226_120002");
+    assert_eq!(filename, "bugreport_ABC_123_ABC_123_20260226_120002.zip");
+}
+
+#[test]
+fn build_bugreport_filename_falls_back_to_serial_when_model_unavailable() {
+    let filename = build_bugreport_filename("ABC:123", None, "20260226_120003");
+    assert_eq!(filename, "bugreport_ABC_123_ABC_123_20260226_120003.zip");
+}
+
+#[test]
 fn prepare_bugreport_logcat_inner_rejects_empty_path() {
     let err = prepare_bugreport_logcat_inner(" ", "trace-8").expect_err("err");
     assert_eq!(err.code, "ERR_VALIDATION");

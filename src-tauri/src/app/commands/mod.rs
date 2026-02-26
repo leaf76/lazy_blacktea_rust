@@ -973,6 +973,58 @@ fn validate_generate_bugreport_inputs(
     Ok(())
 }
 
+fn load_device_model_for_bugreport_filename(
+    adb_program: &str,
+    serial: &str,
+    trace_id: &str,
+) -> Option<String> {
+    let args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "getprop".to_string(),
+        "ro.product.model".to_string(),
+    ];
+    match run_command_with_timeout(adb_program, &args, Duration::from_secs(5), trace_id) {
+        Ok(output) => {
+            if output.exit_code.unwrap_or_default() != 0 {
+                warn!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    exit_code = ?output.exit_code,
+                    "Failed to fetch device model for bugreport filename"
+                );
+                return None;
+            }
+            let model = output.stdout.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        }
+        Err(err) => {
+            warn!(
+                trace_id = %trace_id,
+                serial = %serial,
+                code = %err.code,
+                "Failed to fetch device model for bugreport filename"
+            );
+            None
+        }
+    }
+}
+
+fn build_bugreport_filename(serial: &str, device_model: Option<&str>, timestamp: &str) -> String {
+    let safe_serial = sanitize_filename_component(serial);
+    let safe_device_name = device_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(sanitize_filename_component)
+        .unwrap_or_else(|| safe_serial.clone());
+    format!("bugreport_{safe_device_name}_{safe_serial}_{timestamp}.zip")
+}
+
 fn parse_string_array_from_json(value: Option<&serde_json::Value>, limit: usize) -> Vec<String> {
     let Some(items) = value.and_then(serde_json::Value::as_array) else {
         return Vec::new();
@@ -6031,8 +6083,9 @@ pub fn generate_bugreport(
     fs::create_dir_all(&output_dir).map_err(|err| {
         AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
     })?;
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("bugreport_{}_{}.zip", serial, timestamp);
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let device_model = load_device_model_for_bugreport_filename(&adb_program, &serial, &trace_id);
+    let filename = build_bugreport_filename(&serial, device_model.as_deref(), &timestamp);
     let output_path = PathBuf::from(output_dir).join(filename);
 
     let (cancel_flag, child) = reserve_bugreport_handle(&serial, &state, &trace_id)?;
