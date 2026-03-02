@@ -14576,7 +14576,7 @@ function App() {
             <Route
               path="/bugreport-logviewer"
               element={
-	                <div className="page-section page-section-stretch bugreport-logviewer-page bugreport-logviewer-workspace">
+                <div className="page-section page-section-stretch bugreport-logviewer-page bugreport-logviewer-workspace">
                   <div className="page-header">
                     <div>
                       <h1>Bugreport Log Viewer</h1>
@@ -14599,97 +14599,101 @@ function App() {
                       </button>
                     </div>
                   </div>
-	                  <section className="panel panel-stretch bugreport-log-panel bugreport-log-panel-full">
-                    <div className="panel-header">
-                      <div>
-                        <h2>Log Output</h2>
-                        <span>
-                          {bugreportLogSummary
-                            ? `${bugreportLogRows.length.toLocaleString()} / ${bugreportLogSummary.total_rows.toLocaleString()} rows loaded`
-                            : bugreportLogRows.length
-                              ? `${bugreportLogRows.length.toLocaleString()} rows loaded`
-                              : "No rows yet"}
-                        </span>
-                      </div>
-                      <div className="button-row compact">
-                        <button
-                          className="ghost"
-                          onClick={() => {
-                            if (bugreportLogSummary) {
-                              void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
-                            }
-                          }}
-                          disabled={!bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning}
-                        >
-                          Refresh
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (bugreportLogSummary) {
-                              void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
-                            }
-                          }}
-                          disabled={
-                            !bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning || !bugreportLogHasMore
-                          }
-                        >
-                          Load more
-                        </button>
-                        {bugreportLogLoadAllRunning ? (
-                          <button className="ghost" onClick={handleBugreportLogStopLoadAll}>
-                            Stop
-                          </button>
-                        ) : (
+                  <section className="panel panel-stretch bugreport-log-panel bugreport-log-panel-full">
+                    <div className="bugreport-log-header-shell">
+                      <div className="bugreport-log-header-top">
+                        <div className="bugreport-log-title-block">
+                          <h2>Log Output</h2>
+                          <span>
+                            {bugreportLogSummary
+                              ? `${bugreportLogRows.length.toLocaleString()} / ${bugreportLogSummary.total_rows.toLocaleString()} rows loaded`
+                              : bugreportLogRows.length
+                                ? `${bugreportLogRows.length.toLocaleString()} rows loaded`
+                                : "No rows yet"}
+                          </span>
+                        </div>
+                        <div className="button-row compact bugreport-log-actions-group">
                           <button
                             className="ghost"
-                            onClick={() => void handleBugreportLogLoadAll()}
-                            disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
+                            onClick={() => {
+                              if (bugreportLogSummary) {
+                                void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
+                              }
+                            }}
+                            disabled={!bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning}
                           >
-                            Load all
+                            Refresh
                           </button>
+                          <button
+                            onClick={() => {
+                              if (bugreportLogSummary) {
+                                void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+                              }
+                            }}
+                            disabled={
+                              !bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning || !bugreportLogHasMore
+                            }
+                          >
+                            Load more
+                          </button>
+                          {bugreportLogLoadAllRunning ? (
+                            <button className="ghost" onClick={handleBugreportLogStopLoadAll}>
+                              Stop
+                            </button>
+                          ) : (
+                            <button
+                              className="ghost"
+                              onClick={() => void handleBugreportLogLoadAll()}
+                              disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
+                            >
+                              Load all
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="bugreport-log-meta-strip">
+                        <div className="bugreport-log-meta-main">
+                          <div className="bugreport-log-source-inline-row">
+                            <span className="badge">Source</span>
+                            <span className="bugreport-log-source-path">
+                              {bugreportLogSourcePath ? bugreportLogSourcePath : "No file selected. Click Browse to load."}
+                            </span>
+                          </div>
+                          {bugreportLogSummary && (
+                            <div className="bugreport-log-source-inline-meta muted">
+                              Rows: {bugreportLogSummary.total_rows.toLocaleString()} · Range: {bugreportLogSummary.min_ts ?? "--"}{" "}
+                              {"->"} {bugreportLogSummary.max_ts ?? "--"}
+                            </div>
+                          )}
+                        </div>
+                        {bugreportAnalysisTargets.length > 0 && (
+                          <details className="output-block bugreport-log-recent bugreport-log-recent-inline">
+                            <summary>Recent outputs</summary>
+                            <div className="form-row">
+                              <label>Output</label>
+                              <select
+                                value={bugreportLogSourcePath}
+                                onChange={(event) => {
+                                  void loadBugreportLogFromPath(event.target.value);
+                                }}
+                              >
+                                <option value="">Select output</option>
+                                {bugreportAnalysisTargets.map((item) => (
+                                  <option key={item.output_path} value={item.output_path}>
+                                    {item.serial} - {item.output_path}
+                                  </option>
+                                ))}
+                                {bugreportLogSourcePath && !bugreportLogOutputPaths.has(bugreportLogSourcePath) && (
+                                  <option value={bugreportLogSourcePath}>
+                                    Custom - {bugreportLogSourcePath}
+                                  </option>
+                                )}
+                              </select>
+                            </div>
+                          </details>
                         )}
                       </div>
-                    </div>
-
-                    <div className="bugreport-log-source-inline">
-                      <div className="bugreport-log-source-inline-row">
-                        <span className="badge">Source</span>
-                        <span className="bugreport-log-source-path">
-                          {bugreportLogSourcePath ? bugreportLogSourcePath : "No file selected. Click Browse to load."}
-                        </span>
-                      </div>
-                      {bugreportLogSummary && (
-                        <div className="bugreport-log-source-inline-meta muted">
-                          Rows: {bugreportLogSummary.total_rows.toLocaleString()} · Range: {bugreportLogSummary.min_ts ?? "--"}{" "}
-                          {"->"} {bugreportLogSummary.max_ts ?? "--"}
-                        </div>
-                      )}
-                      {bugreportAnalysisTargets.length > 0 && (
-                        <details className="output-block bugreport-log-recent">
-                          <summary>Recent outputs</summary>
-                          <div className="form-row">
-                            <label>Output</label>
-                            <select
-                              value={bugreportLogSourcePath}
-                              onChange={(event) => {
-                                void loadBugreportLogFromPath(event.target.value);
-                              }}
-                            >
-                              <option value="">Select output</option>
-                              {bugreportAnalysisTargets.map((item) => (
-                                <option key={item.output_path} value={item.output_path}>
-                                  {item.serial} - {item.output_path}
-                                </option>
-                              ))}
-                              {bugreportLogSourcePath && !bugreportLogOutputPaths.has(bugreportLogSourcePath) && (
-                                <option value={bugreportLogSourcePath}>
-                                  Custom - {bugreportLogSourcePath}
-                                </option>
-                              )}
-                            </select>
-                          </div>
-                        </details>
-                      )}
                     </div>
 
                     {bugreportLogError && (

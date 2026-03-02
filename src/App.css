@@ -2813,6 +2813,108 @@ button.ghost.icon-only {
   justify-content: space-between;
 }
 
+.bugreport-log-header-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-panel);
+}
+
+.bugreport-log-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bugreport-log-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bugreport-log-title-block h2 {
+  margin: 0;
+  line-height: 1.25;
+}
+
+.bugreport-log-title-block span {
+  color: var(--color-text-muted);
+  line-height: 1.45;
+}
+
+.bugreport-log-actions-group {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-subtle);
+}
+
+.bugreport-log-actions-group button {
+  flex: 0 0 auto;
+  min-width: 88px;
+}
+
+.bugreport-log-meta-strip {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-subtle);
+}
+
+.bugreport-log-meta-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bugreport-log-meta-main .bugreport-log-source-inline-row {
+  gap: 8px;
+}
+
+.bugreport-log-meta-main .bugreport-log-source-inline-meta {
+  margin: 0;
+  font-size: 11px;
+}
+
+.bugreport-log-recent-inline {
+  flex: 0 1 340px;
+  min-width: 240px;
+  padding: 8px;
+}
+
+.bugreport-log-recent-inline summary {
+  margin-bottom: 4px;
+}
+
+.bugreport-log-recent-inline .form-row {
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
+.bugreport-log-recent-inline .form-row > label:not(.toggle) {
+  flex: 0 0 auto;
+  width: auto;
+  text-align: left;
+}
+
+.bugreport-log-recent-inline .form-row > select {
+  min-width: 0;
+}
+
 .bugreport-log-source-inline {
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -2846,6 +2948,33 @@ button.ghost.icon-only {
 
 .bugreport-log-recent {
   margin: 0;
+}
+
+@media (max-width: 980px) {
+  .bugreport-log-header-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bugreport-log-actions-group {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .bugreport-log-actions-group button {
+    flex: 1 1 120px;
+    min-width: 0;
+  }
+
+  .bugreport-log-meta-strip {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bugreport-log-recent-inline {
+    width: 100%;
+    min-width: 0;
+  }
 }
 
 .bugreport-custom-view-active {
