@@ -697,6 +697,11 @@ textarea {
   gap: 14px;
 }
 
+.page-section-stretch {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .page-section.files-page {
   flex: 1 1 auto;
   min-height: 0;
@@ -704,6 +709,11 @@ textarea {
 
 .bugreport-logviewer-page {
   flex: 0 0 auto;
+}
+
+.bugreport-logviewer-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .page-header {
@@ -743,6 +753,11 @@ textarea {
 }
 
 .panel.files-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.panel-stretch {
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -2024,6 +2039,11 @@ textarea {
   gap: 12px;
 }
 
+.devices-workspace .device-manager-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .device-panel-meta {
   display: flex;
   align-items: center;
@@ -2088,6 +2108,12 @@ textarea {
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 2px;
+}
+
+.devices-workspace .device-list-stretch {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .device-list-header,
@@ -2489,6 +2515,15 @@ button.ghost.icon-only {
   gap: 12px;
 }
 
+.split-stretch {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.split-stretch > * {
+  min-height: 0;
+}
+
 .bugreport-log-panel {
   display: flex;
   flex-direction: column;
@@ -2498,6 +2533,11 @@ button.ghost.icon-only {
 
 .bugreport-log-panel-full {
   flex: 0 0 auto;
+}
+
+.bugreport-logviewer-workspace .bugreport-log-panel-full {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .bugreport-log-toolbar {
@@ -3178,6 +3218,16 @@ button.ghost.icon-only {
   min-height: 0;
 }
 
+.files-workspace .files-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.files-workspace .files-split {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 @media (max-width: 1100px) {
   .files-split {
     grid-template-columns: 1fr;
@@ -3323,6 +3373,17 @@ button.danger:hover:not(:disabled) {
   max-height: 520px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.apps-workspace .apps-split {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.apps-workspace .app-list {
+  max-height: none;
+  height: 100%;
+  min-height: 0;
 }
 
 .app-list-footer {
@@ -3504,6 +3565,12 @@ button.danger:hover:not(:disabled) {
 .preview-panel.app-details {
   max-height: 520px;
   overflow: auto;
+}
+
+.apps-workspace .preview-panel.app-details {
+  max-height: none;
+  height: 100%;
+  min-height: 0;
 }
 
 .app-details-header {
@@ -4406,6 +4473,14 @@ textarea:disabled {
   position: relative;
 }
 
+.logcat-workspace .logcat-output-wrapper-stretch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .logcat-output-actions {
   display: flex;
   align-items: center;
@@ -4837,6 +4912,12 @@ textarea:disabled {
   overflow-x: auto;
 }
 
+.logcat-workspace .logcat-output {
+  flex: 1 1 auto;
+  min-height: 280px;
+  height: auto;
+}
+
 .logcat-output.logcat-live {
   line-height: 16px;
 }
@@ -4856,6 +4937,12 @@ textarea:disabled {
   padding: 0;
 }
 
+.bugreport-logviewer-workspace .logcat-output.bugreport-log-output {
+  flex: 1 1 auto;
+  min-height: 320px;
+  height: auto;
+}
+
 .logcat-output.bugreport-log-output.bugreport-log-output-empty {
   padding: 8px;
 }
@@ -4865,6 +4952,10 @@ textarea:disabled {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.bugreport-logviewer-workspace .bugreport-log-output-shell {
+  min-height: 0;
 }
 
 .bugreport-log-findbar {
@@ -4976,8 +5067,23 @@ textarea:disabled {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
+.ui-inspector-workspace .inspector-split {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ui-inspector-workspace .inspector-pane {
+  min-height: 0;
+}
+
 .inspector-preview {
   max-height: min(70vh, 720px);
+}
+
+.ui-inspector-workspace .inspector-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
 }
 
 .inspector-preview img {
@@ -5042,6 +5148,12 @@ textarea:disabled {
   overflow: auto;
 }
 
+.ui-inspector-workspace .inspector-xml {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
 .inspector-xml pre {
   font-family: var(--font-code);
   font-size: 11px;
@@ -5061,6 +5173,12 @@ textarea:disabled {
   width: 100%;
   border-radius: 12px;
   background: var(--color-bg-panel);
+}
+
+.ui-inspector-workspace .ui-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
 }
 
 .toast-stack {

@@ -11639,7 +11639,7 @@ function App() {
             <Route
               path="/devices"
               element={
-                <div className="page-section">
+                <div className="page-section page-section-stretch devices-workspace">
                   <div className="page-header">
                     <div>
                       <h1>Device Manager</h1>
@@ -11651,7 +11651,7 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  <section className="panel logcat-panel device-manager-panel">
+                  <section className="panel panel-stretch logcat-panel device-manager-panel">
                     <div className="panel-header">
                       <div>
                         <h2>Devices</h2>
@@ -11720,7 +11720,7 @@ function App() {
                         <span className="device-selection-count muted">{selectedCount} selected</span>
                       </div>
                     </div>
-                    <div className="device-list">
+                    <div className="device-list device-list-stretch">
                       <div className="device-list-header">
                         <span />
                         <span>Device</span>
@@ -12654,7 +12654,7 @@ function App() {
 	            <Route
 	              path="/files"
 	              element={
-	                <div className="page-section files-page">
+	                <div className="page-section files-page page-section-stretch files-workspace">
 	                  {filesDropActive && (
 	                    <div className="file-drop-overlay">
 	                      <div className="file-drop-overlay-inner">
@@ -12669,7 +12669,7 @@ function App() {
                       <p className="muted">Browse device storage, download files, and upload files.</p>
                     </div>
                   </div>
-	                  <section className="panel files-panel">
+	                  <section className="panel panel-stretch files-panel">
 	                    <div className="panel-header">
 	                      <h2>Device Files</h2>
 	                      <span>{selectedSummaryLabel}</span>
@@ -12794,7 +12794,7 @@ function App() {
                       </div>
                       <span className="muted file-filter-meta">{fileFilterSummary}</span>
                     </div>
-                    <div className="split files-split">
+	                    <div className="split files-split split-stretch">
                       <div
                         className={filesViewMode === "grid" ? "file-grid" : "file-list"}
                         ref={filesListRef}
@@ -13213,14 +13213,14 @@ function App() {
             <Route
               path="/logcat"
               element={
-                <div className="page-section">
+                <div className="page-section page-section-stretch logcat-workspace">
                   <div className="page-header">
                     <div>
                       <h1>Logcat</h1>
                       <p className="muted">Filters, presets, and search for streaming logs.</p>
                     </div>
                   </div>
-	                  <section className="panel logcat-panel">
+	                  <section className="panel panel-stretch logcat-panel">
 	                    <div className="panel-header">
                         <div className="logcat-header-main">
 	                      <div>
@@ -13432,7 +13432,7 @@ function App() {
                           </span>
                         </div>
                       )}
-                    <div className="logcat-output-wrapper">
+                    <div className="logcat-output-wrapper logcat-output-wrapper-stretch">
                       <div className="logcat-output-actions">
                         <button
                           type="button"
@@ -13498,14 +13498,14 @@ function App() {
             <Route
               path="/ui-inspector"
               element={
-                <div className="page-section">
+                <div className="page-section page-section-stretch ui-inspector-workspace">
                   <div className="page-header">
                     <div>
                       <h1>UI Inspector</h1>
                       <p className="muted">Capture hierarchy, inspect XML, and export assets.</p>
                     </div>
                   </div>
-	                  <section className="panel">
+	                  <section className="panel panel-stretch">
 	                    <div className="panel-header">
 	                      <div>
 	                        <h2>Inspector Workspace</h2>
@@ -13552,8 +13552,8 @@ function App() {
 	                        <span>{uiExportResult}</span>
 	                      </div>
 	                    )}
-                    <div className="split inspector-split">
-                      <div className="panel-sub">
+                    <div className="split inspector-split split-stretch">
+                      <div className="panel-sub inspector-pane">
                         <div className="panel-header">
                           <h3>Screenshot</h3>
                           <span className="muted">
@@ -13725,7 +13725,7 @@ function App() {
                           </div>
                         )}
                       </div>
-                      <div className="panel-sub">
+                      <div className="panel-sub inspector-pane">
                         <div className="panel-header">
                           <h3>Hierarchy</h3>
                           <div className="button-row compact inspector-hierarchy-controls">
@@ -13821,14 +13821,14 @@ function App() {
             <Route
               path="/apps"
               element={
-                <div className="page-section">
+                <div className="page-section page-section-stretch apps-workspace">
                   <div className="page-header">
                     <div>
                       <h1>App Manager</h1>
                       <p className="muted">Search packages and execute common actions.</p>
                     </div>
                   </div>
-	                  <section className="panel">
+	                  <section className="panel panel-stretch">
 	                    <div className="panel-header">
 	                      <h2>App Management</h2>
 	                      <span>{selectedSummaryLabel}</span>
@@ -13883,7 +13883,7 @@ function App() {
 	                        );
 	                      })()}
                     </div>
-	                    <div className="split">
+	                    <div className="split split-stretch apps-split">
 	                      <div className="app-list" ref={appsListRef} role="list" aria-label="Apps">
 	                        {apps.length === 0 ? (
 	                          <p className="muted">No apps loaded. Click Load Apps.</p>
@@ -14576,7 +14576,7 @@ function App() {
             <Route
               path="/bugreport-logviewer"
               element={
-                <div className="page-section bugreport-logviewer-page">
+	                <div className="page-section page-section-stretch bugreport-logviewer-page bugreport-logviewer-workspace">
                   <div className="page-header">
                     <div>
                       <h1>Bugreport Log Viewer</h1>
@@ -14599,7 +14599,7 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  <section className="panel bugreport-log-panel bugreport-log-panel-full">
+	                  <section className="panel panel-stretch bugreport-log-panel bugreport-log-panel-full">
                     <div className="panel-header">
                       <div>
                         <h2>Log Output</h2>

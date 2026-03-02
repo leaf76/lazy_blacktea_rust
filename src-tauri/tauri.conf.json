@@ -14,7 +14,8 @@
       {
         "title": "Lazy Blacktea",
         "width": 1280,
-        "height": 760
+        "height": 760,
+        "maximized": true
       }
     ],
     "security": {
