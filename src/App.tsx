@@ -36,6 +36,8 @@ import type {
   AppConfig,
   AppBasicInfo,
   AppInfo,
+  BugreportExtractIndexSummary,
+  BugreportExtractTemplateKind,
   BugreportLogFilters,
   BugreportLogRow,
   BugreportLogSummary,
@@ -78,6 +80,7 @@ import {
   launchApp,
   launchScrcpy,
   mkdirDeviceDir,
+  prepareBugreportExtractIndex,
   prepareBugreportLogcat,
   deleteDevicePath,
   listApps,
@@ -88,6 +91,7 @@ import {
   previewLocalFile,
   pullDeviceFile,
   pushDeviceFile,
+  queryBugreportExtract,
   renameDevicePath,
   rebootDevices,
   resetConfig,
@@ -243,6 +247,17 @@ import {
   type UpdaterUpdateLike,
 } from "./updater";
 import { buildLogcatPopupCandidates, partitionLogcatPopupTargets } from "./logcatPopup";
+import {
+  BUGREPORT_CUSTOM_VIEW_TEMPLATE_KINDS,
+  BUGREPORT_CUSTOM_VIEWS_STORAGE_KEY,
+  DEFAULT_BUGREPORT_CUSTOM_VIEW_GROUP,
+  groupBugreportCustomViews,
+  hasBugreportCustomViewNameConflict,
+  makeBugreportCustomViewId,
+  parseBugreportCustomViewsFromStorage,
+  type ActiveBugreportCustomViewSession,
+  type BugreportCustomViewTemplate,
+} from "./bugreportCustomViews";
 import appPackage from "../package.json";
 import "./App.css";
 
@@ -303,6 +318,8 @@ const SHARED_LOG_FILTERS_STORAGE_KEY = "lazy_blacktea_shared_log_filters_v1";
 const LOGCAT_PRESETS_STORAGE_KEY = "logcat_presets";
 const LOGCAT_PRESETS_LEGACY_MIGRATION_KEY = "lazy_blacktea_logcat_presets_migrated_v1";
 const BUGREPORT_PRESETS_STORAGE_KEY = "bugreport_log_presets_v1";
+// TODO: Re-enable this entry after product discussion for extract-style custom views.
+const BUGREPORT_CUSTOM_VIEW_ENTRY_VISIBLE = false;
 
 const BUGREPORT_STATUS_LABEL: Record<BugreportCardStatus, string> = {
   idle: "Idle",
@@ -435,6 +452,21 @@ const normalizeBugreportTimestamp = (value: string) => {
   return /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}$/.test(trimmed) ? trimmed : null;
 };
 
+const normalizeBugreportRegexPatterns = (patterns: string[]) =>
+  patterns
+    .map((pattern) => pattern.trim())
+    .filter(Boolean)
+    .filter((pattern) => {
+      try {
+        // Keep bugreport filtering behavior aligned with case-insensitive regex matching.
+        // eslint-disable-next-line no-new
+        new RegExp(pattern, "i");
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
 function renderHighlightedLogcatLine(line: string, searchPattern: RegExp | null) {
   if (!searchPattern) {
     return line;
@@ -464,6 +496,14 @@ function renderHighlightedLogcatLine(line: string, searchPattern: RegExp | null)
       <span key={`${part.text}-${index}`}>{part.text}</span>
     ),
   );
+}
+
+function renderHighlightedSnippet(snippet: string, searchPattern: RegExp | null): ReactNode[] {
+  return snippet.split("\n").map((line, index) => (
+    <div key={`${line}-${index}`} className="bugreport-extract-snippet-line">
+      {renderHighlightedLogcatLine(line, searchPattern)}
+    </div>
+  ));
 }
 
 const LogcatLineRow = ({
@@ -1332,6 +1372,13 @@ function App() {
     end?: string;
   };
   type PresetContext = "logcat" | "bugreport";
+  type BugreportCustomViewEditor = {
+    id: string | null;
+    group: string;
+    name: string;
+    templateKind: BugreportExtractTemplateKind;
+    defaultInput: string;
+  };
 
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
@@ -1716,10 +1763,13 @@ function App() {
   const [latestBugreportTaskId, setLatestBugreportTaskId] = useState<string | null>(null);
   const [bugreportLogSourcePath, setBugreportLogSourcePath] = useState("");
   const [bugreportLogSummary, setBugreportLogSummary] = useState<BugreportLogSummary | null>(null);
+  const [bugreportExtractSummary, setBugreportExtractSummary] =
+    useState<BugreportExtractIndexSummary | null>(null);
   const [bugreportLogRows, setBugreportLogRows] = useState<BugreportLogRow[]>([]);
   const [bugreportLogHasMore, setBugreportLogHasMore] = useState(false);
   const [bugreportLogOffset, setBugreportLogOffset] = useState(0);
   const [bugreportLogBusy, setBugreportLogBusy] = useState(false);
+  const [bugreportExtractPreparing, setBugreportExtractPreparing] = useState(false);
   const [bugreportLogError, setBugreportLogError] = useState<string | null>(null);
   const [bugreportLogLoadAllRunning, setBugreportLogLoadAllRunning] = useState(false);
   const [bugreportLogBuffer, setBugreportLogBuffer] = useState("");
@@ -1731,6 +1781,39 @@ function App() {
   const [bugreportLogStart, setBugreportLogStart] = useState("");
   const [bugreportLogEnd, setBugreportLogEnd] = useState("");
   const [bugreportLogAdvancedOpen, setBugreportLogAdvancedOpen] = useState(false);
+  const [bugreportCustomViews, setBugreportCustomViews] = useState<BugreportCustomViewTemplate[]>([]);
+  const [bugreportCustomViewSelectedId, setBugreportCustomViewSelectedId] = useState("");
+  const [bugreportCustomViewEditor, setBugreportCustomViewEditor] = useState<BugreportCustomViewEditor>({
+    id: null,
+    group: DEFAULT_BUGREPORT_CUSTOM_VIEW_GROUP,
+    name: "",
+    templateKind: "service",
+    defaultInput: "",
+  });
+  const [bugreportCustomViewRunInput, setBugreportCustomViewRunInput] = useState("");
+  const [bugreportCustomViewRunBusy, setBugreportCustomViewRunBusy] = useState(false);
+  const [activeBugreportCustomViewSession, setActiveBugreportCustomViewSession] =
+    useState<ActiveBugreportCustomViewSession | null>(null);
+  const makeBugreportCustomViewEditor = (
+    view: BugreportCustomViewTemplate | null,
+  ): BugreportCustomViewEditor => {
+    if (!view) {
+      return {
+        id: null,
+        group: DEFAULT_BUGREPORT_CUSTOM_VIEW_GROUP,
+        name: "",
+        templateKind: "service",
+        defaultInput: "",
+      };
+    }
+    return {
+      id: view.id,
+      group: view.group,
+      name: view.name,
+      templateKind: view.template_kind,
+      defaultInput: view.default_input ?? "",
+    };
+  };
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
   const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
   const [devicePopoverSearch, setDevicePopoverSearch] = useState("");
@@ -2142,24 +2225,8 @@ function App() {
     const sharedFilters = buildLogTextFilters(sharedLogTextChips);
     const liveInclude = bugreportLogFilterKind === "include" ? bugreportLogLiveFilter : "";
     const liveExclude = bugreportLogFilterKind === "exclude" ? bugreportLogLiveFilter : "";
-
-    const normalizeRegexPatterns = (patterns: string[]) =>
-      patterns
-        .map((pattern) => pattern.trim())
-        .filter(Boolean)
-        .filter((pattern) => {
-          try {
-            // Bugreport backend regex filtering should match Logcat's default case-insensitive behavior.
-            // eslint-disable-next-line no-new
-            new RegExp(pattern, "i");
-            return true;
-          } catch {
-            return false;
-          }
-        });
-
-    const regex_terms = normalizeRegexPatterns([...sharedFilters.text_terms, liveInclude]);
-    const regex_excludes = normalizeRegexPatterns([...sharedFilters.text_excludes, liveExclude]);
+    const regex_terms = normalizeBugreportRegexPatterns([...sharedFilters.text_terms, liveInclude]);
+    const regex_excludes = normalizeBugreportRegexPatterns([...sharedFilters.text_excludes, liveExclude]);
     return {
       levels: enabledLevels,
       buffer: bugreportLogBuffer.trim() || null,
@@ -2184,33 +2251,23 @@ function App() {
     logLevels,
     sharedLogTextChips,
   ]);
-  const bugreportLogSearchPattern = useMemo(
-    () => {
-      const liveInclude = bugreportLogFilterKind === "include" ? bugreportLogLiveFilter.trim() : "";
-      const patterns = [
-        ...sharedLogTextChips
-          .filter((chip) => chip.kind === "include")
-          .map((chip) => chip.value.trim())
-          .filter(Boolean),
-        liveInclude,
-      ].filter(Boolean);
-      const valid = patterns.filter((pattern) => {
-        try {
-          // eslint-disable-next-line no-new
-          new RegExp(pattern, "i");
-          return true;
-        } catch {
-          return false;
-        }
-      });
-      if (valid.length === 0) {
-        return null;
-      }
-      const combined = valid.map((pattern) => `(?:${pattern})`).join("|");
-      return buildSearchRegex(combined, { caseSensitive: false, regex: true });
-    },
-    [bugreportLogFilterKind, bugreportLogLiveFilter, sharedLogTextChips],
-  );
+  const effectiveBugreportLogFilters = bugreportLogFilters;
+  const bugreportLogSearchPattern = useMemo(() => {
+    const liveInclude = bugreportLogFilterKind === "include" ? bugreportLogLiveFilter.trim() : "";
+    const patterns = [
+      ...sharedLogTextChips
+        .filter((chip) => chip.kind === "include")
+        .map((chip) => chip.value.trim())
+        .filter(Boolean),
+      liveInclude,
+    ].filter(Boolean);
+    const valid = normalizeBugreportRegexPatterns(patterns);
+    if (valid.length === 0) {
+      return null;
+    }
+    const combined = valid.map((pattern) => `(?:${pattern})`).join("|");
+    return buildSearchRegex(combined, { caseSensitive: false, regex: true });
+  }, [bugreportLogFilterKind, bugreportLogLiveFilter, sharedLogTextChips]);
   const bugreportLogOutputPaths = useMemo(
     () => new Set(bugreportAnalysisTargets.map((item) => item.output_path)),
     [bugreportAnalysisTargets],
@@ -2595,6 +2652,49 @@ function App() {
     () => bugreportPresets.find((preset) => preset.name === bugreportPresetSelected) ?? null,
     [bugreportPresets, bugreportPresetSelected],
   );
+  const groupedBugreportCustomViews = useMemo(
+    () => groupBugreportCustomViews(bugreportCustomViews),
+    [bugreportCustomViews],
+  );
+  const selectedBugreportCustomView = useMemo(
+    () => bugreportCustomViews.find((view) => view.id === bugreportCustomViewSelectedId) ?? null,
+    [bugreportCustomViews, bugreportCustomViewSelectedId],
+  );
+  const activeBugreportCustomView = useMemo(
+    () =>
+      activeBugreportCustomViewSession
+        ? bugreportCustomViews.find((view) => view.id === activeBugreportCustomViewSession.template_id) ?? null
+        : null,
+    [activeBugreportCustomViewSession, bugreportCustomViews],
+  );
+  const bugreportCustomViewEditorDirty = useMemo(() => {
+    if (!selectedBugreportCustomView) {
+      const hasAnyText = Boolean(
+        bugreportCustomViewEditor.name.trim() ||
+          bugreportCustomViewEditor.group.trim() ||
+          bugreportCustomViewEditor.defaultInput.trim(),
+      );
+      const hasKindOverride = bugreportCustomViewEditor.templateKind !== "service";
+      return hasAnyText || hasKindOverride;
+    }
+    return (
+      selectedBugreportCustomView.group.trim() !== bugreportCustomViewEditor.group.trim() ||
+      selectedBugreportCustomView.name.trim() !== bugreportCustomViewEditor.name.trim() ||
+      selectedBugreportCustomView.template_kind !== bugreportCustomViewEditor.templateKind ||
+      (selectedBugreportCustomView.default_input ?? "").trim() !==
+        bugreportCustomViewEditor.defaultInput.trim()
+    );
+  }, [bugreportCustomViewEditor, selectedBugreportCustomView]);
+  const activeBugreportExtractResult = activeBugreportCustomViewSession?.result_snapshot ?? null;
+  const activeBugreportExtractHighlightPattern = useMemo(() => {
+    if (!activeBugreportCustomViewSession) {
+      return null;
+    }
+    return buildSearchRegex(activeBugreportCustomViewSession.input_value, {
+      caseSensitive: false,
+      regex: false,
+    });
+  }, [activeBugreportCustomViewSession]);
   const logLevelsSummary = useMemo(() => summarizeLogLevels(logLevels), [logLevels]);
   const logcatPresetDirty = useMemo(() => {
     if (!selectedLogcatPreset) {
@@ -4123,6 +4223,57 @@ function App() {
   useEffect(() => {
     localStorage.setItem(BUGREPORT_PRESETS_STORAGE_KEY, JSON.stringify(bugreportPresets));
   }, [bugreportPresets]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem(BUGREPORT_CUSTOM_VIEWS_STORAGE_KEY);
+    setBugreportCustomViews(parseBugreportCustomViewsFromStorage(stored));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(BUGREPORT_CUSTOM_VIEWS_STORAGE_KEY, JSON.stringify(bugreportCustomViews));
+  }, [bugreportCustomViews]);
+
+  useEffect(() => {
+    if (!bugreportCustomViewSelectedId) {
+      return;
+    }
+    if (!bugreportCustomViews.some((view) => view.id === bugreportCustomViewSelectedId)) {
+      setBugreportCustomViewSelectedId("");
+    }
+  }, [bugreportCustomViews, bugreportCustomViewSelectedId]);
+
+  useEffect(() => {
+    if (!bugreportCustomViewSelectedId) {
+      setBugreportCustomViewEditor(makeBugreportCustomViewEditor(null));
+      setBugreportCustomViewRunInput("");
+      return;
+    }
+    const selected = bugreportCustomViews.find((view) => view.id === bugreportCustomViewSelectedId) ?? null;
+    setBugreportCustomViewEditor(makeBugreportCustomViewEditor(selected));
+    setBugreportCustomViewRunInput(selected?.default_input ?? "");
+  }, [bugreportCustomViewSelectedId, bugreportCustomViews]);
+
+  useEffect(() => {
+    if (!activeBugreportCustomViewSession) {
+      return;
+    }
+    const view = bugreportCustomViews.find(
+      (entry) => entry.id === activeBugreportCustomViewSession.template_id,
+    );
+    if (!view) {
+      setActiveBugreportCustomViewSession(null);
+      return;
+    }
+    const overlayName = activeBugreportCustomViewSession.overlay_preset_name;
+    if (!overlayName) {
+      return;
+    }
+    if (!bugreportPresets.some((preset) => preset.name === overlayName)) {
+      setActiveBugreportCustomViewSession((prev) =>
+        prev ? { ...prev, overlay_preset_name: null } : prev,
+      );
+    }
+  }, [activeBugreportCustomViewSession, bugreportCustomViews, bugreportPresets]);
 
   useEffect(() => {
     if (!config) {
@@ -5916,6 +6067,198 @@ function App() {
     }
     pushToast("Bugreport preset deleted.", "info");
     return true;
+  };
+
+  const buildCustomViewFromEditor = (forUpdateId?: string): BugreportCustomViewTemplate | null => {
+    const group = bugreportCustomViewEditor.group.trim() || DEFAULT_BUGREPORT_CUSTOM_VIEW_GROUP;
+    const name = bugreportCustomViewEditor.name.trim();
+    if (!name) {
+      pushToast("Custom view name is required.", "error");
+      return null;
+    }
+    if (hasBugreportCustomViewNameConflict(bugreportCustomViews, group, name, forUpdateId)) {
+      pushToast("A custom view with the same group and name already exists.", "error");
+      return null;
+    }
+
+    const defaultInput = bugreportCustomViewEditor.defaultInput.trim();
+
+    return {
+      id: makeBugreportCustomViewId(group, name),
+      group,
+      name,
+      template_kind: bugreportCustomViewEditor.templateKind,
+      ...(defaultInput ? { default_input: defaultInput } : {}),
+    };
+  };
+
+  const resolveOverlayRegexFromPreset = (
+    presetName: string | null,
+  ): { overlayPresetName: string | null; includeRegex: string[]; excludeRegex: string[] } => {
+    const target = presetName?.trim() ?? "";
+    if (!target) {
+      return { overlayPresetName: null, includeRegex: [], excludeRegex: [] };
+    }
+    const preset = bugreportPresets.find((item) => item.name === target);
+    if (!preset) {
+      return { overlayPresetName: null, includeRegex: [], excludeRegex: [] };
+    }
+    const includeRegex = normalizeBugreportRegexPatterns(preset.include ?? []);
+    const excludeRegex = normalizeBugreportRegexPatterns(preset.exclude ?? []);
+    if (
+      includeRegex.length !== (preset.include ?? []).length ||
+      excludeRegex.length !== (preset.exclude ?? []).length
+    ) {
+      pushToast("Overlay preset includes invalid regex patterns. Invalid items were ignored.", "error");
+    }
+    return {
+      overlayPresetName: preset.name,
+      includeRegex,
+      excludeRegex,
+    };
+  };
+
+  const executeBugreportCustomView = async (
+    template: BugreportCustomViewTemplate,
+    inputValue: string,
+    overlayPresetName: string | null,
+    options: { navigateToLogViewer?: boolean; successToast?: boolean } = {},
+  ) => {
+    const trimmedInput = inputValue.trim();
+    if (!trimmedInput) {
+      pushToast("Input is required to run custom view extraction.", "error");
+      return;
+    }
+    const reportId = bugreportExtractSummary?.report_id ?? bugreportLogSummary?.report_id;
+    if (!reportId) {
+      pushToast("Load a bugreport and prepare extract index first.", "error");
+      return;
+    }
+
+    const overlay = resolveOverlayRegexFromPreset(overlayPresetName);
+    setBugreportCustomViewRunBusy(true);
+    setBugreportLogError(null);
+    try {
+      const response = await queryBugreportExtract(reportId, {
+        kind: template.template_kind,
+        input: trimmedInput,
+        limit: 24,
+        include_regex: overlay.includeRegex,
+        exclude_regex: overlay.excludeRegex,
+      });
+      const result = response.data;
+      setActiveBugreportCustomViewSession({
+        template_id: template.id,
+        input_value: trimmedInput,
+        overlay_preset_name: overlay.overlayPresetName,
+        report_id: reportId,
+        result_snapshot: result,
+      });
+      if (options.navigateToLogViewer) {
+        navigate("/bugreport-logviewer");
+      }
+      if (options.successToast !== false) {
+        if (result.matches.length > 0) {
+          pushToast(`Custom view returned ${result.matches.length} section match(es).`, "info");
+        } else {
+          pushToast("No extract results for this input.", "info");
+        }
+      }
+    } catch (error) {
+      const message = formatError(error);
+      setBugreportLogError(message);
+      pushToast(message, "error");
+    } finally {
+      setBugreportCustomViewRunBusy(false);
+    }
+  };
+
+  const saveBugreportCustomView = () => {
+    const nextView = buildCustomViewFromEditor();
+    if (!nextView) {
+      return false;
+    }
+    setBugreportCustomViews((prev) => [...prev.filter((item) => item.id !== nextView.id), nextView]);
+    setBugreportCustomViewSelectedId(nextView.id);
+    pushToast("Custom view saved.", "info");
+    return true;
+  };
+
+  const updateBugreportCustomView = () => {
+    const currentId = bugreportCustomViewEditor.id;
+    if (!currentId) {
+      pushToast("Select a custom view to update.", "error");
+      return false;
+    }
+    const nextView = buildCustomViewFromEditor(currentId);
+    if (!nextView) {
+      return false;
+    }
+    setBugreportCustomViews((prev) => [
+      ...prev.filter((item) => item.id !== currentId && item.id !== nextView.id),
+      nextView,
+    ]);
+    setBugreportCustomViewSelectedId(nextView.id);
+    const activeSession = activeBugreportCustomViewSession;
+    if (activeSession?.template_id === currentId) {
+      setActiveBugreportCustomViewSession((prev) =>
+        prev ? { ...prev, template_id: nextView.id } : prev,
+      );
+      void executeBugreportCustomView(
+        nextView,
+        activeSession.input_value,
+        activeSession.overlay_preset_name,
+        { successToast: false },
+      );
+    }
+    pushToast("Custom view updated.", "info");
+    return true;
+  };
+
+  const deleteBugreportCustomView = () => {
+    const currentId = bugreportCustomViewEditor.id;
+    if (!currentId) {
+      pushToast("Select a custom view to delete.", "error");
+      return false;
+    }
+    setBugreportCustomViews((prev) => prev.filter((item) => item.id !== currentId));
+    setBugreportCustomViewSelectedId("");
+    setActiveBugreportCustomViewSession((prev) => (prev?.template_id === currentId ? null : prev));
+    pushToast("Custom view deleted.", "info");
+    return true;
+  };
+
+  const runBugreportCustomView = () => {
+    const view = bugreportCustomViews.find((item) => item.id === bugreportCustomViewEditor.id) ?? null;
+    if (!view) {
+      pushToast("Select a custom view to run.", "error");
+      return;
+    }
+    const fallbackInput = view.default_input?.trim() ?? "";
+    const input = bugreportCustomViewRunInput.trim() || fallbackInput;
+    void executeBugreportCustomView(view, input, null, {
+      navigateToLogViewer: true,
+      successToast: true,
+    });
+  };
+
+  const clearActiveBugreportCustomView = () => {
+    setActiveBugreportCustomViewSession(null);
+  };
+
+  const setActiveCustomViewOverlayPreset = (nextPresetName: string) => {
+    const activeSession = activeBugreportCustomViewSession;
+    if (!activeSession) {
+      return;
+    }
+    const view = bugreportCustomViews.find((item) => item.id === activeSession.template_id);
+    if (!view) {
+      setActiveBugreportCustomViewSession(null);
+      return;
+    }
+    void executeBugreportCustomView(view, activeSession.input_value, nextPresetName, {
+      successToast: false,
+    });
   };
 
   const presetContextLabel = (context: PresetContext) =>
@@ -8311,7 +8654,7 @@ function App() {
     setBugreportLogBusy(true);
     setBugreportLogError(null);
     try {
-      const response = await queryBugreportLogcat(reportId, bugreportLogFilters, offset, 200);
+      const response = await queryBugreportLogcat(reportId, effectiveBugreportLogFilters, offset, 200);
       if (bugreportLogRequestRef.current !== requestId) {
         return;
       }
@@ -8348,21 +8691,27 @@ function App() {
 
     setBugreportLogSourcePath(sourcePath);
     setBugreportLogSummary(null);
+    setBugreportExtractSummary(null);
+    setActiveBugreportCustomViewSession(null);
     setBugreportLogRows([]);
     setBugreportLogHasMore(false);
     setBugreportLogOffset(0);
     setBugreportLogBuffer("");
 
     setBugreportLogBusy(true);
+    setBugreportExtractPreparing(true);
     setBugreportLogError(null);
     try {
-      const response = await prepareBugreportLogcat(sourcePath);
-      setBugreportLogSummary(response.data);
+      const logResponse = await prepareBugreportLogcat(sourcePath);
+      setBugreportLogSummary(logResponse.data);
+      const extractResponse = await prepareBugreportExtractIndex(sourcePath);
+      setBugreportExtractSummary(extractResponse.data);
     } catch (error) {
       const message = formatError(error);
       setBugreportLogError(message);
       pushToast(message, "error");
     } finally {
+      setBugreportExtractPreparing(false);
       setBugreportLogBusy(false);
     }
   };
@@ -8409,6 +8758,9 @@ function App() {
     if (!isBugreportLogViewer) {
       return;
     }
+    if (activeBugreportCustomViewSession) {
+      return;
+    }
     if (bugreportLogLoadAllRunningRef.current) {
       bugreportLogLoadAllTokenRef.current += 1;
       setBugreportLogLoadAllRunning(false);
@@ -8422,10 +8774,10 @@ function App() {
       void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
     }, delayMs);
     return () => window.clearTimeout(handle);
-  }, [bugreportLogSummary, bugreportLogFilters, isBugreportLogViewer]);
+  }, [bugreportLogSummary, effectiveBugreportLogFilters, isBugreportLogViewer, activeBugreportCustomViewSession]);
 
   const handleBugreportLogLoadAll = async () => {
-    if (!bugreportLogSummary || bugreportLogBusy) {
+    if (!bugreportLogSummary || bugreportLogBusy || activeBugreportCustomViewSession) {
       return;
     }
 
@@ -8440,7 +8792,7 @@ function App() {
 
     try {
       while (hasMore && bugreportLogLoadAllTokenRef.current === token) {
-        const response = await queryBugreportLogcat(reportId, bugreportLogFilters, offset, pageSize);
+        const response = await queryBugreportLogcat(reportId, effectiveBugreportLogFilters, offset, pageSize);
         if (bugreportLogLoadAllTokenRef.current !== token) {
           return;
         }
@@ -14029,6 +14381,199 @@ function App() {
               }
             />
             <Route
+              path="/bugreport-logviewer/custom-views"
+              element={
+                <div className="page-section bugreport-customviews-page">
+                  <div className="page-header">
+                    <div>
+                      <h1>Bugreport Custom Views</h1>
+                      <p className="muted">
+                        Create reusable extraction templates for Service, App, or Keyword lookup.
+                      </p>
+                    </div>
+                    <div className="page-actions">
+                      <button className="ghost" onClick={() => navigate("/bugreport-logviewer")}>
+                        Back to Logs
+                      </button>
+                    </div>
+                  </div>
+                  <div className="bugreport-customviews-layout">
+                    <section className="panel bugreport-customviews-sidebar">
+                      <div className="panel-header">
+                        <h2>Views</h2>
+                        <span>{bugreportCustomViews.length}</span>
+                      </div>
+                      <div className="button-row compact">
+                        <button
+                          className="ghost"
+                          onClick={() => {
+                            setBugreportCustomViewSelectedId("");
+                            setBugreportCustomViewEditor(makeBugreportCustomViewEditor(null));
+                          }}
+                        >
+                          New View
+                        </button>
+                      </div>
+                      {groupedBugreportCustomViews.length === 0 ? (
+                        <p className="muted">No custom views yet.</p>
+                      ) : (
+                        <div className="bugreport-customviews-groups">
+                          {groupedBugreportCustomViews.map((entry) => (
+                            <div key={entry.group} className="bugreport-customviews-group">
+                              <h3>{entry.group}</h3>
+                              <div className="bugreport-customviews-list">
+                                {entry.views.map((view) => (
+                                  <button
+                                    key={view.id}
+                                    type="button"
+                                    className={`bugreport-customviews-item${
+                                      bugreportCustomViewSelectedId === view.id ? " active" : ""
+                                    }`}
+                                    onClick={() => setBugreportCustomViewSelectedId(view.id)}
+                                  >
+                                    {view.name}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="panel bugreport-customviews-editor">
+                      <div className="panel-header">
+                        <h2>{selectedBugreportCustomView ? "Edit Custom View" : "New Custom View"}</h2>
+                        <span>{selectedBugreportCustomView ? selectedBugreportCustomView.id : "Draft"}</span>
+                      </div>
+                      <div className="stack">
+                        <div className="form-row">
+                          <label htmlFor="custom-view-group">Group</label>
+                          <input
+                            id="custom-view-group"
+                            value={bugreportCustomViewEditor.group}
+                            onChange={(event) =>
+                              setBugreportCustomViewEditor((prev) => ({ ...prev, group: event.target.value }))
+                            }
+                            placeholder={DEFAULT_BUGREPORT_CUSTOM_VIEW_GROUP}
+                          />
+                        </div>
+                        <div className="form-row">
+                          <label htmlFor="custom-view-name">Name</label>
+                          <input
+                            id="custom-view-name"
+                            value={bugreportCustomViewEditor.name}
+                            onChange={(event) =>
+                              setBugreportCustomViewEditor((prev) => ({ ...prev, name: event.target.value }))
+                            }
+                            placeholder="e.g. Bluetooth Service"
+                          />
+                        </div>
+                        <div className="form-row">
+                          <label htmlFor="custom-view-template-kind">Template Kind</label>
+                          <select
+                            id="custom-view-template-kind"
+                            value={bugreportCustomViewEditor.templateKind}
+                            onChange={(event) =>
+                              setBugreportCustomViewEditor((prev) => ({
+                                ...prev,
+                                templateKind: event.target.value as BugreportExtractTemplateKind,
+                              }))
+                            }
+                          >
+                            {BUGREPORT_CUSTOM_VIEW_TEMPLATE_KINDS.map((kind) => (
+                              <option key={kind} value={kind}>
+                                {kind[0].toUpperCase() + kind.slice(1)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="form-row">
+                          <label htmlFor="custom-view-default-input">Default Input</label>
+                          <input
+                            id="custom-view-default-input"
+                            value={bugreportCustomViewEditor.defaultInput}
+                            onChange={(event) =>
+                              setBugreportCustomViewEditor((prev) => ({
+                                ...prev,
+                                defaultInput: event.target.value,
+                              }))
+                            }
+                            placeholder="e.g. bluetooth_manager / com.android.bluetooth"
+                          />
+                        </div>
+                      </div>
+                      <div className="button-row compact">
+                        <button onClick={saveBugreportCustomView} disabled={!bugreportCustomViewEditor.name.trim()}>
+                          Save New
+                        </button>
+                        <button
+                          className="ghost"
+                          onClick={updateBugreportCustomView}
+                          disabled={!bugreportCustomViewEditor.id || !bugreportCustomViewEditorDirty}
+                        >
+                          Update
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={deleteBugreportCustomView}
+                          disabled={!bugreportCustomViewEditor.id}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      <div className="stack">
+                        <div className="form-row">
+                          <label htmlFor="custom-view-run-input">Run Input</label>
+                          <input
+                            id="custom-view-run-input"
+                            value={bugreportCustomViewRunInput}
+                            onChange={(event) =>
+                              setBugreportCustomViewRunInput(event.target.value)
+                            }
+                            placeholder="Enter one service / app / keyword"
+                          />
+                        </div>
+                        <div className="button-row compact">
+                          <button
+                            onClick={runBugreportCustomView}
+                            disabled={
+                              !bugreportCustomViewEditor.id ||
+                              bugreportCustomViewEditorDirty ||
+                              bugreportCustomViewRunBusy
+                            }
+                          >
+                            {bugreportCustomViewRunBusy ? "Running..." : "Run"}
+                          </button>
+                          <button
+                            className="ghost"
+                            onClick={() =>
+                              setBugreportCustomViewRunInput(selectedBugreportCustomView?.default_input ?? "")
+                            }
+                            disabled={!bugreportCustomViewEditor.id || bugreportCustomViewRunBusy}
+                          >
+                            Use Default
+                          </button>
+                        </div>
+                        {!bugreportLogSummary ? (
+                          <p className="muted">
+                            Load a bugreport first in Log Viewer before running template extraction.
+                          </p>
+                        ) : bugreportExtractSummary ? (
+                          <p className="muted">
+                            Extract index ready: {bugreportExtractSummary.total_sections.toLocaleString()} sections,{" "}
+                            {bugreportExtractSummary.total_lines.toLocaleString()} lines.
+                          </p>
+                        ) : (
+                          <p className="muted">Extract index is not ready yet.</p>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              }
+            />
+            <Route
               path="/bugreport-logviewer"
               element={
                 <div className="page-section bugreport-logviewer-page">
@@ -14041,6 +14586,11 @@ function App() {
                       <button onClick={handlePickBugreportLogFile} disabled={bugreportLogBusy}>
                         Browse
                       </button>
+                      {BUGREPORT_CUSTOM_VIEW_ENTRY_VISIBLE && (
+                        <button className="ghost" onClick={() => navigate("/bugreport-logviewer/custom-views")}>
+                          Custom Views
+                        </button>
+                      )}
                       <button
                         className="ghost"
                         onClick={() => void handleOpenBugreportLogPopup()}
@@ -14148,10 +14698,22 @@ function App() {
                         <span>{bugreportLogError}</span>
                       </div>
                     )}
-                    {bugreportLogBusy && (
+                    {bugreportExtractPreparing && (
+                      <div className="inline-alert info">
+                        <strong>Preparing extract index</strong>
+                        <span>Building section and keyword index from the full bugreport...</span>
+                      </div>
+                    )}
+                    {bugreportLogBusy && !bugreportExtractPreparing && (
                       <div className="inline-alert info">
                         <strong>Working</strong>
                         <span>Preparing or querying logcat...</span>
+                      </div>
+                    )}
+                    {bugreportCustomViewRunBusy && activeBugreportCustomViewSession && (
+                      <div className="inline-alert info">
+                        <strong>Updating custom view result</strong>
+                        <span>Running extraction query with current overlay preset...</span>
                       </div>
                     )}
                     {bugreportLogLoadAllRunning && (
@@ -14160,9 +14722,56 @@ function App() {
                         <span>Fetching logcat pages in the background...</span>
                       </div>
                     )}
+                    {activeBugreportCustomViewSession && activeBugreportCustomView && (
+                      <div className="inline-alert info bugreport-custom-view-active">
+                        <div className="bugreport-custom-view-active-main">
+                          <strong>
+                            Custom View Active: {activeBugreportCustomView.group} / {activeBugreportCustomView.name}
+                          </strong>
+                          <span className="muted">
+                            Template: {activeBugreportCustomView.template_kind} · Input:{" "}
+                            <code>{activeBugreportCustomViewSession.input_value}</code>
+                          </span>
+                        </div>
+                        <div className="bugreport-custom-view-active-actions">
+                          <label className="muted" htmlFor="bugreport-custom-view-overlay">
+                            Overlay on Custom View
+                          </label>
+                          <select
+                            id="bugreport-custom-view-overlay"
+                            value={activeBugreportCustomViewSession.overlay_preset_name ?? ""}
+                            onChange={(event) => setActiveCustomViewOverlayPreset(event.target.value)}
+                            disabled={bugreportCustomViewRunBusy}
+                          >
+                            <option value="">None</option>
+                            {bugreportPresets.map((preset) => (
+                              <option key={preset.name} value={preset.name}>
+                                {preset.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            className="ghost"
+                            onClick={() => setActiveCustomViewOverlayPreset("")}
+                            disabled={
+                              !activeBugreportCustomViewSession.overlay_preset_name ||
+                              bugreportCustomViewRunBusy
+                            }
+                          >
+                            Clear Overlay
+                          </button>
+                          <button className="ghost" onClick={clearActiveBugreportCustomView}>
+                            Exit Custom View
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     <div className="bugreport-log-toolbar">
 	                      {(() => {
+	                        if (activeBugreportCustomViewSession) {
+	                          return null;
+	                        }
 	                        const chips: Array<{ key: string; label: string; tone?: "exclude" | "info" }> = [];
                           const buffer = bugreportLogBuffer.trim();
                           if (buffer) {
@@ -14259,7 +14868,7 @@ function App() {
                           saveBugreportPreset(bugreportPresetName);
                         }}
                         showPresetRow
-                        disabled={!bugreportLogSummary}
+                        disabled={!bugreportLogSummary || Boolean(activeBugreportCustomViewSession)}
                         filtersCount={sharedLogTextChips.length}
                         activePresetLabel={selectedBugreportPreset?.name}
                         levelsSummary={logLevelsSummary}
@@ -14272,6 +14881,7 @@ function App() {
                           <AdvancedToggleButton
                             open={bugreportLogAdvancedOpen}
                             onClick={() => setBugreportLogAdvancedOpen((prev) => !prev)}
+                            disabled={Boolean(activeBugreportCustomViewSession)}
                           />
                         }
                         advancedOptions={
@@ -14295,7 +14905,11 @@ function App() {
                                           className="logcat-select"
                                           value={bugreportLogBuffer}
                                           onChange={(event) => handleBugreportLogBufferChange(event.target.value)}
-                                          disabled={!bugreportLogSummary || bugreportLogBusy}
+                                          disabled={
+                                            !bugreportLogSummary ||
+                                            bugreportLogBusy ||
+                                            Boolean(activeBugreportCustomViewSession)
+                                          }
                                         >
                                           <option value="">All</option>
                                           {bugreportBufferOptions.map((item) => (
@@ -14312,6 +14926,7 @@ function App() {
                                           value={bugreportLogTag}
                                           onChange={(event) => setBugreportLogTag(event.target.value)}
                                           placeholder="Tag"
+                                          disabled={Boolean(activeBugreportCustomViewSession)}
                                         />
                                       </div>
                                       <div className="bugreport-log-filter-field">
@@ -14321,6 +14936,7 @@ function App() {
                                           value={bugreportLogPid}
                                           onChange={(event) => setBugreportLogPid(event.target.value)}
                                           placeholder="PID"
+                                          disabled={Boolean(activeBugreportCustomViewSession)}
                                         />
                                       </div>
                                       <div className="bugreport-log-filter-field">
@@ -14330,6 +14946,7 @@ function App() {
                                           value={bugreportLogStart}
                                           onChange={(event) => setBugreportLogStart(event.target.value)}
                                           placeholder="MM-DD HH:MM:SS.mmm"
+                                          disabled={Boolean(activeBugreportCustomViewSession)}
                                         />
                                       </div>
                                       <div className="bugreport-log-filter-field">
@@ -14339,6 +14956,7 @@ function App() {
                                           value={bugreportLogEnd}
                                           onChange={(event) => setBugreportLogEnd(event.target.value)}
                                           placeholder="MM-DD HH:MM:SS.mmm"
+                                          disabled={Boolean(activeBugreportCustomViewSession)}
                                         />
                                       </div>
                                     </div>
@@ -14356,6 +14974,7 @@ function App() {
                                                   [level]: event.target.checked,
                                                 }));
                                               }}
+                                              disabled={Boolean(activeBugreportCustomViewSession)}
                                             />
                                             {level}
                                           </label>
@@ -14378,7 +14997,7 @@ function App() {
                                           setBugreportLogEnd("");
                                           setLogLevels(defaultLogcatLevels);
                                         }}
-                                        disabled={bugreportLogBusy}
+                                        disabled={bugreportLogBusy || Boolean(activeBugreportCustomViewSession)}
                                       >
                                         Reset Filters
                                       </button>
@@ -14393,25 +15012,76 @@ function App() {
 
 	                    </div>
 
-
-		                    {bugreportLogRows.length ? (
-		                      <BugreportLogOutput
-		                        rows={bugreportLogRows}
-		                        highlightPattern={bugreportLogSearchPattern}
-		                        canLoadMore={Boolean(bugreportLogSummary) && bugreportLogHasMore && !bugreportLogLoadAllRunning}
-		                        busy={bugreportLogBusy || bugreportLogLoadAllRunning}
-		                        onNearBottom={() => {
-		                          if (!bugreportLogSummary) {
-		                            return;
-		                          }
-		                          void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
-		                        }}
-		                      />
-		                    ) : (
-		                      <div className="logcat-output bugreport-log-output bugreport-log-output-empty">
-		                        <p className="muted">Load a bugreport to view logcat output.</p>
-		                      </div>
-		                    )}
+                    {activeBugreportCustomViewSession && activeBugreportExtractResult ? (
+                      <div className="bugreport-extract-results">
+                        {activeBugreportExtractResult.matches.length > 0 ? (
+                          <>
+                            {activeBugreportExtractResult.truncated && (
+                              <p className="muted">
+                                Showing top {activeBugreportExtractResult.matches.length} matches.
+                              </p>
+                            )}
+                            <div className="bugreport-extract-card-list">
+                              {activeBugreportExtractResult.matches.map((match, index) => (
+                                <article
+                                  key={`${match.section_name}-${match.line_start}-${index}`}
+                                  className="bugreport-extract-card"
+                                >
+                                  <div className="bugreport-extract-card-head">
+                                    <h3>{match.section_name}</h3>
+                                    <span className="muted">
+                                      Lines {match.line_start} - {match.line_end} · Hits {match.hit_count}
+                                    </span>
+                                  </div>
+                                  <div className="bugreport-extract-snippet">
+                                    {renderHighlightedSnippet(
+                                      match.snippet,
+                                      activeBugreportExtractHighlightPattern,
+                                    )}
+                                  </div>
+                                </article>
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="bugreport-extract-empty">
+                            <h3>No results</h3>
+                            <p className="muted">
+                              No snippet matched this custom view input and overlay conditions.
+                            </p>
+                            {activeBugreportExtractResult.suggestions.length > 0 && (
+                              <div className="bugreport-extract-suggestions">
+                                <span className="muted">Suggestions:</span>
+                                <div className="bugreport-extract-suggestion-list">
+                                  {activeBugreportExtractResult.suggestions.map((suggestion) => (
+                                    <span key={suggestion} className="chip">
+                                      {suggestion}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ) : bugreportLogRows.length ? (
+                      <BugreportLogOutput
+                        rows={bugreportLogRows}
+                        highlightPattern={bugreportLogSearchPattern}
+                        canLoadMore={Boolean(bugreportLogSummary) && bugreportLogHasMore && !bugreportLogLoadAllRunning}
+                        busy={bugreportLogBusy || bugreportLogLoadAllRunning}
+                        onNearBottom={() => {
+                          if (!bugreportLogSummary) {
+                            return;
+                          }
+                          void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+                        }}
+                      />
+                    ) : (
+                      <div className="logcat-output bugreport-log-output bugreport-log-output-empty">
+                        <p className="muted">Load a bugreport to view logcat output.</p>
+                      </div>
+                    )}
 	                  </section>
 	                </div>
 	              }

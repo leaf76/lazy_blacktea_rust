@@ -1,5 +1,6 @@
 pub mod adb;
 pub mod bluetooth;
+pub mod bugreport_extract;
 pub mod bugreport_logcat;
 pub mod commands;
 pub mod config;

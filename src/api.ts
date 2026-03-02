@@ -6,6 +6,9 @@ import type {
   AppBasicInfo,
   AppIcon,
   AppInfo,
+  BugreportExtractIndexSummary,
+  BugreportExtractQuery,
+  BugreportExtractResult,
   BugreportLogAroundPage,
   BugreportLogFilters,
   BugreportLogPage,
@@ -711,6 +714,30 @@ export const prepareBugreportLogcat = async (sourcePath: string) => {
   return tauriInvoke<CommandResponse<BugreportLogSummary>>("prepare_bugreport_logcat", {
     source_path: sourcePath,
     sourcePath,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const prepareBugreportExtractIndex = async (sourcePath: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<BugreportExtractIndexSummary>>("prepare_bugreport_extract_index", {
+    source_path: sourcePath,
+    sourcePath,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const queryBugreportExtract = async (
+  reportId: string,
+  query: BugreportExtractQuery,
+) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<BugreportExtractResult>>("query_bugreport_extract", {
+    report_id: reportId,
+    reportId,
+    query,
     trace_id: traceId,
     traceId,
   });

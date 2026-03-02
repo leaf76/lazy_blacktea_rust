@@ -309,6 +309,56 @@ pub struct BugreportLogAroundPage {
     pub has_after: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BugreportExtractTemplateKind {
+    Service,
+    App,
+    Keyword,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportExtractIndexSummary {
+    pub report_id: String,
+    pub source_path: String,
+    pub db_path: String,
+    pub total_sections: usize,
+    pub total_lines: usize,
+    pub service_sections: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportExtractQuery {
+    pub kind: BugreportExtractTemplateKind,
+    pub input: String,
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub include_regex: Vec<String>,
+    #[serde(default)]
+    pub exclude_regex: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportExtractMatch {
+    pub section_name: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub snippet: String,
+    pub hit_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BugreportExtractResult {
+    pub report_id: String,
+    pub kind: BugreportExtractTemplateKind,
+    pub input: String,
+    #[serde(default)]
+    pub matches: Vec<BugreportExtractMatch>,
+    #[serde(default)]
+    pub suggestions: Vec<String>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FilePreview {
     pub local_path: String,

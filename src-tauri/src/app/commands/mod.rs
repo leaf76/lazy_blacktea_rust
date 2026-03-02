@@ -40,6 +40,7 @@ use crate::app::adb::runner::{run_adb, run_command_with_timeout};
 use crate::app::adb::scrcpy::{build_scrcpy_command, check_scrcpy_availability};
 use crate::app::adb::transfer::parse_progress_percent;
 use crate::app::bluetooth::service::start_bluetooth_monitor as start_bluetooth_monitor_service;
+use crate::app::bugreport_extract;
 use crate::app::bugreport_logcat;
 use crate::app::config::{
     clamp_terminal_buffer_lines, load_config, normalize_config_for_save, save_config, AppConfig,
@@ -48,12 +49,12 @@ use crate::app::diagnostics;
 use crate::app::error::AppError;
 use crate::app::models::{
     AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo,
-    AppComponentsSummary, AppIcon, AppInfo, BugreportLogAroundPage, BugreportLogFilters,
-    BugreportLogPage, BugreportLogSearchResult, BugreportLogSummary, BugreportResult,
-    CommandResponse, CommandResult, DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview,
-    HostCommandResult, LegacyLogcatPreset, LogcatExportResult, LogcatStatus, NetProfilerSnapshot,
-    PerfSnapshot, ScrcpyInfo, TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult,
-    UiHierarchyExportResult,
+    AppComponentsSummary, AppIcon, AppInfo, BugreportExtractIndexSummary, BugreportExtractQuery,
+    BugreportExtractResult, BugreportLogAroundPage, BugreportLogFilters, BugreportLogPage,
+    BugreportLogSearchResult, BugreportLogSummary, BugreportResult, CommandResponse, CommandResult,
+    DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LegacyLogcatPreset,
+    LogcatExportResult, LogcatStatus, NetProfilerSnapshot, PerfSnapshot, ScrcpyInfo, TerminalEvent,
+    TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
 use crate::app::net_profiler::parse::{
     parse_cmd_package_list_u, parse_dumpsys_netstats_app_uid_stats, parse_xt_qtaguid_stats,
@@ -6272,6 +6273,67 @@ pub async fn prepare_bugreport_logcat(
     })
 }
 
+fn prepare_bugreport_extract_index_inner(
+    source_path: &str,
+    trace_id: &str,
+) -> Result<BugreportExtractIndexSummary, AppError> {
+    ensure_non_empty(source_path, "source_path", trace_id)?;
+    let path = PathBuf::from(source_path);
+    bugreport_extract::prepare_bugreport_extract_index(&path, trace_id)
+        .map_err(|err| AppError::system(err, trace_id))
+}
+
+#[tauri::command(async)]
+pub async fn prepare_bugreport_extract_index(
+    source_path: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<BugreportExtractIndexSummary>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let trace_for_worker = trace_id.clone();
+    let source_for_worker = source_path.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        prepare_bugreport_extract_index_inner(&source_for_worker, &trace_for_worker)
+    })
+    .await
+    .map_err(|_| AppError::system("Bugreport extract index thread failed", &trace_id))??;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: result,
+    })
+}
+
+fn query_bugreport_extract_inner(
+    report_id: &str,
+    query: BugreportExtractQuery,
+    trace_id: &str,
+) -> Result<BugreportExtractResult, AppError> {
+    ensure_non_empty(report_id, "report_id", trace_id)?;
+    bugreport_extract::query_bugreport_extract(report_id, query)
+        .map_err(|err| map_bugreport_extract_query_error(err, trace_id))
+}
+
+#[tauri::command(async)]
+pub async fn query_bugreport_extract(
+    report_id: String,
+    query: BugreportExtractQuery,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<BugreportExtractResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let trace_for_worker = trace_id.clone();
+    let report_for_worker = report_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        query_bugreport_extract_inner(&report_for_worker, query, &trace_for_worker)
+    })
+    .await
+    .map_err(|_| AppError::system("Bugreport extract query thread failed", &trace_id))??;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: result,
+    })
+}
+
 #[tauri::command(async)]
 pub async fn query_bugreport_logcat(
     report_id: String,
@@ -6397,6 +6459,13 @@ pub async fn query_bugreport_logcat_around(
 }
 
 fn map_bugreport_log_query_error(err: String, trace_id: &str) -> AppError {
+    if let Some(message) = err.strip_prefix("VALIDATION:") {
+        return AppError::validation(message.trim(), trace_id);
+    }
+    AppError::system(err, trace_id)
+}
+
+fn map_bugreport_extract_query_error(err: String, trace_id: &str) -> AppError {
     if let Some(message) = err.strip_prefix("VALIDATION:") {
         return AppError::validation(message.trim(), trace_id);
     }

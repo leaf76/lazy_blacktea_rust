@@ -6,15 +6,15 @@ use app::commands::{
     export_logcat, export_ui_hierarchy, force_stop_app, generate_bugreport, get_app_basic_info,
     get_app_icon, get_config, get_logcat_status, install_apk_batch, launch_app, launch_scrcpy,
     list_apps, list_device_files, list_devices, load_legacy_logcat_presets, mkdir_device_dir,
-    open_app_info, persist_terminal_state, prepare_bugreport_logcat, preview_local_file,
-    pull_device_file, push_device_file, query_bugreport_logcat, query_bugreport_logcat_around,
-    reboot_devices, rename_device_path, reset_config, run_shell, save_app_config,
-    search_bugreport_logcat, set_app_enabled, set_bluetooth_state, set_net_profiler_pinned_uids,
-    set_wifi_state, start_bluetooth_monitor, start_device_tracking, start_logcat,
-    start_net_profiler, start_perf_monitor, start_screen_record, start_terminal_session,
-    stop_bluetooth_monitor, stop_device_tracking, stop_logcat, stop_net_profiler,
-    stop_perf_monitor, stop_screen_record, stop_terminal_session, uninstall_app,
-    write_terminal_session,
+    open_app_info, persist_terminal_state, prepare_bugreport_extract_index,
+    prepare_bugreport_logcat, preview_local_file, pull_device_file, push_device_file,
+    query_bugreport_extract, query_bugreport_logcat, query_bugreport_logcat_around, reboot_devices,
+    rename_device_path, reset_config, run_shell, save_app_config, search_bugreport_logcat,
+    set_app_enabled, set_bluetooth_state, set_net_profiler_pinned_uids, set_wifi_state,
+    start_bluetooth_monitor, start_device_tracking, start_logcat, start_net_profiler,
+    start_perf_monitor, start_screen_record, start_terminal_session, stop_bluetooth_monitor,
+    stop_device_tracking, stop_logcat, stop_net_profiler, stop_perf_monitor, stop_screen_record,
+    stop_terminal_session, uninstall_app, write_terminal_session,
 };
 use app::logging::init_logging;
 use app::state::AppState;
@@ -89,7 +89,9 @@ pub fn run() {
             generate_bugreport,
             cancel_bugreport,
             prepare_bugreport_logcat,
+            prepare_bugreport_extract_index,
             query_bugreport_logcat,
+            query_bugreport_extract,
             search_bugreport_logcat,
             query_bugreport_logcat_around
         ])

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::models::BugreportExtractTemplateKind;
 
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -679,6 +680,13 @@ fn prepare_bugreport_logcat_inner_errors_for_missing_file() {
 }
 
 #[test]
+fn prepare_bugreport_extract_index_inner_rejects_empty_path() {
+    let err = prepare_bugreport_extract_index_inner(" ", "trace-9x").expect_err("err");
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-9x");
+}
+
+#[test]
 fn search_bugreport_logcat_inner_rejects_empty_query() {
     let err = search_bugreport_logcat_inner(
         "report",
@@ -705,6 +713,32 @@ fn query_bugreport_logcat_around_inner_rejects_non_positive_anchor_id() {
     .expect_err("err");
     assert_eq!(err.code, "ERR_VALIDATION");
     assert_eq!(err.trace_id, "trace-9b");
+}
+
+#[test]
+fn query_bugreport_extract_inner_rejects_empty_report_id() {
+    let err = query_bugreport_extract_inner(
+        " ",
+        BugreportExtractQuery {
+            kind: BugreportExtractTemplateKind::Keyword,
+            input: "bluetooth".to_string(),
+            limit: Some(10),
+            include_regex: vec![],
+            exclude_regex: vec![],
+        },
+        "trace-9c",
+    )
+    .expect_err("err");
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-9c");
+}
+
+#[test]
+fn map_bugreport_extract_query_error_maps_validation_prefix() {
+    let err =
+        map_bugreport_extract_query_error("VALIDATION: invalid regex".to_string(), "trace-9d");
+    assert_eq!(err.code, "ERR_VALIDATION");
+    assert_eq!(err.trace_id, "trace-9d");
 }
 
 #[test]

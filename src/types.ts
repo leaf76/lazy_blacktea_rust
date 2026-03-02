@@ -436,6 +436,42 @@ export type BugreportLogAroundPage = {
   has_after: boolean;
 };
 
+export type BugreportExtractTemplateKind = "service" | "app" | "keyword";
+
+export type BugreportExtractIndexSummary = {
+  report_id: string;
+  source_path: string;
+  db_path: string;
+  total_sections: number;
+  total_lines: number;
+  service_sections: number;
+};
+
+export type BugreportExtractQuery = {
+  kind: BugreportExtractTemplateKind;
+  input: string;
+  limit?: number | null;
+  include_regex?: string[];
+  exclude_regex?: string[];
+};
+
+export type BugreportExtractMatch = {
+  section_name: string;
+  line_start: number;
+  line_end: number;
+  snippet: string;
+  hit_count: number;
+};
+
+export type BugreportExtractResult = {
+  report_id: string;
+  kind: BugreportExtractTemplateKind;
+  input: string;
+  matches: BugreportExtractMatch[];
+  suggestions: string[];
+  truncated: boolean;
+};
+
 export type FilePreview = {
   local_path: string;
   mime_type: string;
