@@ -2516,23 +2516,6 @@ button.ghost.icon-only {
   font-size: 11px;
 }
 
-.bugreport-log-topbar {
-  --form-label-width: 80px;
-}
-
-.bugreport-log-topbar .form-row > select {
-  flex: 0 1 160px;
-  min-width: 140px;
-}
-
-.bugreport-log-topbar .form-row > input {
-  flex: 3 1 320px;
-}
-
-.bugreport-log-topbar .bugreport-log-advanced-toggle {
-  margin-left: auto;
-}
-
 .bugreport-log-summary-chip-list {
   display: flex;
   flex-wrap: wrap;
@@ -2582,18 +2565,6 @@ button.ghost.icon-only {
 }
 
 .bugreport-log-summarybar-actions button {
-  flex: 0 0 auto;
-}
-
-.bugreport-log-matchesbar-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.bugreport-log-matchesbar-actions {
   flex: 0 0 auto;
 }
 
@@ -2662,81 +2633,9 @@ button.ghost.icon-only {
   margin-top: 0;
 }
 
-.bugreport-log-matches {
-  margin: 0;
-}
-
-.bugreport-log-matches-actions {
-  margin-top: 8px;
-}
-
-.bugreport-log-match-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.bugreport-log-matches .bugreport-log-match-list {
-  margin-top: 0;
-}
-
-.bugreport-log-match-row {
-  width: 100%;
-  text-align: left;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
-  border-radius: 12px;
-  padding: 8px 10px;
-  cursor: pointer;
-}
-
-.bugreport-log-match-row:hover {
-  border-color: rgba(59, 130, 246, 0.55);
-}
-
-.bugreport-log-match-row.active {
-  border-color: rgba(59, 130, 246, 0.8);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
-}
-
-.bugreport-log-match-row:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.bugreport-log-match-row-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.bugreport-log-match-meta {
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.bugreport-log-match-buffer {
-  flex: 0 0 auto;
-}
-
-.bugreport-log-match-msg {
-  margin-top: 4px;
-  font-family: var(--font-code);
-  font-size: 12px;
-  color: var(--color-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .bugreport-log-toolbar-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  grid-template-columns: repeat(5, minmax(140px, 1fr));
   gap: 8px;
 }
 
@@ -2756,8 +2655,20 @@ button.ghost.icon-only {
   color: var(--color-text-muted);
 }
 
-.bugreport-log-filter-field input {
+.bugreport-log-filter-field input,
+.bugreport-log-filter-field select {
   min-width: 0;
+}
+
+.bugreport-log-panel .logcat-select {
+  appearance: auto;
+  -webkit-appearance: menulist;
+  -moz-appearance: menulist;
+  background-image: none;
+  background-position: initial;
+  background-size: initial;
+  background-repeat: initial;
+  padding-right: 10px;
 }
 
 .bugreport-log-text-filter {
@@ -4797,16 +4708,20 @@ textarea:disabled {
 }
 
 .bugreport-log-output-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
 .bugreport-log-findbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 8px 8px 0;
+  pointer-events: none;
 }
 
 .bugreport-log-find-toggle {
@@ -4827,7 +4742,8 @@ textarea:disabled {
   border-radius: 999px;
   backdrop-filter: blur(10px);
   width: fit-content;
-  max-width: 100%;
+  max-width: min(100%, 860px);
+  pointer-events: auto;
 }
 
 .bugreport-log-findbar-right input {
@@ -4864,10 +4780,36 @@ textarea:disabled {
   font-size: 11px;
 }
 
+.bugreport-log-findbar .bugreport-log-find-toggle {
+  pointer-events: auto;
+}
+
 .bugreport-log-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
+}
+
+@media (max-width: 900px) {
+  .bugreport-log-findbar {
+    left: 8px;
+  }
+
+  .bugreport-log-findbar-right {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 100%;
+    row-gap: 6px;
+  }
+
+  .bugreport-log-findbar-right input {
+    width: clamp(140px, 45vw, 220px);
+  }
+
+  .bugreport-log-findbar-count {
+    min-width: 44px;
+    text-align: left;
+  }
 }
 
 .logcat-output mark {

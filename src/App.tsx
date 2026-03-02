@@ -37,7 +37,6 @@ import type {
   AppBasicInfo,
   AppInfo,
   BugreportLogFilters,
-  BugreportLogMatch,
   BugreportLogRow,
   BugreportLogSummary,
   BugreportResult,
@@ -105,8 +104,6 @@ import {
   writeTerminalSession,
   persistTerminalState,
   queryBugreportLogcat,
-  queryBugreportLogcatAround,
-  searchBugreportLogcat,
   saveConfig,
   setAppEnabled,
   setBluetoothState,
@@ -232,6 +229,11 @@ import {
   buildLogcatPopupWindowLabel,
   parseLogcatPopupContext,
 } from "./logcatWindow";
+import {
+  buildBugreportPopupHash,
+  buildBugreportPopupWindowLabel,
+  parseBugreportPopupContext,
+} from "./bugreportWindow";
 import {
   checkForUpdate,
   installUpdateAndRelaunch,
@@ -572,7 +574,6 @@ type BugreportLogOutputProps = {
   onNearBottom: () => void;
   canLoadMore: boolean;
   busy: boolean;
-  activeRowId?: number | null;
 };
 
 const BUGREPORT_LOG_LINE_HEIGHT_PX = 16;
@@ -583,7 +584,6 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
   onNearBottom,
   canLoadMore,
   busy,
-  activeRowId = null,
 }: BugreportLogOutputProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -758,17 +758,6 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
     setScrollTop(target);
   };
 
-  useEffect(() => {
-    if (activeRowId == null) {
-      return;
-    }
-    const index = rows.findIndex((row) => row.id === activeRowId);
-    if (index < 0) {
-      return;
-    }
-    scrollToRowIndex(index);
-  }, [activeRowId, rows]);
-
   const goToMatch = (nextIndex: number) => {
     if (findMatchRowIndices.length === 0) {
       return;
@@ -886,7 +875,7 @@ const BugreportLogOutput = memo(function BugreportLogOutput({
           {slice.map((row, index) => {
             const rowIndex = start + index;
             const isMatch = findMatchIndexSet.has(rowIndex);
-            const isActive = activeMatchRowIndex === rowIndex || (activeRowId != null && row.id === activeRowId);
+            const isActive = activeMatchRowIndex === rowIndex;
             return (
               <div
                 key={row.id}
@@ -1165,7 +1154,10 @@ function LogLiveFilterBar({
                 value={value}
                 onChange={(event) => onValueChange(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") {
+                  const nativeIsComposing = Boolean(
+                    (event.nativeEvent as KeyboardEvent).isComposing,
+                  );
+                  if (event.key === "Enter" && !nativeIsComposing) {
                     event.preventDefault();
                     onAdd();
                   }
@@ -1738,14 +1730,7 @@ function App() {
   const [bugreportLogFiltersExpanded, setBugreportLogFiltersExpanded] = useState(false);
   const [bugreportLogStart, setBugreportLogStart] = useState("");
   const [bugreportLogEnd, setBugreportLogEnd] = useState("");
-  const [bugreportLogSearchTerm, setBugreportLogSearchTerm] = useState("");
-  const [bugreportLogLastSearchTerm, setBugreportLogLastSearchTerm] = useState("");
-  const [bugreportLogMatches, setBugreportLogMatches] = useState<BugreportLogMatch[]>([]);
-  const [bugreportLogMatchesTruncated, setBugreportLogMatchesTruncated] = useState(false);
-  const [bugreportLogMatchIndex, setBugreportLogMatchIndex] = useState(-1);
-  const [bugreportLogMatchesOpen, setBugreportLogMatchesOpen] = useState(false);
   const [bugreportLogAdvancedOpen, setBugreportLogAdvancedOpen] = useState(false);
-  const [bugreportLogContextAnchorId, setBugreportLogContextAnchorId] = useState<number | null>(null);
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
   const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
   const [devicePopoverSearch, setDevicePopoverSearch] = useState("");
@@ -1798,7 +1783,6 @@ function App() {
   const devicesRef = useRef<DeviceInfo[]>([]);
   const configRef = useRef<AppConfig | null>(null);
   const bugreportLogRequestRef = useRef(0);
-  const bugreportLogSearchRequestRef = useRef(0);
   const logcatPendingRef = useRef<Record<string, string[]>>({});
   const logcatNextIdRef = useRef<Record<string, number>>({});
   const logcatFlushTimerRef = useRef<number | null>(null);
@@ -1827,13 +1811,19 @@ function App() {
   const bugreportLogLastReportIdRef = useRef<string | null>(null);
   const bugreportLogLoadAllTokenRef = useRef(0);
   const bugreportLogLoadAllRunningRef = useRef(false);
+  const bugreportPopupLoadedSourceRef = useRef<string | null>(null);
+  const bugreportPopupInstanceCounterRef = useRef(0);
 
   const location = useLocation();
   const navigate = useNavigate();
   const logcatPopupContext = useMemo(() => parseLogcatPopupContext(location.search), [location.search]);
   const isLogcatPopupWindow = logcatPopupContext.isPopup;
   const logcatPopupSerial = logcatPopupContext.serial;
+  const bugreportPopupContext = useMemo(() => parseBugreportPopupContext(location.search), [location.search]);
+  const isBugreportPopupSession = bugreportPopupContext.isPopup && !isLogcatPopupWindow;
+  const bugreportPopupSourcePath = bugreportPopupContext.sourcePath;
   const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
+  const isDetachedPopupWindow = isLogcatPopupWindow || isBugreportPopupSession;
   const isLogcatView = location.pathname === "/logcat";
   const isPerformanceView = location.pathname === "/performance";
   const isNetworkView = location.pathname === "/network";
@@ -1858,6 +1848,17 @@ function App() {
     setSelectedSerials((prev) => (prev.length === 1 && prev[0] === logcatPopupSerial ? prev : [logcatPopupSerial]));
     setDevicePopoverOpen(false);
   }, [isLogcatPopupWindow, location.pathname, location.search, navigate, logcatPopupSerial]);
+
+  useEffect(() => {
+    if (!isBugreportPopupSession) {
+      return;
+    }
+    if (location.pathname !== "/bugreport-logviewer") {
+      navigate(`/bugreport-logviewer${location.search}`, { replace: true });
+      return;
+    }
+    setDevicePopoverOpen(false);
+  }, [isBugreportPopupSession, location.pathname, location.search, navigate]);
 
   const resolveSelectedSerialsForContext = useCallback(
     (previous: string[], nextDevices: DeviceInfo[]): string[] => {
@@ -2120,6 +2121,21 @@ function App() {
     }
     return [];
   }, [latestBugreportEntries, bugreportResult, activeSerial]);
+  const bugreportBufferOptions = useMemo(() => {
+    const summary = bugreportLogSummary;
+    if (!summary) {
+      return [] as Array<{ key: string; count: number }>;
+    }
+    const preferredOrder = ["main", "system", "crash", "events", "radio"];
+    const seen = new Set(preferredOrder);
+    const extraKeys = Object.keys(summary.buffers ?? {})
+      .filter((key) => !seen.has(key))
+      .sort((a, b) => a.localeCompare(b));
+    const orderedKeys = [...preferredOrder, ...extraKeys];
+    return orderedKeys
+      .map((key) => ({ key, count: summary.buffers?.[key] ?? 0 }))
+      .filter((item) => item.count > 0);
+  }, [bugreportLogSummary]);
   const bugreportLogFilters = useMemo<BugreportLogFilters>(() => {
     const pidValue = Number.parseInt(bugreportLogPid.trim(), 10);
     const enabledLevels = LOG_LEVELS.filter((level) => logLevels[level]);
@@ -6159,6 +6175,49 @@ function App() {
     return "opened";
   };
 
+  const openBugreportPopupWindow = async (): Promise<void> => {
+    const popupSeed = `instance-${Date.now()}-${bugreportPopupInstanceCounterRef.current + 1}`;
+    bugreportPopupInstanceCounterRef.current += 1;
+    const popupLabel = buildBugreportPopupWindowLabel(popupSeed);
+    const popupHash = buildBugreportPopupHash();
+    const popupWindow = new WebviewWindow(popupLabel, {
+      title: "Bugreport Logs",
+      url: popupHash,
+      width: 1120,
+      height: 720,
+      minWidth: 900,
+      minHeight: 560,
+      focus: true,
+    });
+    void popupWindow.once("tauri://error", (event) => {
+      const message =
+        typeof event.payload === "string" && event.payload.trim()
+          ? event.payload
+          : "Unable to open popup window.";
+      pushToast(message, "error");
+    });
+  };
+
+  const handleOpenBugreportLogPopup = async () => {
+    try {
+      if (!isTauriRuntime()) {
+        const popup = window.open(
+          buildBugreportPopupHash(),
+          "_blank",
+          "noopener,noreferrer",
+        );
+        if (!popup) {
+          pushToast("Unable to open popup window.", "error");
+          return;
+        }
+        return;
+      }
+      await openBugreportPopupWindow();
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
   const closeLogcatPopupSelectorModal = () => setLogcatPopupSelectorOpen(false);
 
   const openLogcatPopupSelectorModal = () => {
@@ -8259,9 +8318,6 @@ function App() {
       setBugreportLogRows((prev) => (append ? [...prev, ...response.data.rows] : response.data.rows));
       setBugreportLogHasMore(response.data.has_more);
       setBugreportLogOffset(response.data.next_offset);
-      if (!append) {
-        setBugreportLogContextAnchorId(null);
-      }
     } catch (error) {
       if (bugreportLogRequestRef.current !== requestId) {
         return;
@@ -8276,111 +8332,8 @@ function App() {
     }
   };
 
-  const runBugreportLogAround = async (reportId: string, anchorId: number) => {
-    const requestId = bugreportLogRequestRef.current + 1;
-    bugreportLogRequestRef.current = requestId;
-    bugreportLogLoadAllTokenRef.current += 1;
-    setBugreportLogLoadAllRunning(false);
-    setBugreportLogBusy(true);
-    setBugreportLogError(null);
-    try {
-      const response = await queryBugreportLogcatAround(reportId, anchorId, bugreportLogFilters, 200, 200);
-      if (bugreportLogRequestRef.current !== requestId) {
-        return;
-      }
-      setBugreportLogRows(response.data.rows);
-      setBugreportLogHasMore(false);
-      setBugreportLogOffset(0);
-      setBugreportLogContextAnchorId(anchorId);
-    } catch (error) {
-      if (bugreportLogRequestRef.current !== requestId) {
-        return;
-      }
-      const message = formatError(error);
-      setBugreportLogError(message);
-      pushToast(message, "error");
-    } finally {
-      if (bugreportLogRequestRef.current === requestId) {
-        setBugreportLogBusy(false);
-      }
-    }
-  };
-
-  const handleBugreportLogBackToList = () => {
-    setBugreportLogContextAnchorId(null);
-    if (bugreportLogSummary) {
-      void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
-    }
-  };
-
-  const handleBugreportLogSearch = async () => {
-    if (!bugreportLogSummary) {
-      pushToast("Load a bugreport first.", "error");
-      return;
-    }
-    const term = bugreportLogSearchTerm.trim();
-    if (!term) {
-      pushToast("Enter a search query.", "error");
-      return;
-    }
-
-    const requestId = bugreportLogSearchRequestRef.current + 1;
-    bugreportLogSearchRequestRef.current = requestId;
-    setBugreportLogLastSearchTerm(term);
-    setBugreportLogMatches([]);
-    setBugreportLogMatchesTruncated(false);
-    setBugreportLogMatchIndex(-1);
-    setBugreportLogMatchesOpen(false);
-    setBugreportLogBusy(true);
-    setBugreportLogError(null);
-    try {
-      const response = await searchBugreportLogcat(bugreportLogSummary.report_id, term, bugreportLogFilters, 200);
-      if (bugreportLogSearchRequestRef.current !== requestId) {
-        return;
-      }
-      setBugreportLogMatches(response.data.matches);
-      setBugreportLogMatchesTruncated(response.data.truncated);
-      setBugreportLogMatchIndex(response.data.matches.length ? 0 : -1);
-    } catch (error) {
-      if (bugreportLogSearchRequestRef.current !== requestId) {
-        return;
-      }
-      const message = formatError(error);
-      setBugreportLogError(message);
-      pushToast(message, "error");
-    } finally {
-      if (bugreportLogSearchRequestRef.current === requestId) {
-        setBugreportLogBusy(false);
-      }
-    }
-  };
-
-  const openBugreportLogMatch = (index: number) => {
-    if (!bugreportLogSummary) {
-      return;
-    }
-    if (bugreportLogMatches.length === 0) {
-      return;
-    }
-    const normalized =
-      ((index % bugreportLogMatches.length) + bugreportLogMatches.length) % bugreportLogMatches.length;
-    const match = bugreportLogMatches[normalized];
-    if (!match) {
-      return;
-    }
-    setBugreportLogMatchIndex(normalized);
-    void runBugreportLogAround(bugreportLogSummary.report_id, match.id);
-  };
-
-  const moveBugreportLogMatch = (delta: number) => {
-    if (bugreportLogMatches.length === 0) {
-      return;
-    }
-    if (bugreportLogMatchIndex < 0) {
-      openBugreportLogMatch(delta < 0 ? bugreportLogMatches.length - 1 : 0);
-      return;
-    }
-    openBugreportLogMatch(bugreportLogMatchIndex + delta);
+  const handleBugreportLogBufferChange = (nextBuffer: string) => {
+    setBugreportLogBuffer(nextBuffer);
   };
 
   const loadBugreportLogFromPath = async (path: string) => {
@@ -8399,13 +8352,6 @@ function App() {
     setBugreportLogHasMore(false);
     setBugreportLogOffset(0);
     setBugreportLogBuffer("");
-    setBugreportLogSearchTerm("");
-    setBugreportLogLastSearchTerm("");
-    setBugreportLogMatches([]);
-    setBugreportLogMatchesTruncated(false);
-    setBugreportLogMatchIndex(-1);
-    setBugreportLogMatchesOpen(false);
-    setBugreportLogContextAnchorId(null);
 
     setBugreportLogBusy(true);
     setBugreportLogError(null);
@@ -8434,13 +8380,33 @@ function App() {
   };
 
   useEffect(() => {
-    if (!bugreportLogSummary) {
+    if (!isBugreportPopupSession) {
+      bugreportPopupLoadedSourceRef.current = null;
       return;
     }
     if (!isBugreportLogViewer) {
       return;
     }
-    if (bugreportLogContextAnchorId != null) {
+    const sourcePath = bugreportPopupSourcePath?.trim() ?? "";
+    if (!sourcePath) {
+      return;
+    }
+    if (bugreportPopupLoadedSourceRef.current === sourcePath) {
+      return;
+    }
+    bugreportPopupLoadedSourceRef.current = sourcePath;
+    void loadBugreportLogFromPath(sourcePath);
+  }, [
+    bugreportPopupSourcePath,
+    isBugreportLogViewer,
+    isBugreportPopupSession,
+  ]);
+
+  useEffect(() => {
+    if (!bugreportLogSummary) {
+      return;
+    }
+    if (!isBugreportLogViewer) {
       return;
     }
     if (bugreportLogLoadAllRunningRef.current) {
@@ -8456,18 +8422,10 @@ function App() {
       void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
     }, delayMs);
     return () => window.clearTimeout(handle);
-  }, [bugreportLogContextAnchorId, bugreportLogSummary, bugreportLogFilters]);
-
-  useEffect(() => {
-    if (bugreportLogContextAnchorId == null) {
-      return;
-    }
-    // Changing filters should return the viewer back to the main list mode to avoid surprising output.
-    setBugreportLogContextAnchorId(null);
-  }, [bugreportLogFilters]);
+  }, [bugreportLogSummary, bugreportLogFilters, isBugreportLogViewer]);
 
   const handleBugreportLogLoadAll = async () => {
-    if (!bugreportLogSummary || bugreportLogBusy || bugreportLogContextAnchorId != null) {
+    if (!bugreportLogSummary || bugreportLogBusy) {
       return;
     }
 
@@ -10848,8 +10806,8 @@ function App() {
   };
 
   return (
-    <div className={`app-shell${isLogcatPopupWindow ? " logcat-popup-shell" : ""}`}>
-      {!isLogcatPopupWindow && (
+    <div className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`}>
+      {!isDetachedPopupWindow && (
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-title">Lazy Blacktea</span>
@@ -10909,7 +10867,7 @@ function App() {
       )}
 
       <div className="app-main">
-        {!isLogcatPopupWindow && (
+        {!isDetachedPopupWindow && (
         <header className="top-bar">
           <div className="device-context">
             <div className="device-selector-row">
@@ -11175,7 +11133,7 @@ function App() {
         </header>
         )}
 
-        <main className={`page${isLogcatPopupWindow ? " logcat-popup-page" : ""}`}>
+        <main className={`page${isDetachedPopupWindow ? " logcat-popup-page" : ""}`}>
           <Routes>
             <Route path="/" element={<DashboardView />} />
             <Route path="/quick-actions" element={<QuickActionsView />} />
@@ -14077,11 +14035,17 @@ function App() {
                   <div className="page-header">
                     <div>
                       <h1>Bugreport Log Viewer</h1>
-                      <p className="muted">Load bugreport logs and filter with search.</p>
+                      <p className="muted">Load bugreport logs and inspect with live filters and find.</p>
                     </div>
                     <div className="page-actions">
                       <button onClick={handlePickBugreportLogFile} disabled={bugreportLogBusy}>
                         Browse
+                      </button>
+                      <button
+                        className="ghost"
+                        onClick={() => void handleOpenBugreportLogPopup()}
+                      >
+                        Open in New Window
                       </button>
                     </div>
                   </div>
@@ -14098,56 +14062,41 @@ function App() {
                         </span>
                       </div>
                       <div className="button-row compact">
-                        {bugreportLogContextAnchorId != null ? (
-                          <>
-                            <span className="badge">Context view</span>
-                            <button
-                              className="ghost"
-                              onClick={handleBugreportLogBackToList}
-                              disabled={bugreportLogBusy}
-                            >
-                              Back to list
-                            </button>
-                          </>
+                        <button
+                          className="ghost"
+                          onClick={() => {
+                            if (bugreportLogSummary) {
+                              void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
+                            }
+                          }}
+                          disabled={!bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning}
+                        >
+                          Refresh
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (bugreportLogSummary) {
+                              void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+                            }
+                          }}
+                          disabled={
+                            !bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning || !bugreportLogHasMore
+                          }
+                        >
+                          Load more
+                        </button>
+                        {bugreportLogLoadAllRunning ? (
+                          <button className="ghost" onClick={handleBugreportLogStopLoadAll}>
+                            Stop
+                          </button>
                         ) : (
-                          <>
-                            <button
-                              className="ghost"
-                              onClick={() => {
-                                if (bugreportLogSummary) {
-                                  void runBugreportLogQuery(bugreportLogSummary.report_id, 0, false);
-                                }
-                              }}
-                              disabled={!bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning}
-                            >
-                              Refresh
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (bugreportLogSummary) {
-                                  void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
-                                }
-                              }}
-                              disabled={
-                                !bugreportLogSummary || bugreportLogBusy || bugreportLogLoadAllRunning || !bugreportLogHasMore
-                              }
-                            >
-                              Load more
-                            </button>
-                            {bugreportLogLoadAllRunning ? (
-                              <button className="ghost" onClick={handleBugreportLogStopLoadAll}>
-                                Stop
-                              </button>
-                            ) : (
-                              <button
-                                className="ghost"
-                                onClick={() => void handleBugreportLogLoadAll()}
-                                disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
-                              >
-                                Load all
-                              </button>
-                            )}
-                          </>
+                          <button
+                            className="ghost"
+                            onClick={() => void handleBugreportLogLoadAll()}
+                            disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
+                          >
+                            Load all
+                          </button>
                         )}
                       </div>
                     </div>
@@ -14213,102 +14162,6 @@ function App() {
                     )}
 
                     <div className="bugreport-log-toolbar">
-                      <div className="panel-sub bugreport-log-topbar">
-                        <div className="form-row">
-                          <label>Buffer</label>
-                          <select
-                            value={bugreportLogBuffer}
-                            onChange={(event) => {
-                              setBugreportLogBuffer(event.target.value);
-                              setBugreportLogLastSearchTerm("");
-                              setBugreportLogMatches([]);
-                              setBugreportLogMatchesTruncated(false);
-                              setBugreportLogMatchIndex(-1);
-                              setBugreportLogMatchesOpen(false);
-                            }}
-                            disabled={!bugreportLogSummary || bugreportLogBusy}
-                          >
-                            <option value="">All</option>
-                            {(() => {
-                              const summary = bugreportLogSummary;
-                              if (!summary) {
-                                return null;
-                              }
-                              const order = ["main", "system", "crash", "events", "radio"];
-                              const seen = new Set(order);
-                              const extra = Object.keys(summary.buffers ?? {})
-                                .filter((key) => !seen.has(key))
-                                .sort((a, b) => a.localeCompare(b));
-                              return (
-                                <>
-                                  {order.map((key) => {
-                                    const count = summary.buffers?.[key] ?? 0;
-                                    if (!count) {
-                                      return null;
-                                    }
-                                    return (
-                                      <option key={key} value={key}>
-                                        {key} ({count.toLocaleString()})
-                                      </option>
-                                    );
-                                  })}
-                                  {extra.map((key) => (
-                                    <option key={key} value={key}>
-                                      {key} ({(summary.buffers?.[key] ?? 0).toLocaleString()})
-                                    </option>
-                                  ))}
-                                </>
-                              );
-                            })()}
-                          </select>
-                          <label>Search (FTS)</label>
-                          <input
-                            value={bugreportLogSearchTerm}
-                            onChange={(event) => {
-                              const next = event.target.value;
-                              setBugreportLogSearchTerm(next);
-                              if (bugreportLogLastSearchTerm && bugreportLogLastSearchTerm !== next.trim()) {
-                                setBugreportLogLastSearchTerm("");
-                                setBugreportLogMatches([]);
-                                setBugreportLogMatchesTruncated(false);
-                                setBugreportLogMatchIndex(-1);
-                                setBugreportLogMatchesOpen(false);
-                              }
-                            }}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter") {
-                                event.preventDefault();
-                                void handleBugreportLogSearch();
-                              }
-                            }}
-                            placeholder="e.g. AndroidRuntime FATAL EXCEPTION"
-                            disabled={!bugreportLogSummary || bugreportLogBusy}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => void handleBugreportLogSearch()}
-                            disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogSearchTerm.trim()}
-                          >
-                            Search
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost"
-                            onClick={() => {
-                              setBugreportLogSearchTerm("");
-                              setBugreportLogLastSearchTerm("");
-                              setBugreportLogMatches([]);
-                              setBugreportLogMatchesTruncated(false);
-                              setBugreportLogMatchIndex(-1);
-                              setBugreportLogMatchesOpen(false);
-                            }}
-                            disabled={bugreportLogBusy || (!bugreportLogSearchTerm.trim() && bugreportLogMatches.length === 0)}
-                          >
-                            Clear
-                          </button>
-                        </div>
-                      </div>
-
 	                      {(() => {
 	                        const chips: Array<{ key: string; label: string; tone?: "exclude" | "info" }> = [];
                           const buffer = bugreportLogBuffer.trim();
@@ -14406,7 +14259,7 @@ function App() {
                           saveBugreportPreset(bugreportPresetName);
                         }}
                         showPresetRow
-                        disabled={bugreportLogBusy}
+                        disabled={!bugreportLogSummary}
                         filtersCount={sharedLogTextChips.length}
                         activePresetLabel={selectedBugreportPreset?.name}
                         levelsSummary={logLevelsSummary}
@@ -14425,9 +14278,9 @@ function App() {
                           bugreportLogAdvancedOpen ? (
                             <>
                               <div className="panel-sub">
-                                <h3>Search Scope</h3>
+                                <h3>Filter Scope</h3>
                                 <div className="muted bugreport-log-search-hint">
-                                  Search uses levels, buffer, tag, PID, time range, and regex filters.
+                                  Filtering uses levels, buffer, tag, PID, time range, and regex filters.
                                 </div>
                               </div>
                               <div className="panel-sub">
@@ -14435,6 +14288,23 @@ function App() {
                                 <div className="bugreport-log-advanced-fields">
                                   <div className="bugreport-log-advanced-controls">
                                     <div className="bugreport-log-toolbar-row">
+                                      <div className="bugreport-log-filter-field">
+                                        <label htmlFor="bugreport-log-buffer">Buffer</label>
+                                        <select
+                                          id="bugreport-log-buffer"
+                                          className="logcat-select"
+                                          value={bugreportLogBuffer}
+                                          onChange={(event) => handleBugreportLogBufferChange(event.target.value)}
+                                          disabled={!bugreportLogSummary || bugreportLogBusy}
+                                        >
+                                          <option value="">All</option>
+                                          {bugreportBufferOptions.map((item) => (
+                                            <option key={item.key} value={item.key}>
+                                              {item.key} ({item.count.toLocaleString()})
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
                                       <div className="bugreport-log-filter-field">
                                         <label htmlFor="bugreport-log-tag">Tag</label>
                                         <input
@@ -14507,13 +14377,6 @@ function App() {
                                           setBugreportLogStart("");
                                           setBugreportLogEnd("");
                                           setLogLevels(defaultLogcatLevels);
-                                          setBugreportLogSearchTerm("");
-                                          setBugreportLogLastSearchTerm("");
-                                          setBugreportLogMatches([]);
-                                          setBugreportLogMatchesTruncated(false);
-                                          setBugreportLogMatchIndex(-1);
-                                          setBugreportLogMatchesOpen(false);
-                                          setBugreportLogContextAnchorId(null);
                                         }}
                                         disabled={bugreportLogBusy}
                                       >
@@ -14528,78 +14391,6 @@ function App() {
                         }
                       />
 
-	                      {bugreportLogMatches.length > 0 ? (
-	                        <div className="panel-sub bugreport-log-matchesbar">
-	                          <div className="bugreport-log-matchesbar-row">
-                            <span className="muted">
-                              Matches{" "}
-                              {bugreportLogMatchesTruncated
-                                ? `${bugreportLogMatches.length.toLocaleString()}+`
-                                : bugreportLogMatches.length.toLocaleString()}
-                              {bugreportLogMatchIndex >= 0 && bugreportLogMatches.length
-                                ? ` · ${Math.min(bugreportLogMatchIndex + 1, bugreportLogMatches.length)}/${bugreportLogMatches.length}`
-                                : ""}
-                            </span>
-                            <div className="button-row compact bugreport-log-matchesbar-actions">
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => moveBugreportLogMatch(-1)}
-                                disabled={bugreportLogBusy || bugreportLogMatches.length === 0}
-                              >
-                                Prev
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => moveBugreportLogMatch(1)}
-                                disabled={bugreportLogBusy || bugreportLogMatches.length === 0}
-                              >
-                                Next
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => setBugreportLogMatchesOpen((prev) => !prev)}
-                                disabled={bugreportLogBusy}
-                              >
-                                {bugreportLogMatchesOpen ? "Hide list" : "Show list"}
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ) : bugreportLogLastSearchTerm &&
-                        bugreportLogLastSearchTerm === bugreportLogSearchTerm.trim() &&
-                        bugreportLogSummary &&
-                        !bugreportLogBusy &&
-                        !bugreportLogError ? (
-                        <p className="muted">No matches.</p>
-                      ) : null}
-
-	                      {bugreportLogMatchesOpen && bugreportLogMatches.length > 0 && (
-	                        <div className="output-block bugreport-log-matches">
-	                          <div className="bugreport-log-match-list" role="list">
-	                            {bugreportLogMatches.map((match, index) => (
-                              <button
-                                key={`${match.id}-${match.ts}`}
-                                type="button"
-                                className={`bugreport-log-match-row${index === bugreportLogMatchIndex ? " active" : ""}`}
-                                onClick={() => openBugreportLogMatch(index)}
-                                disabled={bugreportLogBusy}
-                                role="listitem"
-                              >
-                                <div className="bugreport-log-match-row-top">
-                                  <span className="muted bugreport-log-match-meta">
-                                    {match.ts} · {match.level} · {match.tag} · pid {match.pid}
-                                  </span>
-                                  <span className="badge bugreport-log-match-buffer">{match.buffer}</span>
-                                </div>
-                                <div className="bugreport-log-match-msg">{match.msg}</div>
-                              </button>
-                            ))}
-	                          </div>
-	                        </div>
-	                      )}
 	                    </div>
 
 
@@ -14609,7 +14400,6 @@ function App() {
 		                        highlightPattern={bugreportLogSearchPattern}
 		                        canLoadMore={Boolean(bugreportLogSummary) && bugreportLogHasMore && !bugreportLogLoadAllRunning}
 		                        busy={bugreportLogBusy || bugreportLogLoadAllRunning}
-		                        activeRowId={bugreportLogContextAnchorId}
 		                        onNearBottom={() => {
 		                          if (!bugreportLogSummary) {
 		                            return;
