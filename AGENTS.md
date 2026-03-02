@@ -2,12 +2,19 @@
 
 These rules are **always on** for any automated agent work in this repository.
 
-## Language
+## DO NOT FORGET
+
+- Follow DEFAULT FLOW unless explicitly allowed.
+- SECURITY rules are ALWAYS ON.
+- UI / UX rules apply to all user-facing changes.
+- If unsure, ask before coding.
+
+## LANGUAGE
 
 - Use **English only** for: code, comments, logs, config, UI strings, and commit messages.
 - Use **Traditional Chinese (Taiwan)** for: planning and explanations in chat.
 
-## Core Rules
+## CORE RULES
 
 - If requirements, scope, acceptance criteria, or constraints are unclear: **ask before coding**.
 - Do **not** modify, revert, delete, or refactor unrelated code or files.
@@ -17,7 +24,7 @@ These rules are **always on** for any automated agent work in this repository.
 - No silent error swallowing (no empty `catch`, no ignored `Result` without intent).
 - Do not experiment directly in production environments.
 
-## Default Flow
+## DEFAULT FLOW
 
 Follow this flow unless explicitly allowed otherwise:
 
@@ -28,22 +35,88 @@ Follow this flow unless explicitly allowed otherwise:
 5. Summary
 
 Notes:
+- For trivial or UI-only changes, Plan/TDD may be abbreviated but not skipped silently.
 - If TDD is skipped, explicitly state why and how correctness is verified.
 - Auth, payments, permissions, and data mutation require TDD plus integration tests.
 
-## Security (Always On)
+## SKILL STRATEGY (UI/UX)
+
+- For UI/UX tasks, always try Gemini-based UIUX skills first (`gemini-uiux-designer`, `gemini-uiux-visual-engineer`).
+- If Gemini execution fails, fallback to non-Gemini UI/UX flow.
+- Failure is defined as any of:
+  - Tool unavailable / dispatch error / exception.
+  - Timeout: invocation is actually terminated by timeout, or finishes with no usable result.
+  - Dependency error (quota/auth/network/authz, e.g. HTTP 429) returned by Gemini.
+  - Empty output, clearly malformed output, or missing required deliverables.
+- Tool window: 10 seconds per Gemini invocation (soft decision window, not a hard kill timeout).
+  - If usable output arrives after 10 seconds and the invocation completes successfully, treat it as success (not timeout).
+  - If classification is ambiguous, use final process result (exit status/stdout/stderr) as source of truth.
+- On failure: retry Gemini once; if the second attempt also fails, perform one fallback attempt to non-Gemini flow.
+- Use fallback only after these failed attempts; do not bypass Gemini for normal UI/UX tasks.
+
+## SKILL ROUTING POLICY (NON-SYSTEM)
+
+- Do not change `.system` skills (`skill-creator`, `skill-installer`) from this plan.
+- Keep `.system` skills unchanged unless explicitly requested.
+- For non-system skills, follow `/Users/cy76/.codex/skills/README.md` as the single source of truth:
+  - `explore` is the default entrypoint for codebase investigation.
+  - `document-writer` handles general documentation; `doc` handles DOCX-specific work.
+  - `frontend-ui-ux-engineer` handles Web/frontend UIUX; `frontend-mobile-uiux-designer` handles iOS/Android scope.
+  - Gemini skills are used as first-pass helpers under UI/UX flows, with retry/fallback policy unchanged.
+
+## CLARIFY
+
+- Ask concise questions only if scope, acceptance criteria, or constraints are unclear.
+- Ask before proceeding if a breaking change, data migration, or security impact is possible.
+- Do not propose solutions or plans at this stage.
+
+## PLAN
+
+- Then briefly state (include only what is relevant):
+  - Goal and explicit non-goals
+  - Files/modules likely to change
+  - Risk notes (compatibility, security, data, migrations)
+  - Test strategy (what level, what to mock)
+  - Verification plan (how to prove it works)
+  - Rollback approach (how to undo safely)
+- No code or tests in this section.
+
+## TDD
+
+- If TDD is skipped, explicitly state why and how correctness is verified.
+- Write tests BEFORE implementation for business logic and critical paths.
+- Auth, payments, permissions, and data mutation require TDD plus integration tests.
+- For UI-only changes, TDD is optional but a verification plan is required.
+- Tests must be deterministic and isolated (Arrange, Act, Assert).
+
+## IMPLEMENT
+
+- Search existing code before adding new logic.
+- Keep changes minimal, scoped, and single-responsibility.
+- Preserve existing style, types, lint, and format rules.
+- No commented-out, dead, or unrelated refactor code.
+
+## SUMMARY
+
+- Summary of changes (what / where / why).
+- List of updated files.
+- Test results or reproducible validation steps.
+- Compatibility impact (only if applicable).
+- Rollback notes and follow-up optimizations (if relevant).
+
+## SECURITY (ALWAYS ON)
 
 - Least-privilege access.
 - Validate all external input (including device output and user-provided paths).
 - Never log secrets, tokens, or PII.
 
-## Logging & Traceability (Server-side / Integrations)
+## LOGGING & TRACEABILITY (WHEN SERVER-SIDE OR INTEGRATIONS ARE INVOLVED)
 
 - Use `X-Request-ID` if provided; otherwise generate UUID v4.
-- Include `trace_id` in all logs and error responses.
+- Trace ID must appear in all logs and error responses.
 - Logs must be JSON in production.
 
-### Error Response Contract (API/server-side)
+## ERROR RESPONSE (WHEN API/SERVER-SIDE)
 
 Return to clients only (no internal details):
 
@@ -55,34 +128,77 @@ Return to clients only (no internal details):
 }
 ```
 
-## Error Handling (When Applicable)
+## ERROR HANDLING (WHEN APPLICABLE)
 
 - Classify errors: validation, business, system, dependency.
-- Log stack traces for system errors (but keep client errors user-safe).
+- Log stack traces for system errors.
 - Retry only idempotent operations.
-- Use bounded exponential backoff for retries.
-- Define timeouts (rule of thumb: API ~10s, DB ~5s).
+- Use bounded exponential backoff.
+- Define timeouts (API ~10s, DB ~5s).
 
-## UI / UX (User-facing)
+## TASK-TYPE CHECKLISTS (CONDITIONAL)
+
+### FRONTEND (USER-FACING UI: WEB / ANDROID / IOS)
+
+- Verify key user flows using appropriate tools:
+  - Web: DevTools
+  - Android: adb / Android Studio
+  - iOS: Xcode / Simulator
+- Ensure user-facing errors are clear and actionable.
+- Avoid leaking technical or internal details to users.
+
+### UI / UX (WHEN USER-FACING)
 
 - Do not change UI/UX behavior without explicit intent or approval.
 - Preserve established interaction patterns unless a change is required.
-- All user-visible states must be handled: Loading, Empty, Error, Disabled, Success (if applicable).
-- Error messages must be human-readable and must not expose technical/internal details.
-- Avoid layout shifts during loading where reasonably possible.
-- Do not degrade accessibility compared to existing behavior.
+- All user-visible states must be handled:
+  - Loading
+  - Empty
+  - Error
+  - Disabled
+  - Success (if applicable)
+- User feedback must be:
+  - Immediate for user actions
+  - Clear and human-readable
+  - Consistent with existing tone and terminology
+- Avoid UI regressions:
+  - No layout shifts during loading (where reasonably preventable)
+  - No breaking keyboard / touch interactions
+  - No degraded accessibility compared to existing behavior
+- Error presentation:
+  - User-facing messages must not expose technical details
+  - Map internal errors to user-meaningful messages
+  - Retry guidance must be explicit if retry is possible
+- Performance perception:
+  - Avoid blocking UI on non-critical operations
+  - Prefer optimistic or incremental rendering when applicable
 
-## Backend Compatibility
+### APP (MOBILE)
+
+- Applies in addition to FRONTEND (USER-FACING UI: WEB / ANDROID / IOS).
+- Assume unreliable networks and background suspension.
+- Avoid infinite retries; keep retries bounded and idempotent.
+- Note impacts to auth/session/storage, push, deep links, permissions.
+- Consider backward compatibility with older app versions when calling APIs.
+
+### BACKEND
 
 - Do not break API contracts without versioning or approval.
+- Prefer backward-compatible changes.
 - DB schema changes require safe rollout (expand, migrate, contract).
 
-## Files & Repo Hygiene
+### INFRA / OPS
+
+- State what will change (resources, config, permissions) and blast radius.
+- Provide a minimal troubleshooting note (where to look first if it fails).
+- Avoid high-cardinality logs/metrics that can explode cost.
+
+## FILES
 
 - Check file size before reading large files (`wc -l`) and prefer partial reads (`rg`, `sed -n`).
 - Do not dump large files blindly into chat.
 
-## Testing (This Repo)
+## TESTING
 
 Preferred commands:
 
@@ -96,10 +212,19 @@ macOS note:
 - Prefer: browser-mode UI smoke + Rust backend smoke/soak + real-device ADB smoke.
 - See `docs/testing.md` for the manual desktop QA checklist (product paths).
 
-During any manual testing (DevTools / adb / real devices), always verify:
-- Functionality: core flows work without errors.
-- UI/UX: layout, feedback, and interactions are usable.
-- Regressions: no new obvious breakage introduced.
+- During any manual testing (DevTools, adb, iOS tools, emulators, real devices), always verify:
+  1) Functionality: core flows work without errors
+  2) UI/UX: layout, feedback, and interactions are usable
+  3) Regressions: no new obvious breakage introduced
+
+- If UI/App related:
+  - Check loading, error, and disabled states
+  - Verify behavior under slow or unstable network
+
+- If Backend/API related:
+  - Validate responses, error codes, and trace_id on failure
+
+- If no automated tests exist, provide clear manual verification steps.
 
 ---
 
@@ -196,6 +321,34 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all --all-features
 ```
+
+## Release Playbook (vX.Y.Z)
+
+When the user asks to release a new version, use this exact sequence unless explicitly overridden:
+
+1. Bump version in all required files:
+   - `package.json`
+   - `package-lock.json`
+   - `src-tauri/Cargo.toml`
+   - `src-tauri/Cargo.lock`
+   - `src-tauri/tauri.conf.json`
+2. Commit version bump with message `Release vX.Y.Z`.
+3. Push branch and tag:
+   - `git push origin master`
+   - `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
+   - `git push origin vX.Y.Z`
+4. Create published GitHub release (required to trigger installer build workflow):
+   - `gh release create vX.Y.Z --title "vX.Y.Z" --generate-notes`
+5. Verify release assets include installers:
+   - macOS: `.dmg`
+   - Linux: `.AppImage` and `.deb`
+6. If Linux installers are missing, inspect `release.yml` workflow run and job logs.
+   - Common transient error: `failed to bundle project 'io: Peer disconnected'` during AppImage bundling.
+   - Recovery: rerun failed jobs via `gh run rerun <run_id> --failed`, then re-check assets.
+
+Notes:
+- `release.yml` is triggered by `release: published`, not by tag push alone.
+- Keep retries bounded; do not loop indefinitely. Report final run URL and current asset list to the user.
 
 ## UI/UX Artifacts
 

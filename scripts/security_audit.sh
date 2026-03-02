@@ -6,22 +6,34 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-"$ROOT_DIR/.audit"}"
 mkdir -p "$OUT_DIR"
 
+section() {
+  echo "-- $1"
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
 echo "== Lazy Blacktea Security Audit =="
 echo "out: $OUT_DIR"
 echo
 
-echo "-- npm audit (JSON)"
+section "npm audit (JSON)"
 cd "$ROOT_DIR"
-if npm audit --json >"$OUT_DIR/npm_audit.json"; then
-  echo "  status: ok"
+if command_exists npm; then
+  if npm audit --json >"$OUT_DIR/npm_audit.json"; then
+    echo "  status: ok"
+  else
+    # npm audit exits non-zero when vulnerabilities are found.
+    echo "  status: vulnerabilities found (see npm_audit.json)"
+  fi
+  echo "  saved: $OUT_DIR/npm_audit.json"
 else
-  # npm audit exits non-zero when vulnerabilities are found.
-  echo "  status: vulnerabilities found (see npm_audit.json)"
+  echo "  status: skipped (npm not installed)"
 fi
-echo "  saved: $OUT_DIR/npm_audit.json"
 echo
 
-echo "-- cargo audit (JSON)"
+section "cargo audit (JSON)"
 cd "$ROOT_DIR/src-tauri"
 if command -v cargo-audit >/dev/null 2>&1; then
   if cargo audit --json >"$OUT_DIR/cargo_audit.json"; then
@@ -36,21 +48,28 @@ else
 fi
 echo
 
-echo "-- tauri config quick checks"
+section "tauri config quick checks"
 cd "$ROOT_DIR"
-if jq -e '.app.security.csp == null' src-tauri/tauri.conf.json >/dev/null 2>&1; then
-  echo "  warn: CSP is null in src-tauri/tauri.conf.json (no CSP hardening)."
+if command_exists jq; then
+  if jq -e '.app.security.csp == null' src-tauri/tauri.conf.json >/dev/null 2>&1; then
+    echo "  warn: CSP is null in src-tauri/tauri.conf.json (no CSP hardening)."
+  else
+    echo "  ok: CSP is set."
+  fi
 else
-  echo "  ok: CSP is set."
+  echo "  status: skipped (jq not installed)"
 fi
 echo
 
-echo "-- high-risk command surface"
-if rg -n "pub fn run_shell\\b" src-tauri/src/app/commands/mod.rs >/dev/null 2>&1; then
-  echo "  note: run_shell exists (device-side arbitrary shell via adb)."
-  echo "  recommendation: consider adding a 'restricted mode' or explicit user confirmation for production usage."
+section "high-risk command surface"
+if command_exists rg; then
+  if rg -n "pub fn run_shell\\b" src-tauri/src/app/commands/mod.rs >/dev/null 2>&1; then
+    echo "  note: run_shell exists (device-side arbitrary shell via adb)."
+    echo "  recommendation: consider adding a 'restricted mode' or explicit user confirmation for production usage."
+  fi
+else
+  echo "  status: skipped (rg not installed)"
 fi
 echo
 
 echo "OK"
-

@@ -5489,10 +5489,47 @@ textarea:disabled {
   background: var(--color-bg-subtle);
 }
 
+.pairing-step.inactive {
+  opacity: 0.72;
+}
+
 .pairing-step-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.pairing-step-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pairing-step-status.idle {
+  color: var(--color-text-muted);
+}
+
+.pairing-step-status.pending {
+  color: var(--color-primary);
+}
+
+.pairing-step-status.ok {
+  color: var(--color-success);
+}
+
+.pairing-help {
+  margin-top: 2px;
+}
+
+.pairing-help-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pairing-help-list li {
+  line-height: 1.35;
 }
 
 @media (max-width: 1100px) {

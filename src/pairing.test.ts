@@ -27,6 +27,20 @@ describe("pairing parsing", () => {
     expect(parsed.pairAddress).toBe("192.168.0.10:37145");
     expect(parsed.pairingCode).toBe("123456");
   });
+
+  it("parses QR payload when copied with surrounding spaces", () => {
+    const payload = "  WIFI:T:ADB;S:10.0.0.7:33899;P:654321;;  ";
+    const parsed = parseQrPayload(payload);
+    expect(parsed.pairAddress).toBe("10.0.0.7:33899");
+    expect(parsed.pairingCode).toBe("654321");
+  });
+
+  it("returns trimmed adb pair message", () => {
+    const output = "Successfully paired to 10.0.0.7:33899\n\n";
+    const parsed = parseAdbPairOutput(output);
+    expect(parsed.connectAddress).toBe("10.0.0.7:33899");
+    expect(parsed.message).toBe("Successfully paired to 10.0.0.7:33899");
+  });
 });
 
 describe("pairing reducer", () => {

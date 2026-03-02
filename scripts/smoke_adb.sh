@@ -84,6 +84,14 @@ fi
 
 adb_cmd=(adb)
 
+adb_run() {
+  "${adb_cmd[@]}" "$@"
+}
+
+device_getprop() {
+  adb_run shell getprop "$1" | tr -d '\r'
+}
+
 ts_ms() {
   python3 - <<'PY'
 import time
@@ -139,30 +147,6 @@ add_check() {
   printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$1" "$2" "$3" "$4" "$5" "$6" >> "$CHECKS_FILE"
 }
 
-run_step() {
-  # name cmd... (captures stdout+stderr to a log file on failure only)
-  local name="$1"
-  shift 1
-  local start end dur status artifacts err_code err_msg
-  start="$(ts_ms)"
-
-  status="pass"
-  artifacts=""
-  err_code=""
-  err_msg=""
-
-  if ! "$@"; then
-    status="fail"
-    OVERALL_STATUS="fail"
-    err_code="ERR_STEP_FAILED"
-    err_msg="Step failed: ${name}"
-  fi
-
-  end="$(ts_ms)"
-  dur="$((end - start))"
-  add_check "$name" "$status" "$dur" "$artifacts" "$err_code" "$err_msg"
-}
-
 emit_text_header() {
   echo "== Lazy Blacktea ADB Smoke =="
   echo "serial: $SERIAL"
@@ -180,16 +164,16 @@ DEVICE_STATE_FILE="$OUT_DIR/device_state.txt"
 DEVICE_INFO_FILE="$OUT_DIR/device_info.txt"
 
 step_adb_version() {
-  "${adb_cmd[@]}" version > "$ADB_VERSION_FILE"
+  adb_run version > "$ADB_VERSION_FILE"
 }
 step_device_state() {
-  "${adb_cmd[@]}" get-state > "$DEVICE_STATE_FILE"
+  adb_run get-state > "$DEVICE_STATE_FILE"
 }
 step_device_info() {
-  MODEL="$("${adb_cmd[@]}" shell getprop ro.product.model | tr -d '\r')"
-  DEVICE="$("${adb_cmd[@]}" shell getprop ro.product.device | tr -d '\r')"
-  ANDROID_REL="$("${adb_cmd[@]}" shell getprop ro.build.version.release | tr -d '\r')"
-  SDK="$("${adb_cmd[@]}" shell getprop ro.build.version.sdk | tr -d '\r')"
+  MODEL="$(device_getprop ro.product.model)"
+  DEVICE="$(device_getprop ro.product.device)"
+  ANDROID_REL="$(device_getprop ro.build.version.release)"
+  SDK="$(device_getprop ro.build.version.sdk)"
   {
     echo "model=${MODEL:-unknown}"
     echo "device=${DEVICE:-unknown}"
@@ -238,7 +222,7 @@ fi
 
 SHOT_PATH="$OUT_DIR/screenshot.png"
 start="$(ts_ms)"
-if "${adb_cmd[@]}" exec-out screencap -p > "$SHOT_PATH"; then
+if adb_run exec-out screencap -p > "$SHOT_PATH"; then
   if [[ ! -s "$SHOT_PATH" ]]; then
     end="$(ts_ms)"
     add_check "screenshot" "fail" "$((end - start))" "$SHOT_PATH" "ERR_SCREENSHOT_EMPTY" "Screenshot capture produced an empty file"
@@ -265,7 +249,7 @@ fi
 
 LOGCAT_PATH="$OUT_DIR/logcat.txt"
 start="$(ts_ms)"
-if "${adb_cmd[@]}" logcat -d -v time -t 200 > "$LOGCAT_PATH"; then
+if adb_run logcat -d -v time -t 200 > "$LOGCAT_PATH"; then
   end="$(ts_ms)"
   add_check "logcat_snapshot" "pass" "$((end - start))" "$LOGCAT_PATH" "" ""
 else
@@ -283,7 +267,7 @@ fi
 DEVICE_TMP_DIR=""
 cleanup_device_tmp() {
   if [[ -n "$DEVICE_TMP_DIR" ]]; then
-    "${adb_cmd[@]}" shell rm -rf "$DEVICE_TMP_DIR" >/dev/null 2>&1 || true
+    adb_run shell rm -rf "$DEVICE_TMP_DIR" >/dev/null 2>&1 || true
   fi
 }
 
@@ -297,7 +281,7 @@ if [[ $WITH_FILES -eq 1 ]]; then
   FILES_STEP_ARTIFACTS=()
 
   start="$(ts_ms)"
-  "${adb_cmd[@]}" shell mkdir -p "$DEVICE_TMP_DIR"
+  adb_run shell mkdir -p "$DEVICE_TMP_DIR"
 
   FILES_STEP_ARTIFACTS+=("$OUT_DIR/push.txt" "$OUT_DIR/pulled.txt")
 
@@ -305,17 +289,8 @@ if [[ $WITH_FILES -eq 1 ]]; then
     echo "  device tmp: $DEVICE_TMP_DIR"
   fi
   echo "hello from lazy_blacktea_smoke" > "$OUT_DIR/push.txt"
-  if [[ "$FORMAT" == "json" ]]; then
-    "${adb_cmd[@]}" push "$OUT_DIR/push.txt" "$DEVICE_TMP_DIR/push.txt" >/dev/null 2>&1
-  else
-    "${adb_cmd[@]}" push "$OUT_DIR/push.txt" "$DEVICE_TMP_DIR/push.txt" >/dev/null 2>&1
-  fi
-
-  if [[ "$FORMAT" == "json" ]]; then
-    "${adb_cmd[@]}" pull "$DEVICE_TMP_DIR/push.txt" "$OUT_DIR/pulled.txt" >/dev/null 2>&1
-  else
-    "${adb_cmd[@]}" pull "$DEVICE_TMP_DIR/push.txt" "$OUT_DIR/pulled.txt" >/dev/null 2>&1
-  fi
+  adb_run push "$OUT_DIR/push.txt" "$DEVICE_TMP_DIR/push.txt" >/dev/null 2>&1
+  adb_run pull "$DEVICE_TMP_DIR/push.txt" "$OUT_DIR/pulled.txt" >/dev/null 2>&1
   if [[ ! -s "$OUT_DIR/pulled.txt" ]]; then
     end="$(ts_ms)"
     add_check "file_io" "fail" "$((end - start))" "$(IFS=,; echo "${FILES_STEP_ARTIFACTS[*]}")" "ERR_FILE_PULL_EMPTY" "Pulled file is empty"
@@ -326,7 +301,7 @@ if [[ $WITH_FILES -eq 1 ]]; then
   fi
 
   if [[ "$FORMAT" == "text" ]]; then
-    "${adb_cmd[@]}" shell ls -la "$DEVICE_TMP_DIR" | tr -d '\r' | sed 's/^/  /'
+    adb_run shell ls -la "$DEVICE_TMP_DIR" | tr -d '\r' | sed 's/^/  /'
     echo "  pulled: $OUT_DIR/pulled.txt"
   fi
 
@@ -337,7 +312,7 @@ if [[ $WITH_FILES -eq 1 ]]; then
     DUMP_REMOTE="$DEVICE_TMP_DIR/window_dump.xml"
     DUMP_LOCAL="$OUT_DIR/window_dump.xml"
     start="$(ts_ms)"
-    if "${adb_cmd[@]}" shell uiautomator dump "$DUMP_REMOTE" >/dev/null 2>&1 && "${adb_cmd[@]}" pull "$DUMP_REMOTE" "$DUMP_LOCAL" >/dev/null 2>&1; then
+    if adb_run shell uiautomator dump "$DUMP_REMOTE" >/dev/null 2>&1 && adb_run pull "$DUMP_REMOTE" "$DUMP_LOCAL" >/dev/null 2>&1; then
       if [[ ! -s "$DUMP_LOCAL" ]]; then
         end="$(ts_ms)"
         add_check "uiauto_dump" "fail" "$((end - start))" "$DUMP_LOCAL" "ERR_UIAUTO_EMPTY" "UI dump is empty"
@@ -371,7 +346,7 @@ if [[ -n "$APK_PATH" ]]; then
   fi
   start="$(ts_ms)"
   APK_LOG="$OUT_DIR/apk_install.txt"
-  if "${adb_cmd[@]}" install -r "$APK_PATH" > "$APK_LOG" 2>&1; then
+  if adb_run install -r "$APK_PATH" > "$APK_LOG" 2>&1; then
     end="$(ts_ms)"
     add_check "apk_install" "pass" "$((end - start))" "$APK_LOG" "" ""
   else

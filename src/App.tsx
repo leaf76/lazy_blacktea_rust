@@ -1328,192 +1328,6 @@ function LogLiveFilterBar({
   );
 }
 
-function InlineAdvancedPanel({
-  title,
-  onClose,
-  children,
-  className,
-}: {
-  title: string;
-  onClose: () => void;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={`output-block logcat-advanced-inline${className ? ` ${className}` : ""}`} aria-label="Advanced filters">
-      <div className="logcat-advanced-inline-header">
-        <span className="logcat-advanced-inline-title">{title}</span>
-        <button type="button" className="ghost" onClick={onClose}>
-          Close
-        </button>
-      </div>
-      <div className="logcat-advanced-body">{children}</div>
-    </div>
-  );
-}
-
-function SharedRegexFiltersAndPresetsPanel({
-  chips,
-  expanded,
-  onToggleExpanded,
-  onRemoveChip,
-  onClearChips,
-  disabled,
-  appliedTitle,
-  gridClassName,
-  presets,
-  presetSelected,
-  onPresetSelectedChange,
-  presetName,
-  onPresetNameChange,
-  hasSelectedPreset,
-  onApplyPreset,
-  onDeletePreset,
-  onSavePreset,
-  showPresetRow,
-  children,
-}: {
-  chips: LogTextChip[];
-  expanded: boolean;
-  onToggleExpanded: () => void;
-  onRemoveChip: (chipId: string) => void;
-  onClearChips: () => void;
-  disabled: boolean;
-  appliedTitle: string;
-  gridClassName?: string;
-  presets: Array<{ name: string }>;
-  presetSelected: string;
-  onPresetSelectedChange: (next: string) => void;
-  presetName: string;
-  onPresetNameChange: (next: string) => void;
-  hasSelectedPreset: boolean;
-  onApplyPreset: (name: string) => void;
-  onDeletePreset: (name: string) => void;
-  onSavePreset: () => void;
-  showPresetRow?: boolean;
-  children?: ReactNode;
-}) {
-  const shouldShowPresetRow = showPresetRow ?? true;
-  return (
-    <div className={`logcat-filter-grid${gridClassName ? ` ${gridClassName}` : ""}`}>
-      <div className="panel-sub logcat-filter-bar">
-        <div className="logcat-filter-combined">
-          <div className="logcat-filter-section">
-            <div className="logcat-filter-header">
-              <h3 title={appliedTitle}>Active Filters</h3>
-              <div className="logcat-filter-header-actions">
-                <span className="muted">{chips.length ? `${chips.length} filters` : "No filters"}</span>
-                <button type="button" className="ghost" onClick={onToggleExpanded}>
-                  {expanded ? "Hide" : "Expand"}
-                </button>
-              </div>
-            </div>
-            {expanded && (
-              <>
-                {chips.length === 0 ? (
-                  <p className="muted">No active filters</p>
-                ) : (
-                  <div className="bugreport-log-chip-list" role="list">
-                    {chips.map((chip) => (
-                      <span
-                        key={chip.id}
-                        className={`bugreport-log-chip ${chip.kind === "exclude" ? "exclude" : "include"}`}
-                        role="listitem"
-                      >
-                        <span className="bugreport-log-chip-label" title={chip.value}>
-                          {chip.kind === "exclude" ? `NOT ${chip.value}` : chip.value}
-                        </span>
-                        <button
-                          type="button"
-                          className="bugreport-log-chip-remove"
-                          aria-label={`Remove ${chip.kind === "exclude" ? "NOT " : ""}${chip.value}`}
-                          onClick={() => onRemoveChip(chip.id)}
-                          disabled={disabled}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-                <div className="button-row compact">
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={onClearChips}
-                    disabled={disabled || chips.length === 0}
-                  >
-                    Clear
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-
-        {shouldShowPresetRow && (
-          <div className="logcat-presets">
-            <div className="logcat-preset-row single">
-              <div className="logcat-preset-group left">
-                <label>Preset</label>
-                <select
-                  value={presetSelected}
-                  onChange={(event) => onPresetSelectedChange(event.target.value)}
-                  disabled={disabled}
-                >
-                  <option value="">Select preset</option>
-                  {presets.map((preset) => (
-                    <option key={preset.name} value={preset.name}>
-                      {preset.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (presetSelected) {
-                      onApplyPreset(presetSelected);
-                    }
-                  }}
-                  disabled={disabled || !hasSelectedPreset}
-                >
-                  Apply
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    if (presetSelected) {
-                      onDeletePreset(presetSelected);
-                    }
-                  }}
-                  disabled={disabled || !hasSelectedPreset}
-                >
-                  Delete
-                </button>
-              </div>
-              <div className="logcat-preset-group right">
-                <label>New</label>
-                <input
-                  value={presetName}
-                  onChange={(event) => onPresetNameChange(event.target.value)}
-                  placeholder="e.g. Crash Only"
-                  disabled={disabled}
-                />
-                <button type="button" onClick={onSavePreset} disabled={disabled}>
-                  Save
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {children}
-      </div>
-    </div>
-  );
-}
-
 function App() {
   type LogcatFilterPreset = LegacyLogcatPreset & {
     levels?: LogcatLevelsState;
@@ -1955,6 +1769,8 @@ function App() {
   const logcatOutputRef = useRef<HTMLDivElement>(null);
   const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
   const uiBoundsCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pairingCodeInputRef = useRef<HTMLInputElement | null>(null);
+  const connectAddressInputRef = useRef<HTMLInputElement | null>(null);
   const uiHierarchyFrameRef = useRef<HTMLIFrameElement | null>(null);
   const uiHierarchySelectedIndexRef = useRef<number | null>(null);
   const lastSelectedIndexRef = useRef<number | null>(null);
@@ -3687,12 +3503,16 @@ function App() {
       const combined = `${response.data.stdout}\n${response.data.stderr}`;
       const parsed = parseAdbPairOutput(combined);
       const message = parsed.message || response.data.stdout.trim() || "Paired successfully.";
+      const nextConnectAddress = parsed.connectAddress || pairingState.connectAddress;
       dispatchPairing({
         type: "PAIR_SUCCESS",
         message,
-        connectAddress: parsed.connectAddress || pairingState.connectAddress,
+        connectAddress: nextConnectAddress,
       });
       pushToast("Wireless pairing succeeded.", "info");
+      window.setTimeout(() => {
+        connectAddressInputRef.current?.focus();
+      }, 0);
     } catch (error) {
       const message = formatError(error);
       dispatchPairing({ type: "PAIR_ERROR", error: message });
@@ -3702,19 +3522,77 @@ function App() {
     }
   };
 
-  const handleConnectSubmit = async () => {
-    const addressError = validateHostPort(pairingState.connectAddress);
+  const handleConnectSubmit = async (addressOverride?: string) => {
+    const connectAddress = (addressOverride ?? pairingState.connectAddress).trim();
+    const addressError = validateHostPort(connectAddress);
     if (addressError) {
       dispatchPairing({ type: "CONNECT_ERROR", error: addressError });
-      return;
+      return false;
     }
     setBusy(true);
     dispatchPairing({ type: "CONNECT_START" });
     try {
-      const response = await adbConnect(pairingState.connectAddress.trim());
+      const response = await adbConnect(connectAddress);
       const message = response.data.stdout.trim() || "Connected.";
       dispatchPairing({ type: "CONNECT_SUCCESS", message });
       pushToast("Wireless connect succeeded.", "info");
+      await refreshDevices();
+      return true;
+    } catch (error) {
+      const message = formatError(error);
+      dispatchPairing({ type: "CONNECT_ERROR", error: message });
+      pushToast(message, "error");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncPairingFieldsFromQrPayload = (payload: string) => {
+    const parsed = parseQrPayload(payload);
+    if (parsed.pairAddress) {
+      dispatchPairing({ type: "SET_PAIR_ADDRESS", value: parsed.pairAddress });
+    }
+    if (parsed.pairingCode) {
+      dispatchPairing({ type: "SET_PAIR_CODE", value: parsed.pairingCode });
+    }
+    return Boolean(parsed.pairAddress || parsed.pairingCode);
+  };
+
+  const handlePairAndConnectSubmit = async () => {
+    const addressError = validateHostPort(pairingState.pairAddress);
+    const codeError = validatePairingCode(pairingState.pairingCode);
+    if (addressError || codeError) {
+      dispatchPairing({ type: "PAIR_ERROR", error: [addressError, codeError].filter(Boolean).join(" ") });
+      return;
+    }
+
+    setBusy(true);
+    dispatchPairing({ type: "PAIR_START" });
+    try {
+      const pairResponse = await adbPair(pairingState.pairAddress.trim(), pairingState.pairingCode.trim());
+      const pairCombined = `${pairResponse.data.stdout}\n${pairResponse.data.stderr}`;
+      const parsedPair = parseAdbPairOutput(pairCombined);
+      const pairMessage = parsedPair.message || pairResponse.data.stdout.trim() || "Paired successfully.";
+      const nextConnectAddress = (parsedPair.connectAddress || pairingState.connectAddress).trim();
+
+      dispatchPairing({
+        type: "PAIR_SUCCESS",
+        message: pairMessage,
+        connectAddress: nextConnectAddress,
+      });
+
+      if (!nextConnectAddress) {
+        dispatchPairing({ type: "PAIR_ERROR", error: "Pairing succeeded, but connect address is missing." });
+        pushToast("Pairing succeeded, but connect address is missing.", "error");
+        return;
+      }
+
+      dispatchPairing({ type: "CONNECT_START" });
+      const connectResponse = await adbConnect(nextConnectAddress);
+      const connectMessage = connectResponse.data.stdout.trim() || "Connected.";
+      dispatchPairing({ type: "CONNECT_SUCCESS", message: connectMessage });
+      pushToast("Wireless pairing and connect succeeded.", "info");
       await refreshDevices();
     } catch (error) {
       const message = formatError(error);
@@ -14428,11 +14306,6 @@ function App() {
                           >
                             Clear
                           </button>
-                          <AdvancedToggleButton
-                            open={bugreportLogAdvancedOpen}
-                            onClick={() => setBugreportLogAdvancedOpen((prev) => !prev)}
-                            className="bugreport-log-advanced-toggle"
-                          />
                         </div>
                       </div>
 
@@ -14538,6 +14411,121 @@ function App() {
                         activePresetLabel={selectedBugreportPreset?.name}
                         levelsSummary={logLevelsSummary}
                         isPresetDirty={bugreportPresetDirty}
+                        selectClassName="logcat-select"
+                        compact
+                        expanded={bugreportLogFiltersExpanded}
+                        onToggleExpanded={() => setBugreportLogFiltersExpanded((prev) => !prev)}
+                        headerActions={
+                          <AdvancedToggleButton
+                            open={bugreportLogAdvancedOpen}
+                            onClick={() => setBugreportLogAdvancedOpen((prev) => !prev)}
+                          />
+                        }
+                        advancedOptions={
+                          bugreportLogAdvancedOpen ? (
+                            <>
+                              <div className="panel-sub">
+                                <h3>Search Scope</h3>
+                                <div className="muted bugreport-log-search-hint">
+                                  Search uses levels, buffer, tag, PID, time range, and regex filters.
+                                </div>
+                              </div>
+                              <div className="panel-sub">
+                                <h3>Filters</h3>
+                                <div className="bugreport-log-advanced-fields">
+                                  <div className="bugreport-log-advanced-controls">
+                                    <div className="bugreport-log-toolbar-row">
+                                      <div className="bugreport-log-filter-field">
+                                        <label htmlFor="bugreport-log-tag">Tag</label>
+                                        <input
+                                          id="bugreport-log-tag"
+                                          value={bugreportLogTag}
+                                          onChange={(event) => setBugreportLogTag(event.target.value)}
+                                          placeholder="Tag"
+                                        />
+                                      </div>
+                                      <div className="bugreport-log-filter-field">
+                                        <label htmlFor="bugreport-log-pid">PID</label>
+                                        <input
+                                          id="bugreport-log-pid"
+                                          value={bugreportLogPid}
+                                          onChange={(event) => setBugreportLogPid(event.target.value)}
+                                          placeholder="PID"
+                                        />
+                                      </div>
+                                      <div className="bugreport-log-filter-field">
+                                        <label htmlFor="bugreport-log-start">Start</label>
+                                        <input
+                                          id="bugreport-log-start"
+                                          value={bugreportLogStart}
+                                          onChange={(event) => setBugreportLogStart(event.target.value)}
+                                          placeholder="MM-DD HH:MM:SS.mmm"
+                                        />
+                                      </div>
+                                      <div className="bugreport-log-filter-field">
+                                        <label htmlFor="bugreport-log-end">End</label>
+                                        <input
+                                          id="bugreport-log-end"
+                                          value={bugreportLogEnd}
+                                          onChange={(event) => setBugreportLogEnd(event.target.value)}
+                                          placeholder="MM-DD HH:MM:SS.mmm"
+                                        />
+                                      </div>
+                                    </div>
+
+                                    <div className="bugreport-log-advanced-levels">
+                                      <div className="toggle-group">
+                                        {LOG_LEVELS.map((level) => (
+                                          <label key={level} className="toggle">
+                                            <input
+                                              type="checkbox"
+                                              checked={logLevels[level]}
+                                              onChange={(event) => {
+                                                setLogLevels((prev) => ({
+                                                  ...prev,
+                                                  [level]: event.target.checked,
+                                                }));
+                                              }}
+                                            />
+                                            {level}
+                                          </label>
+                                        ))}
+                                      </div>
+                                    </div>
+
+                                    <div className="bugreport-log-advanced-reset">
+                                      <button
+                                        className="ghost"
+                                        onClick={() => {
+                                          setBugreportLogLiveFilter("");
+                                          setBugreportLogFilterKind("include");
+                                          setBugreportLogFiltersExpanded(false);
+                                          clearSharedLogFilters();
+                                          setBugreportLogBuffer("");
+                                          setBugreportLogTag("");
+                                          setBugreportLogPid("");
+                                          setBugreportLogStart("");
+                                          setBugreportLogEnd("");
+                                          setLogLevels(defaultLogcatLevels);
+                                          setBugreportLogSearchTerm("");
+                                          setBugreportLogLastSearchTerm("");
+                                          setBugreportLogMatches([]);
+                                          setBugreportLogMatchesTruncated(false);
+                                          setBugreportLogMatchIndex(-1);
+                                          setBugreportLogMatchesOpen(false);
+                                          setBugreportLogContextAnchorId(null);
+                                        }}
+                                        disabled={bugreportLogBusy}
+                                      >
+                                        Reset Filters
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </>
+                          ) : null
+                        }
                       />
 
 	                      {bugreportLogMatches.length > 0 ? (
@@ -14614,128 +14602,6 @@ function App() {
 	                      )}
 	                    </div>
 
-		                    {bugreportLogAdvancedOpen && (
-		                      <InlineAdvancedPanel title="Advanced" onClose={() => setBugreportLogAdvancedOpen(false)}>
-		                        <div className="muted bugreport-log-search-hint">
-		                          Search uses levels, buffer, tag, PID, time range, and regex filters.
-		                        </div>
-		                        <SharedRegexFiltersAndPresetsPanel
-		                          chips={sharedLogTextChips}
-		                          expanded={bugreportLogFiltersExpanded}
-		                          onToggleExpanded={() => setBugreportLogFiltersExpanded((prev) => !prev)}
-		                          onRemoveChip={(chipId) =>
-		                            setSharedLogTextChips((prev) => removeLogTextChip(prev, chipId))
-		                          }
-		                          onClearChips={clearSharedLogFilters}
-		                          disabled={bugreportLogBusy}
-		                          appliedTitle="Applied to bugreport queries."
-		                          gridClassName="bugreport-log-filter-grid"
-		                          presets={bugreportPresets}
-		                          presetSelected={bugreportPresetSelected}
-		                          onPresetSelectedChange={setBugreportPresetSelected}
-		                          presetName={bugreportPresetName}
-		                          onPresetNameChange={setBugreportPresetName}
-		                          hasSelectedPreset={Boolean(selectedBugreportPreset)}
-		                          onApplyPreset={applyBugreportPreset}
-		                          onDeletePreset={(name) => openPresetDeleteModal("bugreport", name)}
-		                          onSavePreset={() => {
-		                            saveBugreportPreset(bugreportPresetName);
-		                          }}
-                              showPresetRow={false}
-		                        >
-		                          <div className="bugreport-log-advanced-fields">
-		                            <div className="bugreport-log-advanced-controls">
-		                              <div className="bugreport-log-toolbar-row">
-		                                    <div className="bugreport-log-filter-field">
-		                                      <label htmlFor="bugreport-log-tag">Tag</label>
-		                                      <input
-		                                        id="bugreport-log-tag"
-		                                        value={bugreportLogTag}
-			                                        onChange={(event) => setBugreportLogTag(event.target.value)}
-			                                        placeholder="Tag"
-			                                      />
-			                                    </div>
-			                                    <div className="bugreport-log-filter-field">
-			                                      <label htmlFor="bugreport-log-pid">PID</label>
-			                                      <input
-			                                        id="bugreport-log-pid"
-			                                        value={bugreportLogPid}
-			                                        onChange={(event) => setBugreportLogPid(event.target.value)}
-			                                        placeholder="PID"
-			                                      />
-			                                    </div>
-			                                    <div className="bugreport-log-filter-field">
-			                                      <label htmlFor="bugreport-log-start">Start</label>
-			                                      <input
-			                                        id="bugreport-log-start"
-			                                        value={bugreportLogStart}
-			                                        onChange={(event) => setBugreportLogStart(event.target.value)}
-			                                        placeholder="MM-DD HH:MM:SS.mmm"
-			                                      />
-			                                    </div>
-			                                    <div className="bugreport-log-filter-field">
-			                                      <label htmlFor="bugreport-log-end">End</label>
-			                                      <input
-			                                        id="bugreport-log-end"
-			                                        value={bugreportLogEnd}
-			                                        onChange={(event) => setBugreportLogEnd(event.target.value)}
-			                                        placeholder="MM-DD HH:MM:SS.mmm"
-			                                      />
-			                                    </div>
-			                                  </div>
-
-			                                  <div className="bugreport-log-advanced-levels">
-			                                    <div className="toggle-group">
-			                                      {LOG_LEVELS.map((level) => (
-			                                        <label key={level} className="toggle">
-			                                          <input
-			                                            type="checkbox"
-			                                            checked={logLevels[level]}
-			                                            onChange={(event) => {
-			                                              setLogLevels((prev) => ({
-			                                                ...prev,
-			                                                [level]: event.target.checked,
-			                                              }));
-			                                            }}
-			                                          />
-			                                          {level}
-			                                        </label>
-			                                      ))}
-			                                    </div>
-			                                  </div>
-
-			                                  <div className="bugreport-log-advanced-reset">
-			                                    <button
-			                                      className="ghost"
-			                                      onClick={() => {
-			                                        setBugreportLogLiveFilter("");
-			                                        setBugreportLogFilterKind("include");
-			                                        setBugreportLogFiltersExpanded(false);
-			                                        clearSharedLogFilters();
-			                                        setBugreportLogBuffer("");
-			                                        setBugreportLogTag("");
-			                                        setBugreportLogPid("");
-			                                        setBugreportLogStart("");
-			                                        setBugreportLogEnd("");
-			                                        setLogLevels(defaultLogcatLevels);
-			                                        setBugreportLogSearchTerm("");
-			                                        setBugreportLogLastSearchTerm("");
-			                                        setBugreportLogMatches([]);
-			                                        setBugreportLogMatchesTruncated(false);
-			                                        setBugreportLogMatchIndex(-1);
-			                                        setBugreportLogMatchesOpen(false);
-			                                        setBugreportLogContextAnchorId(null);
-			                                      }}
-			                                      disabled={bugreportLogBusy}
-			                                    >
-			                                      Reset Filters
-			                                    </button>
-			                                  </div>
-		                            </div>
-		                          </div>
-		                        </SharedRegexFiltersAndPresetsPanel>
-		                      </InlineAdvancedPanel>
-		                    )}
 
 		                    {bugreportLogRows.length ? (
 		                      <BugreportLogOutput
@@ -15990,7 +15856,15 @@ function App() {
               <div className="pairing-step">
                 <div className="pairing-step-header">
                   <h4>Step 1: Pair</h4>
-                  <span className="muted">
+                  <span
+                    className={`pairing-step-status ${
+                      pairingState.status === "paired" || pairingState.status === "connected"
+                        ? "ok"
+                        : pairingState.status === "pairing" || pairingState.status === "connecting"
+                          ? "pending"
+                          : "idle"
+                    }`}
+                  >
                     {pairingState.status === "pairing"
                       ? "Pairing..."
                       : pairingState.status === "paired"
@@ -16001,6 +15875,15 @@ function App() {
                 <p className="muted">
                   Enable Wireless Debugging on the device, then scan a QR code or enter the pairing code.
                 </p>
+                <div className="inline-alert info pairing-help">
+                  <strong>Quick checks before pairing</strong>
+                  <ul className="pairing-help-list">
+                    <li>Keep the phone and this computer on the same Wi-Fi network.</li>
+                    <li>Use the 6-digit pairing code right after it appears on the device.</li>
+                    <li>After pairing, use the wireless debug address for connect (often port 5555).</li>
+                    <li>If connect fails, tap Refresh Devices and retry once.</li>
+                  </ul>
+                </div>
                 <div className="toggle-group">
                   <button
                     className={pairingState.mode === "qr" ? "toggle active" : "toggle"}
@@ -16010,41 +15893,27 @@ function App() {
                   </button>
                   <button
                     className={pairingState.mode === "code" ? "toggle active" : "toggle"}
-                    onClick={() => dispatchPairing({ type: "SET_MODE", mode: "code" })}
+                    onClick={() => {
+                      dispatchPairing({ type: "SET_MODE", mode: "code" });
+                      window.setTimeout(() => {
+                        pairingCodeInputRef.current?.focus();
+                      }, 0);
+                    }}
                   >
                     Pairing Code
                   </button>
                 </div>
                 <label>
                   QR Payload (paste to auto-fill)
-                  <div className="inline-row">
-                    <input
-                      value={pairingState.qrPayload}
-                      onChange={(event) =>
-                        dispatchPairing({ type: "SET_QR_PAYLOAD", value: event.target.value })
-                      }
-                      placeholder="WIFI:T:ADB;S:192.168.0.10:37145;P:123456;;"
-                    />
-                    <button
-                      className="ghost"
-                      onClick={() => {
-                        const parsed = parseQrPayload(pairingState.qrPayload);
-                        if (!parsed.pairAddress && !parsed.pairingCode) {
-                          pushToast("Unable to parse QR payload.", "error");
-                          return;
-                        }
-                        if (parsed.pairAddress) {
-                          dispatchPairing({ type: "SET_PAIR_ADDRESS", value: parsed.pairAddress });
-                        }
-                        if (parsed.pairingCode) {
-                          dispatchPairing({ type: "SET_PAIR_CODE", value: parsed.pairingCode });
-                        }
-                        dispatchPairing({ type: "SET_MODE", mode: "qr" });
-                      }}
-                    >
-                      Parse
-                    </button>
-                  </div>
+                  <input
+                    value={pairingState.qrPayload}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      dispatchPairing({ type: "SET_QR_PAYLOAD", value });
+                      syncPairingFieldsFromQrPayload(value);
+                    }}
+                    placeholder="WIFI:T:ADB;S:192.168.0.10:37145;P:123456;;"
+                  />
                 </label>
                 <label>
                   Pairing Address (host:port)
@@ -16060,6 +15929,7 @@ function App() {
                   Pairing Code
                   <input
                     value={pairingState.pairingCode}
+                    ref={pairingCodeInputRef}
                     onChange={(event) =>
                       dispatchPairing({ type: "SET_PAIR_CODE", value: event.target.value })
                     }
@@ -16069,6 +15939,9 @@ function App() {
                 <div className="button-row">
                   <button onClick={handlePairSubmit} disabled={busy}>
                     Pair Device
+                  </button>
+                  <button onClick={handlePairAndConnectSubmit} disabled={busy}>
+                    Pair & Connect
                   </button>
                   <button
                     className="ghost"
@@ -16080,10 +15953,24 @@ function App() {
                 </div>
               </div>
 
-              <div className="pairing-step">
+              <div
+                className={`pairing-step ${
+                  pairingState.status === "paired" || pairingState.status === "connecting" || pairingState.status === "connected"
+                    ? ""
+                    : "inactive"
+                }`}
+              >
                 <div className="pairing-step-header">
                   <h4>Step 2: Connect</h4>
-                  <span className="muted">
+                  <span
+                    className={`pairing-step-status ${
+                      pairingState.status === "connected"
+                        ? "ok"
+                        : pairingState.status === "connecting"
+                          ? "pending"
+                          : "idle"
+                    }`}
+                  >
                     {pairingState.status === "connecting"
                       ? "Connecting..."
                       : pairingState.status === "connected"
@@ -16091,10 +15978,12 @@ function App() {
                         : "Connect after pairing"}
                   </span>
                 </div>
+                <p className="muted">Use the address from device Wireless debugging, then connect.</p>
                 <label>
                   Device Address (host:port)
                   <input
                     value={pairingState.connectAddress}
+                    ref={connectAddressInputRef}
                     onChange={(event) =>
                       dispatchPairing({ type: "SET_CONNECT_ADDRESS", value: event.target.value })
                     }
@@ -16102,7 +15991,7 @@ function App() {
                   />
                 </label>
                 <div className="button-row">
-                  <button onClick={handleConnectSubmit} disabled={busy}>
+                  <button onClick={() => void handleConnectSubmit()} disabled={busy}>
                     Connect
                   </button>
                   <button className="ghost" onClick={refreshDevices} disabled={busy}>
