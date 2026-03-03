@@ -163,9 +163,7 @@ import {
 } from "./dashboardConfig";
 import {
   buildDashboardCardMarkdown,
-  buildDashboardFieldMarkdown,
   buildDashboardPlainValueText,
-  buildDashboardVariantMarkdown,
   buildDashboardVisibleMarkdown,
 } from "./dashboardCopy";
 import { buildLinePath, extractNetSeries, sliceSnapshotsByWindowMs } from "./netProfiler";
@@ -9462,8 +9460,8 @@ function App() {
     const editableCards = normalizeDashboardSettings(dashboardDraft).cards;
     const handleCopyDashboardField = (card: DashboardCardView, field: DashboardCardView["fields"][number]) => {
       const key = `field:${card.id}:${field.id}`;
-      const markdown = buildDashboardFieldMarkdown(card.title, field.label, field.value);
-      void copyDashboardText(markdown, `${field.label} copied.`, key);
+      const value = buildDashboardPlainValueText(field.value);
+      void copyDashboardText(value, `${field.label} value copied.`, key);
     };
 
     const handleCopyDashboardFieldValue = (
@@ -9481,13 +9479,8 @@ function App() {
       variant: DashboardCardView["fields"][number]["variants"][number],
     ) => {
       const key = `variant:${card.id}:${field.id}:${variant.serial}`;
-      const markdown = buildDashboardVariantMarkdown(
-        card.title,
-        field.label,
-        variant.serial,
-        variant.value,
-      );
-      void copyDashboardText(markdown, `${field.label} (${variant.serial}) copied.`, key);
+      const value = buildDashboardPlainValueText(variant.value);
+      void copyDashboardText(value, `${field.label} value copied.`, key);
     };
 
     const handleCopyDashboardVariantValue = (
@@ -9709,7 +9702,7 @@ function App() {
                           <button
                             className={`ghost dashboard-copy-button ${dashboardCopiedKey === fieldCopyKey ? "is-copied" : ""}`}
                             onClick={() => handleCopyDashboardField(card, field)}
-                            aria-label={`Copy ${card.title} ${field.label}`}
+                            aria-label={`Copy ${field.label} value`}
                           >
                             {dashboardCopiedKey === fieldCopyKey ? "Copied" : "Copy"}
                           </button>
@@ -9784,7 +9777,7 @@ function App() {
                                     <button
                                       className={`ghost dashboard-copy-button ${dashboardCopiedKey === variantCopyKey ? "is-copied" : ""}`}
                                       onClick={() => handleCopyDashboardVariant(card, field, variant)}
-                                      aria-label={`Copy ${variant.serial} value`}
+                                      aria-label={`Copy ${field.label} value for ${variant.serial}`}
                                     >
                                       {dashboardCopiedKey === variantCopyKey ? "Copied" : "Copy"}
                                     </button>
