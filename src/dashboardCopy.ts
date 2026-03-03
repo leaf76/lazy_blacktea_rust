@@ -10,6 +10,8 @@ const compactText = (value: string): string => {
   return normalized || "--";
 };
 
+export const buildDashboardPlainValueText = (value: string): string => compactText(value);
+
 export const buildDashboardFieldMarkdown = (
   cardTitle: string,
   fieldLabel: string,

@@ -4,6 +4,7 @@ import {
   buildDefaultDashboardSettings,
   moveDashboardField,
   normalizeDashboardSettings,
+  resolveDashboardPrimaryDeviceParts,
   toggleDashboardField,
 } from "./dashboardConfig";
 import type { DashboardSettings, DeviceInfo } from "./types";
@@ -26,6 +27,64 @@ const buildDevice = (
 });
 
 describe("dashboardConfig", () => {
+  it("resolves primary device parts from active serial when available", () => {
+    const devices: DeviceInfo[] = [
+      buildDevice("A", { detail: { serial: "A", model: "Pixel 8" } }),
+      buildDevice("B", { detail: { serial: "B", model: "Pixel 9 Pro" } }),
+    ];
+
+    expect(resolveDashboardPrimaryDeviceParts(devices, ["A", "B"], "B")).toEqual({
+      name: "Pixel 9 Pro",
+      serial: "B",
+    });
+  });
+
+  it("falls back to the first selected device when active serial is missing", () => {
+    const devices: DeviceInfo[] = [
+      buildDevice("A", { detail: { serial: "A", model: "Pixel 8" } }),
+      buildDevice("B", { detail: { serial: "B", model: "Pixel 9" } }),
+    ];
+
+    expect(resolveDashboardPrimaryDeviceParts(devices, ["A", "B"], "C")).toEqual({
+      name: "Pixel 8",
+      serial: "A",
+    });
+  });
+
+  it("returns null when there are no selected devices", () => {
+    const devices: DeviceInfo[] = [buildDevice("A", { detail: { serial: "A", model: "Pixel 8" } })];
+
+    expect(resolveDashboardPrimaryDeviceParts(devices, [], "A")).toBeNull();
+  });
+
+  it("uses fallback chain for primary name: detail.model -> summary.model -> serial", () => {
+    const withDetail: DeviceInfo = buildDevice("A", {
+      summary: { serial: "A", state: "device", model: "Summary Model A" },
+      detail: { serial: "A", model: "Detail Model A" },
+    });
+    const withSummaryOnly: DeviceInfo = {
+      summary: { serial: "B", state: "device", model: "Summary Model B" },
+      detail: { serial: "B", model: "   " },
+    };
+    const withSerialOnly: DeviceInfo = {
+      summary: { serial: "C", state: "device", model: "   " },
+      detail: { serial: "C", model: "   " },
+    };
+
+    expect(resolveDashboardPrimaryDeviceParts([withDetail], ["A"], "A")).toEqual({
+      name: "Detail Model A",
+      serial: "A",
+    });
+    expect(resolveDashboardPrimaryDeviceParts([withSummaryOnly], ["B"], "B")).toEqual({
+      name: "Summary Model B",
+      serial: "B",
+    });
+    expect(resolveDashboardPrimaryDeviceParts([withSerialOnly], ["C"], "C")).toEqual({
+      name: "C",
+      serial: "C",
+    });
+  });
+
   it("returns balanced defaults when settings are missing", () => {
     const normalized = normalizeDashboardSettings();
     expect(normalized.cards).toHaveLength(4);

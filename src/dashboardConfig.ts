@@ -37,6 +37,11 @@ export type DashboardAggregationInput = {
   scrcpyAvailable?: boolean | null;
 };
 
+export type DashboardPrimaryDeviceParts = {
+  name: string;
+  serial: string;
+};
+
 const DASHBOARD_CARDS: Array<{
   id: DashboardCardId;
   title: string;
@@ -288,6 +293,38 @@ const selectedDevicesFromSerials = (devices: DeviceInfo[], selectedSerials: stri
     .filter((device): device is DeviceInfo => Boolean(device));
 };
 
+const pickNonEmptyText = (...values: Array<string | null | undefined>): string | null => {
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return null;
+};
+
+export const resolveDashboardPrimaryDeviceParts = (
+  devices: DeviceInfo[],
+  selectedSerials: string[],
+  activeSerial?: string | null,
+): DashboardPrimaryDeviceParts | null => {
+  const selectedDevices = selectedDevicesFromSerials(devices, selectedSerials);
+  if (!selectedDevices.length) {
+    return null;
+  }
+  const activeDevice = activeSerial
+    ? selectedDevices.find((device) => device.summary.serial === activeSerial) ?? selectedDevices[0]
+    : selectedDevices[0];
+
+  const serial = activeDevice.summary.serial;
+  const name =
+    pickNonEmptyText(activeDevice.detail?.model, activeDevice.summary.model) ?? serial;
+  return { name, serial };
+};
+
 const aggregateSelectedValues = (
   selectedDevices: DeviceInfo[],
   resolver: (device: DeviceInfo) => string,
@@ -310,17 +347,16 @@ const aggregateSelectedValues = (
 };
 
 const aggregatePrimary = (
+  input: DashboardAggregationInput,
   selectedDevices: DeviceInfo[],
   activeSerial?: string | null,
 ): string => {
-  if (!selectedDevices.length) {
+  const selectedSerials = selectedDevices.map((device) => device.summary.serial);
+  const parts = resolveDashboardPrimaryDeviceParts(input.devices, selectedSerials, activeSerial);
+  if (!parts) {
     return "--";
   }
-  const active = activeSerial
-    ? selectedDevices.find((device) => device.summary.serial === activeSerial) ?? selectedDevices[0]
-    : selectedDevices[0];
-  const model = active.detail?.model ?? active.summary.model ?? active.summary.serial;
-  return `${model} (${active.summary.serial})`;
+  return `${parts.name} (${parts.serial})`;
 };
 
 const buildFieldValue = (
@@ -343,7 +379,7 @@ const buildFieldValue = (
     case "offline_count":
       return { value: String(offlineCount), variants: [] };
     case "primary_device":
-      return { value: aggregatePrimary(selectedDevices, input.activeSerial), variants: [] };
+      return { value: aggregatePrimary(input, selectedDevices, input.activeSerial), variants: [] };
     case "running_tasks":
       return { value: input.runningTaskCount > 0 ? `${input.runningTaskCount} running` : "Idle", variants: [] };
     case "brand":

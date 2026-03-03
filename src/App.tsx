@@ -156,6 +156,7 @@ import {
   getDashboardFieldLabel,
   moveDashboardField,
   normalizeDashboardSettings,
+  resolveDashboardPrimaryDeviceParts,
   toggleDashboardCard,
   toggleDashboardField,
   type DashboardCardView,
@@ -163,6 +164,7 @@ import {
 import {
   buildDashboardCardMarkdown,
   buildDashboardFieldMarkdown,
+  buildDashboardPlainValueText,
   buildDashboardVariantMarkdown,
   buildDashboardVisibleMarkdown,
 } from "./dashboardCopy";
@@ -9431,11 +9433,21 @@ function App() {
       },
       dashboardSettings,
     );
+    const primaryDeviceParts = resolveDashboardPrimaryDeviceParts(devices, selectedSerials, activeSerial);
     const editableCards = normalizeDashboardSettings(dashboardDraft).cards;
     const handleCopyDashboardField = (card: DashboardCardView, field: DashboardCardView["fields"][number]) => {
       const key = `field:${card.id}:${field.id}`;
       const markdown = buildDashboardFieldMarkdown(card.title, field.label, field.value);
       void copyDashboardText(markdown, `${field.label} copied.`, key);
+    };
+
+    const handleCopyDashboardFieldValue = (
+      card: DashboardCardView,
+      field: DashboardCardView["fields"][number],
+    ) => {
+      const key = `field-value:${card.id}:${field.id}`;
+      const value = buildDashboardPlainValueText(field.value);
+      void copyDashboardText(value, `${field.label} value copied.`, key);
     };
 
     const handleCopyDashboardVariant = (
@@ -9451,6 +9463,44 @@ function App() {
         variant.value,
       );
       void copyDashboardText(markdown, `${field.label} (${variant.serial}) copied.`, key);
+    };
+
+    const handleCopyDashboardVariantValue = (
+      card: DashboardCardView,
+      field: DashboardCardView["fields"][number],
+      variant: DashboardCardView["fields"][number]["variants"][number],
+    ) => {
+      const key = `variant-value:${card.id}:${field.id}:${variant.serial}`;
+      const value = buildDashboardPlainValueText(variant.value);
+      void copyDashboardText(value, `${field.label} value copied.`, key);
+    };
+
+    const handleCopyDashboardVariantSerial = (
+      card: DashboardCardView,
+      field: DashboardCardView["fields"][number],
+      variant: DashboardCardView["fields"][number]["variants"][number],
+    ) => {
+      const key = `variant-serial:${card.id}:${field.id}:${variant.serial}`;
+      const serial = buildDashboardPlainValueText(variant.serial);
+      void copyDashboardText(serial, "Serial copied.", key);
+    };
+
+    const handleCopyDashboardPrimaryName = () => {
+      if (!primaryDeviceParts) {
+        return;
+      }
+      const key = "field-primary-name:overview:primary_device";
+      const value = buildDashboardPlainValueText(primaryDeviceParts.name);
+      void copyDashboardText(value, "Primary device name copied.", key);
+    };
+
+    const handleCopyDashboardPrimarySn = () => {
+      if (!primaryDeviceParts) {
+        return;
+      }
+      const key = "field-primary-sn:overview:primary_device";
+      const value = buildDashboardPlainValueText(primaryDeviceParts.serial);
+      void copyDashboardText(value, "Primary device SN copied.", key);
     };
 
     const handleCopyDashboardCard = (card: DashboardCardView) => {
@@ -9614,11 +9664,20 @@ function App() {
                 <div className="dashboard-fields-grid">
                   {card.fields.map((field) => {
                     const fieldCopyKey = `field:${card.id}:${field.id}`;
+                    const fieldValueKey = `field-value:${card.id}:${field.id}`;
+                    const primaryNameKey = "field-primary-name:overview:primary_device";
+                    const primarySnKey = "field-primary-sn:overview:primary_device";
+                    const isPrimaryField = card.id === "overview" && field.id === "primary_device";
+                    const isFieldCopied =
+                      dashboardCopiedKey === fieldCopyKey ||
+                      dashboardCopiedKey === fieldValueKey ||
+                      (isPrimaryField &&
+                        (dashboardCopiedKey === primaryNameKey || dashboardCopiedKey === primarySnKey));
                     const variantsOpen = isDashboardVariantVisible(card.id, field.id);
                     return (
                       <article
                         key={field.id}
-                        className={`dashboard-field ${dashboardCopiedKey === fieldCopyKey ? "is-copied" : ""}`}
+                        className={`dashboard-field ${isFieldCopied ? "is-copied" : ""}`}
                       >
                         <div className="dashboard-field-header">
                           <span className="muted">{field.label}</span>
@@ -9632,11 +9691,33 @@ function App() {
                         </div>
                         <button
                           className="dashboard-field-value"
-                          onClick={() => handleCopyDashboardField(card, field)}
+                          onClick={() => handleCopyDashboardFieldValue(card, field)}
                           aria-label={`Copy ${field.label} value`}
                         >
                           <strong>{field.value}</strong>
                         </button>
+                        {isPrimaryField && (
+                          <div className="dashboard-primary-copy-actions">
+                            <button
+                              type="button"
+                              className={`ghost dashboard-copy-button ${dashboardCopiedKey === primaryNameKey ? "is-copied" : ""}`}
+                              onClick={handleCopyDashboardPrimaryName}
+                              disabled={!primaryDeviceParts}
+                              aria-label="Copy primary device name"
+                            >
+                              {dashboardCopiedKey === primaryNameKey ? "Copied" : "Copy Name"}
+                            </button>
+                            <button
+                              type="button"
+                              className={`ghost dashboard-copy-button ${dashboardCopiedKey === primarySnKey ? "is-copied" : ""}`}
+                              onClick={handleCopyDashboardPrimarySn}
+                              disabled={!primaryDeviceParts}
+                              aria-label="Copy primary device SN"
+                            >
+                              {dashboardCopiedKey === primarySnKey ? "Copied" : "Copy SN"}
+                            </button>
+                          </div>
+                        )}
                         {field.variants.length > 0 && (
                           <details
                             className="dashboard-variants"
@@ -9649,15 +9730,28 @@ function App() {
                             <div className="dashboard-variants-list">
                               {field.variants.map((variant) => {
                                 const variantCopyKey = `variant:${card.id}:${field.id}:${variant.serial}`;
+                                const variantValueKey = `variant-value:${card.id}:${field.id}:${variant.serial}`;
+                                const variantSerialKey = `variant-serial:${card.id}:${field.id}:${variant.serial}`;
+                                const isVariantCopied =
+                                  dashboardCopiedKey === variantCopyKey ||
+                                  dashboardCopiedKey === variantValueKey ||
+                                  dashboardCopiedKey === variantSerialKey;
                                 return (
                                   <div
                                     key={`${field.id}-${variant.serial}`}
-                                    className={`dashboard-variant-row ${dashboardCopiedKey === variantCopyKey ? "is-copied" : ""}`}
+                                    className={`dashboard-variant-row ${isVariantCopied ? "is-copied" : ""}`}
                                   >
-                                    <code>{variant.serial}</code>
+                                    <button
+                                      type="button"
+                                      className={`dashboard-variant-serial ${dashboardCopiedKey === variantSerialKey ? "is-copied" : ""}`}
+                                      onClick={() => handleCopyDashboardVariantSerial(card, field, variant)}
+                                      aria-label={`Copy serial ${variant.serial}`}
+                                    >
+                                      {variant.serial}
+                                    </button>
                                     <button
                                       className="dashboard-variant-value"
-                                      onClick={() => handleCopyDashboardVariant(card, field, variant)}
+                                      onClick={() => handleCopyDashboardVariantValue(card, field, variant)}
                                       aria-label={`Copy ${field.label} for ${variant.serial}`}
                                     >
                                       {variant.value}

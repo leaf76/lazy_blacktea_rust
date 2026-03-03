@@ -1356,6 +1356,13 @@ textarea {
   box-shadow: var(--focus-ring);
 }
 
+.dashboard-primary-copy-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .dashboard-variants {
   margin-top: 0;
   border-top: 1px dashed var(--color-border);
@@ -1401,12 +1408,32 @@ textarea {
   border: 1px solid var(--color-border);
 }
 
-.dashboard-variant-row code {
-  font-size: 11px;
+.dashboard-variant-serial {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   color: var(--color-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding: 2px 4px;
+  min-width: 0;
+  text-align: left;
+  font-size: 11px;
+  font-family: var(--font-code);
+}
+
+.dashboard-variant-serial:hover {
+  border-color: var(--dashboard-hero-border);
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.dashboard-variant-serial:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.dashboard-variant-serial.is-copied {
+  color: var(--color-success);
 }
 
 .dashboard-variant-row.is-copied {

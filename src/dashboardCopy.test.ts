@@ -3,11 +3,17 @@ import type { DashboardCardView } from "./dashboardConfig";
 import {
   buildDashboardCardMarkdown,
   buildDashboardFieldMarkdown,
+  buildDashboardPlainValueText,
   buildDashboardVariantMarkdown,
   buildDashboardVisibleMarkdown,
 } from "./dashboardCopy";
 
 describe("dashboardCopy", () => {
+  it("formats plain copied values with whitespace normalization", () => {
+    expect(buildDashboardPlainValueText("  Pixel 9\n\n(ABC)  ")).toBe("Pixel 9 (ABC)");
+    expect(buildDashboardPlainValueText("   ")).toBe("--");
+  });
+
   it("formats field markdown as a single readable line", () => {
     const markdown = buildDashboardFieldMarkdown("Overview", "Primary Device", "Pixel 8\n(ABC)");
 
