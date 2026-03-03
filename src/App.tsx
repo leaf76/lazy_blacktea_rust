@@ -531,6 +531,8 @@ const LOGCAT_OUTPUT_PADDING_PX = 8;
 const LOGCAT_OVERSCAN = 80;
 const LOGCAT_RAW_BUFFER_LIMIT = 2000;
 const LOGCAT_RETAINED_LIMIT = 20000;
+const DEVICE_TRACKING_MAX_NO_SNAPSHOT_RESTARTS = 3;
+const DEVICE_TRACKING_RESTART_WINDOW_MS = 60_000;
 
 const LogcatOutput = memo(function LogcatOutput({
   entries,
@@ -1859,7 +1861,8 @@ function App() {
   const deviceTrackingLastSnapshotAtRef = useRef<number>(0);
   const deviceTrackingPendingSnapshotRef = useRef<DeviceInfo[] | null>(null);
   const deviceTrackingRestartInFlightRef = useRef(false);
-  const deviceTrackingNoSnapshotRestartedRef = useRef(false);
+  const deviceTrackingNoSnapshotRestartAttemptsRef = useRef(0);
+  const deviceTrackingRestartWindowStartedAtRef = useRef<number>(0);
   const deviceTrackingFallbackInFlightRef = useRef(false);
   const deviceTrackingStartedAtRef = useRef<number>(0);
   const busyRef = useRef(false);
@@ -3525,7 +3528,10 @@ function App() {
     }, delayMs);
   };
 
-  const applyDeviceTrackingSnapshot = (nextDevices: DeviceInfo[], options: { allowDetailRefresh: boolean }) => {
+  const applyDeviceTrackingSnapshot = (
+    nextDevices: DeviceInfo[],
+    options: { allowDetailRefresh: boolean; forceDetailRefresh?: boolean },
+  ) => {
     const prevBySerial = new Map(
       devicesRef.current.map((device) => [device.summary.serial, device.summary.state] as const),
     );
@@ -3535,7 +3541,7 @@ function App() {
     const serialsChanged =
       prevBySerial.size !== nextBySerial.size || Array.from(nextBySerial.keys()).some((serial) => !prevBySerial.has(serial));
     const statesChanged = Array.from(nextBySerial.entries()).some(([serial, state]) => prevBySerial.get(serial) !== state);
-    const shouldRefreshDetail = serialsChanged || statesChanged;
+    const shouldRefreshDetail = options.forceDetailRefresh === true || serialsChanged || statesChanged;
 
     // Tracking snapshots contain summaries only; keep the last known detail to avoid UI flicker.
     setDevices((prev) => mergeDeviceDetails(prev, nextDevices, { preserveMissingDetail: true }));
@@ -3545,7 +3551,9 @@ function App() {
     }
   };
 
-  const flushPendingDeviceTrackingSnapshot = (options: { allowDetailRefresh: boolean }) => {
+  const flushPendingDeviceTrackingSnapshot = (
+    options: { allowDetailRefresh: boolean; forceDetailRefresh?: boolean },
+  ) => {
     const pending = deviceTrackingPendingSnapshotRef.current;
     if (!pending) {
       return;
@@ -3564,7 +3572,9 @@ function App() {
       const response = await listDevices(false);
       setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
       setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, response.data));
-      scheduleDeviceDetailRefresh(800, { notifyOnError });
+      if (configRef.current?.device.auto_refresh_enabled) {
+        scheduleDeviceDetailRefresh(800, { notifyOnError });
+      }
     } catch (error) {
       if (notifyOnError) {
         pushToast(`Device summary refresh failed: ${formatError(error)}`, "error");
@@ -3811,10 +3821,9 @@ function App() {
   }, [netBySerial]);
 
 	  useEffect(() => {
-	    if (!config?.device.auto_refresh_enabled) {
-	      void stopDeviceTracking().catch(() => null);
-	      return;
-	    }
+      if (!config) {
+        return;
+      }
 
     const warnThrottled = (error: unknown, message: string) => {
       const now = Date.now();
@@ -3831,46 +3840,51 @@ function App() {
         return;
       }
       deviceTrackingLastSnapshotAtRef.current = Date.now();
-      deviceTrackingNoSnapshotRestartedRef.current = false;
+      deviceTrackingNoSnapshotRestartAttemptsRef.current = 0;
+      deviceTrackingRestartWindowStartedAtRef.current = 0;
+      deviceTrackingPendingSnapshotRef.current = nextDevices;
       if (busyRef.current) {
-        deviceTrackingPendingSnapshotRef.current = nextDevices;
+        applyDeviceTrackingSnapshot(nextDevices, { allowDetailRefresh: false });
         return;
       }
-      deviceTrackingPendingSnapshotRef.current = nextDevices;
-      flushPendingDeviceTrackingSnapshot({ allowDetailRefresh: true });
+      flushPendingDeviceTrackingSnapshot({
+        allowDetailRefresh: Boolean(configRef.current?.device.auto_refresh_enabled),
+      });
 	    });
 
     deviceTrackingStartedAtRef.current = Date.now();
     deviceTrackingLastSnapshotAtRef.current = 0;
-    deviceTrackingNoSnapshotRestartedRef.current = false;
+    deviceTrackingNoSnapshotRestartAttemptsRef.current = 0;
+    deviceTrackingRestartWindowStartedAtRef.current = 0;
     void startDeviceTracking().catch((error) => warnThrottled(error, "Device tracking start failed."));
     void refreshDeviceSummaryOnce(false);
     return () => {
       void unlisten.then((unlisten) => unlisten());
       void stopDeviceTracking().catch(() => null);
     };
-  }, [config?.device.auto_refresh_enabled, config?.device.refresh_interval]);
+  }, [config?.adb.command_path]);
 
   useEffect(() => {
-    if (!config?.device.auto_refresh_enabled) {
+    if (!config) {
       return;
     }
     if (busy) {
       return;
     }
-    flushPendingDeviceTrackingSnapshot({ allowDetailRefresh: true });
+    const allowDetailRefresh = config.device.auto_refresh_enabled;
+    flushPendingDeviceTrackingSnapshot({
+      allowDetailRefresh,
+      forceDetailRefresh: allowDetailRefresh,
+    });
   }, [busy, config?.device.auto_refresh_enabled]);
 
   useEffect(() => {
-    if (!config?.device.auto_refresh_enabled) {
+    if (!config) {
       return;
     }
 
     const intervalMs = clampRefreshIntervalSec(config.device.refresh_interval) * 1000;
     const handle = window.setInterval(() => {
-      if (!configRef.current?.device.auto_refresh_enabled) {
-        return;
-      }
       if (busyRef.current) {
         return;
       }
@@ -3891,17 +3905,28 @@ function App() {
       if (lastSnapshotAt !== 0) {
         return;
       }
-
-      if (deviceTrackingNoSnapshotRestartedRef.current) {
-        return;
-      }
-
       if (now - startedAt < maxStartWaitMs) {
         return;
       }
 
+      const restartWindowStartedAt = deviceTrackingRestartWindowStartedAtRef.current;
+      if (
+        restartWindowStartedAt === 0 ||
+        now - restartWindowStartedAt >= DEVICE_TRACKING_RESTART_WINDOW_MS
+      ) {
+        deviceTrackingRestartWindowStartedAtRef.current = now;
+        deviceTrackingNoSnapshotRestartAttemptsRef.current = 0;
+      }
+
+      if (
+        deviceTrackingNoSnapshotRestartAttemptsRef.current >=
+        DEVICE_TRACKING_MAX_NO_SNAPSHOT_RESTARTS
+      ) {
+        return;
+      }
+
       deviceTrackingRestartInFlightRef.current = true;
-      deviceTrackingNoSnapshotRestartedRef.current = true;
+      deviceTrackingNoSnapshotRestartAttemptsRef.current += 1;
       void (async () => {
         try {
           await stopDeviceTracking();
@@ -3922,7 +3947,7 @@ function App() {
       })();
     }, intervalMs);
     return () => window.clearInterval(handle);
-  }, [config?.device.auto_refresh_enabled, config?.device.refresh_interval]);
+  }, [config?.device.refresh_interval]);
 
   useEffect(() => {
     void (async () => {
@@ -15595,10 +15620,10 @@ function App() {
 	                                )
 	                              }
 	                            />
-	                            Auto-refresh device list
+	                            Auto-refresh device details
 	                          </label>
                             <div className="muted settings-hint">
-                              When enabled, the device list refreshes automatically in the background (no toast errors).
+                              When enabled, background detail refresh keeps battery and connectivity fields up to date (no toast errors).
                             </div>
 	                          <label>
 	                            Refresh interval (sec)
@@ -15622,11 +15647,11 @@ function App() {
 	                            />
                           </label>
                           <div className="muted settings-hint">
-                              Refresh interval for tracker recovery checks while auto-refresh is enabled. Minimum 1 second.
+                              Refresh interval for tracker recovery checks. Also used for detail sync when auto-refresh is enabled. Minimum 1 second.
                             </div>
                             <div className="muted settings-hint">
-                              Primary auto-refresh path uses <code>adb track-devices</code> events. <code>adb devices</code> is only used for
-                              startup or recovery sync, not fixed polling.
+                              Device connection state always follows <code>adb track-devices</code> events. <code>adb devices</code> is only used
+                              for startup or recovery sync, not fixed polling.
                             </div>
 		                        </div>
 	                        <div className="settings-group">

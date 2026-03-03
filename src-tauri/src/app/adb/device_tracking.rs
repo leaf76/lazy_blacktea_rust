@@ -1,4 +1,4 @@
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -226,14 +226,15 @@ pub fn start_device_tracker(
             // Successful spawn: reset backoff for the next unexpected exit.
             backoff_ms = 200;
 
-            let reader = std::io::BufReader::new(stdout);
+            let mut reader = std::io::BufReader::new(stdout);
             let mut parser = TrackDevicesStreamParser::new();
-            for line in reader.lines() {
+            let mut chunk = [0u8; 4096];
+            loop {
                 if stop_thread.load(Ordering::Relaxed) {
                     break;
                 }
-                let line = match line {
-                    Ok(line) => line,
+                let bytes_read = match reader.read(&mut chunk) {
+                    Ok(bytes_read) => bytes_read,
                     Err(err) => {
                         warn!(
                             trace_id = %trace_id,
@@ -243,9 +244,11 @@ pub fn start_device_tracker(
                         break;
                     }
                 };
+                if bytes_read == 0 {
+                    break;
+                }
 
-                let maybe_snapshot = parser.push_line(&line);
-                if let Some(snapshot) = maybe_snapshot {
+                for snapshot in parser.push_chunk(&chunk[..bytes_read]) {
                     let devices = snapshot
                         .into_iter()
                         .map(|summary| DeviceInfo {
@@ -262,7 +265,7 @@ pub fn start_device_tracker(
             }
 
             // Emit the last buffered snapshot (if any) before exiting.
-            if let Some(snapshot) = parser.flush() {
+            for snapshot in parser.flush() {
                 let devices = snapshot
                     .into_iter()
                     .map(|summary| DeviceInfo {
