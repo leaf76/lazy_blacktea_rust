@@ -499,7 +499,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if gh release upload "${{ github.event.release.tag_name }}" latest.json --clobber; then
+            if gh release upload "${{ github.event.release.tag_name }}" latest.json --clobber --repo "${{ github.repository }}"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
