@@ -209,6 +209,13 @@ import {
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
 import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
+import {
+  LOGCAT_INACTIVITY_EVENTS,
+  LOGCAT_INACTIVITY_TIMEOUT_MS,
+  getRunningLogcatSerials,
+  hasLogcatInactivityTimedOut,
+  normalizeLogcatLastActivityAt,
+} from "./logcatInactivity";
 import { bugreportLogLineMatches, buildBugreportLogFindPattern } from "./bugreportLogFind";
 import {
   findRunningBugreportTaskIdForSerial,
@@ -1484,6 +1491,7 @@ function App() {
   const [logcatTextKind, setLogcatTextKind] = useState<LogTextChipKind>("include");
   const [logcatRunningBySerial, setLogcatRunningBySerial] = useState<Record<string, boolean>>({});
   const [logcatStatusLoadingBySerial, setLogcatStatusLoadingBySerial] = useState<Record<string, boolean>>({});
+  const [bluetoothMonitorRunningBySerial, setBluetoothMonitorRunningBySerial] = useState<Record<string, boolean>>({});
   const [sharedLogTextChips, setSharedLogTextChips] = useState<LogTextChip[]>(
     () => loadSharedLogFiltersFromStorage().textChips,
   );
@@ -1872,6 +1880,11 @@ function App() {
   const logcatPendingRef = useRef<Record<string, string[]>>({});
   const logcatNextIdRef = useRef<Record<string, number>>({});
   const logcatFlushTimerRef = useRef<number | null>(null);
+  const monitoringIdleLastActivityAtRef = useRef<number>(Date.now());
+  const monitoringIdleTimerRef = useRef<number | null>(null);
+  const monitoringIdleStoppingRef = useRef(false);
+  const logcatRunningBySerialRef = useRef<Record<string, boolean>>({});
+  const bluetoothMonitorRunningBySerialRef = useRef<Record<string, boolean>>({});
   const logcatBaseFilterRef = useRef<{ active: boolean; state: LogcatBaseFilterState }>({
     active: false,
     state: {
@@ -1962,6 +1975,12 @@ function App() {
   const activeLogcatStatusLoading = activeSerial
     ? (logcatStatusLoadingBySerial[activeSerial] ?? false)
     : false;
+  useEffect(() => {
+    logcatRunningBySerialRef.current = logcatRunningBySerial;
+  }, [logcatRunningBySerial]);
+  useEffect(() => {
+    bluetoothMonitorRunningBySerialRef.current = bluetoothMonitorRunningBySerial;
+  }, [bluetoothMonitorRunningBySerial]);
   const activeDevice = useMemo(
     () => devices.find((device) => device.summary.serial === activeSerial) ?? null,
     [devices, activeSerial],
@@ -1985,6 +2004,58 @@ function App() {
   const selectedConnectedCount = selectedSerials.reduce(
     (total, serial) => total + (terminalBySerial[serial]?.connected ? 1 : 0),
     0,
+  );
+  const perfRunningSerialsSignature = useMemo(
+    () =>
+      Object.entries(perfBySerial)
+        .filter(([, state]) => state.running)
+        .map(([serial]) => serial)
+        .sort()
+        .join("|"),
+    [perfBySerial],
+  );
+  const netProfilerRunningSerialsSignature = useMemo(
+    () =>
+      Object.entries(netBySerial)
+        .filter(([, state]) => state.running)
+        .map(([serial]) => serial)
+        .sort()
+        .join("|"),
+    [netBySerial],
+  );
+  const terminalConnectedSerialsSignature = useMemo(
+    () =>
+      Object.entries(terminalBySerial)
+        .filter(([, state]) => state.connected)
+        .map(([serial]) => serial)
+        .sort()
+        .join("|"),
+    [terminalBySerial],
+  );
+  const logcatRunningSerialsSignature = useMemo(
+    () => getRunningLogcatSerials(logcatRunningBySerial).sort().join("|"),
+    [logcatRunningBySerial],
+  );
+  const bluetoothMonitorRunningSerialsSignature = useMemo(
+    () => getRunningLogcatSerials(bluetoothMonitorRunningBySerial).sort().join("|"),
+    [bluetoothMonitorRunningBySerial],
+  );
+  const monitoringWatchSignature = useMemo(
+    () =>
+      [
+        `logcat:${logcatRunningSerialsSignature}`,
+        `perf:${perfRunningSerialsSignature}`,
+        `net:${netProfilerRunningSerialsSignature}`,
+        `terminal:${terminalConnectedSerialsSignature}`,
+        `bluetooth:${bluetoothMonitorRunningSerialsSignature}`,
+      ].join("||"),
+    [
+      logcatRunningSerialsSignature,
+      perfRunningSerialsSignature,
+      netProfilerRunningSerialsSignature,
+      terminalConnectedSerialsSignature,
+      bluetoothMonitorRunningSerialsSignature,
+    ],
   );
   const deviceStatus = activeDevice?.summary.state ?? "offline";
   const selectedSummaryLabel =
@@ -6336,28 +6407,317 @@ function App() {
     }
   };
 
-  const refreshLogcatStatus = async (serial: string, options: { silent?: boolean } = {}) => {
-    setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: true }));
-    try {
-      const response = await getLogcatStatus(serial);
-      setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: response.data.running }));
-      return response.data.running;
-    } catch (error) {
-      if (!options.silent) {
-        pushToast(formatError(error), "error");
+  const refreshLogcatStatus = useCallback(
+    async (serial: string, options: { silent?: boolean } = {}) => {
+      setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: true }));
+      try {
+        const response = await getLogcatStatus(serial);
+        setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: response.data.running }));
+        return response.data.running;
+      } catch (error) {
+        if (!options.silent) {
+          pushToastRef.current(formatError(error), "error");
+        }
+        return null;
+      } finally {
+        setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: false }));
       }
-      return null;
-    } finally {
-      setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: false }));
-    }
-  };
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!isLogcatView || !activeSerial) {
       return;
     }
     void refreshLogcatStatus(activeSerial, { silent: true });
-  }, [isLogcatView, activeSerial]);
+  }, [isLogcatView, activeSerial, refreshLogcatStatus]);
+
+  useEffect(() => {
+    const listRunningPerfSerials = (value: Record<string, PerfMonitorState>): string[] =>
+      Object.entries(value)
+        .filter(([, state]) => state.running)
+        .map(([serial]) => serial);
+    const listRunningNetProfilerSerials = (value: Record<string, NetProfilerState>): string[] =>
+      Object.entries(value)
+        .filter(([, state]) => state.running)
+        .map(([serial]) => serial);
+    const listConnectedTerminalSerials = (value: Record<string, TerminalDeviceState>): string[] =>
+      Object.entries(value)
+        .filter(([, state]) => state.connected)
+        .map(([serial]) => serial);
+    const collectTargetsFromState = () => ({
+      logcat: getRunningLogcatSerials(logcatRunningBySerial),
+      perf: listRunningPerfSerials(perfBySerial),
+      netProfiler: listRunningNetProfilerSerials(netBySerial),
+      terminal: listConnectedTerminalSerials(terminalBySerial),
+      bluetooth: getRunningLogcatSerials(bluetoothMonitorRunningBySerial),
+    });
+    const collectTargetsFromRefs = () => ({
+      logcat: getRunningLogcatSerials(logcatRunningBySerialRef.current),
+      perf: listRunningPerfSerials(perfBySerialRef.current),
+      netProfiler: listRunningNetProfilerSerials(netBySerialRef.current),
+      terminal: listConnectedTerminalSerials(terminalBySerialRef.current),
+      bluetooth: getRunningLogcatSerials(bluetoothMonitorRunningBySerialRef.current),
+    });
+    const countTargets = (targets: {
+      logcat: string[];
+      perf: string[];
+      netProfiler: string[];
+      terminal: string[];
+      bluetooth: string[];
+    }): number =>
+      targets.logcat.length +
+      targets.perf.length +
+      targets.netProfiler.length +
+      targets.terminal.length +
+      targets.bluetooth.length;
+    const classifyStopError = (error: unknown): "stopped" | "failed" => {
+      const message = formatError(error).toLowerCase();
+      if (
+        message.includes("not running") ||
+        message.includes("already stopped") ||
+        message.includes("session not running")
+      ) {
+        return "stopped";
+      }
+      return "failed";
+    };
+
+    const activeTargets = collectTargetsFromState();
+    if (countTargets(activeTargets) === 0) {
+      if (monitoringIdleTimerRef.current != null) {
+        window.clearTimeout(monitoringIdleTimerRef.current);
+        monitoringIdleTimerRef.current = null;
+      }
+      monitoringIdleStoppingRef.current = false;
+      monitoringIdleLastActivityAtRef.current = Date.now();
+      return;
+    }
+
+    const clearIdleTimer = () => {
+      if (monitoringIdleTimerRef.current != null) {
+        window.clearTimeout(monitoringIdleTimerRef.current);
+        monitoringIdleTimerRef.current = null;
+      }
+    };
+
+    const scheduleIdleCheck = () => {
+      clearIdleTimer();
+      const now = Date.now();
+      const lastActivityAt = normalizeLogcatLastActivityAt(
+        monitoringIdleLastActivityAtRef.current,
+        now,
+      );
+      monitoringIdleLastActivityAtRef.current = lastActivityAt;
+      const remainingMs = Math.max(
+        0,
+        LOGCAT_INACTIVITY_TIMEOUT_MS - (now - lastActivityAt),
+      );
+      monitoringIdleTimerRef.current = window.setTimeout(() => {
+        monitoringIdleTimerRef.current = null;
+        const timedOut = hasLogcatInactivityTimedOut(
+          monitoringIdleLastActivityAtRef.current,
+          Date.now(),
+        );
+        if (!timedOut) {
+          scheduleIdleCheck();
+          return;
+        }
+        void stopRunningMonitoringForInactivity();
+      }, remainingMs);
+    };
+
+    const stopRunningMonitoringForInactivity = async () => {
+      if (monitoringIdleStoppingRef.current) {
+        return;
+      }
+      const targets = collectTargetsFromRefs();
+      const targetCount = countTargets(targets);
+      if (targetCount === 0) {
+        return;
+      }
+
+      monitoringIdleStoppingRef.current = true;
+      pushToastRef.current(
+        "No activity detected for 2 minutes. Stopping active monitoring sessions.",
+        "info",
+      );
+
+      const stopBatch = async (
+        serials: string[],
+        action: (serial: string) => Promise<unknown>,
+      ): Promise<{ succeeded: string[]; failed: string[] }> => {
+        if (!serials.length) {
+          return { succeeded: [], failed: [] };
+        }
+        const settled = await Promise.allSettled(serials.map((serial) => action(serial)));
+        const succeeded: string[] = [];
+        const failed: string[] = [];
+        settled.forEach((result, index) => {
+          const serial = serials[index];
+          if (!serial) {
+            return;
+          }
+          if (result.status === "fulfilled") {
+            succeeded.push(serial);
+            return;
+          }
+          if (classifyStopError(result.reason) === "stopped") {
+            succeeded.push(serial);
+            return;
+          }
+          failed.push(serial);
+        });
+        return { succeeded, failed };
+      };
+
+      const [logcatResult, perfResult, netProfilerResult, terminalResult, bluetoothResult] =
+        await Promise.all([
+          stopBatch(targets.logcat, stopLogcat),
+          stopBatch(targets.perf, stopPerfMonitor),
+          stopBatch(targets.netProfiler, stopNetProfiler),
+          stopBatch(targets.terminal, stopTerminalSession),
+          stopBatch(targets.bluetooth, stopBluetoothMonitor),
+        ]);
+
+      if (logcatResult.succeeded.length) {
+        setLogcatRunningBySerial((prev) => {
+          const next = { ...prev };
+          logcatResult.succeeded.forEach((serial) => {
+            next[serial] = false;
+          });
+          return next;
+        });
+        const nextRunningBySerial = { ...logcatRunningBySerialRef.current };
+        logcatResult.succeeded.forEach((serial) => {
+          nextRunningBySerial[serial] = false;
+        });
+        logcatRunningBySerialRef.current = nextRunningBySerial;
+        logcatResult.succeeded.forEach((serial) => {
+          void refreshLogcatStatus(serial, { silent: true });
+        });
+      }
+
+      if (perfResult.succeeded.length) {
+        setPerfBySerial((prev) => {
+          const next = { ...prev };
+          perfResult.succeeded.forEach((serial) => {
+            const existing = next[serial];
+            if (!existing) {
+              return;
+            }
+            next[serial] = { ...existing, running: false };
+          });
+          return next;
+        });
+      }
+
+      if (netProfilerResult.succeeded.length) {
+        setNetBySerial((prev) => {
+          const next = { ...prev };
+          netProfilerResult.succeeded.forEach((serial) => {
+            const existing = next[serial];
+            if (!existing) {
+              return;
+            }
+            next[serial] = { ...existing, running: false };
+          });
+          return next;
+        });
+      }
+
+      if (terminalResult.succeeded.length) {
+        setTerminalBySerial((prev) => {
+          const next = { ...prev };
+          terminalResult.succeeded.forEach((serial) => {
+            const existing = next[serial];
+            if (!existing) {
+              return;
+            }
+            next[serial] = { ...existing, connected: false, sessionId: null };
+          });
+          return next;
+        });
+        const nextTerminalSessions = { ...terminalSessionIdBySerialRef.current };
+        terminalResult.succeeded.forEach((serial) => {
+          nextTerminalSessions[serial] = null;
+        });
+        terminalSessionIdBySerialRef.current = nextTerminalSessions;
+      }
+
+      if (bluetoothResult.succeeded.length) {
+        setBluetoothMonitorRunningBySerial((prev) => {
+          const next = { ...prev };
+          bluetoothResult.succeeded.forEach((serial) => {
+            next[serial] = false;
+          });
+          return next;
+        });
+        const nextBluetoothRunning = { ...bluetoothMonitorRunningBySerialRef.current };
+        bluetoothResult.succeeded.forEach((serial) => {
+          nextBluetoothRunning[serial] = false;
+        });
+        bluetoothMonitorRunningBySerialRef.current = nextBluetoothRunning;
+      }
+
+      const succeededCount =
+        logcatResult.succeeded.length +
+        perfResult.succeeded.length +
+        netProfilerResult.succeeded.length +
+        terminalResult.succeeded.length +
+        bluetoothResult.succeeded.length;
+      const failedCount =
+        logcatResult.failed.length +
+        perfResult.failed.length +
+        netProfilerResult.failed.length +
+        terminalResult.failed.length +
+        bluetoothResult.failed.length;
+
+      if (!failedCount) {
+        pushToastRef.current(
+          succeededCount > 1
+            ? `Stopped ${succeededCount} sessions due to inactivity.`
+            : "Stopped 1 session due to inactivity.",
+          "info",
+        );
+      } else {
+        pushToastRef.current(
+          `Inactivity stop completed with ${failedCount} failure${failedCount > 1 ? "s" : ""}.`,
+          "error",
+        );
+      }
+
+      monitoringIdleStoppingRef.current = false;
+      monitoringIdleLastActivityAtRef.current = Date.now();
+      if (failedCount) {
+        scheduleIdleCheck();
+      }
+    };
+
+    const handleUserActivity = () => {
+      monitoringIdleLastActivityAtRef.current = Date.now();
+      if (!monitoringIdleStoppingRef.current) {
+        scheduleIdleCheck();
+      }
+    };
+
+    scheduleIdleCheck();
+    LOGCAT_INACTIVITY_EVENTS.forEach((eventName) => {
+      if (eventName === "wheel" || eventName === "touchstart") {
+        window.addEventListener(eventName, handleUserActivity, { passive: true });
+        return;
+      }
+      window.addEventListener(eventName, handleUserActivity);
+    });
+
+    return () => {
+      LOGCAT_INACTIVITY_EVENTS.forEach((eventName) => {
+        window.removeEventListener(eventName, handleUserActivity);
+      });
+      clearIdleTimer();
+    };
+  }, [monitoringWatchSignature, refreshLogcatStatus]);
 
   const handleLogcatStart = async () => {
     const serial = ensureSingleSelection("logcat");
@@ -8503,10 +8863,23 @@ function App() {
       } else {
         await stopBluetoothMonitor(serial);
       }
+      setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: enable }));
       pushToast(enable ? "Bluetooth monitor started." : "Bluetooth monitor stopped.", "info");
       return true;
     } catch (error) {
-      pushToast(formatError(error), "error");
+      const message = formatError(error);
+      const lower = message.toLowerCase();
+      if (enable && lower.includes("already running")) {
+        setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: true }));
+        pushToast("Bluetooth monitor is already running.", "info");
+        return true;
+      }
+      if (!enable && lower.includes("not running")) {
+        setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: false }));
+        pushToast("Bluetooth monitor is already stopped.", "info");
+        return true;
+      }
+      pushToast(message, "error");
       return false;
     } finally {
       setBusy(false);
@@ -15216,6 +15589,7 @@ function App() {
                     serial={activeSerial}
                     serialLabel={selectedSummaryLabel}
                     busy={busy}
+                    monitoringDesired={activeSerial ? (bluetoothMonitorRunningBySerial[activeSerial] ?? false) : false}
                     singleSelectionWarning={singleSelectionWarning}
                     singleSelectionWarningMessage={singleSelectionWarningMessage}
                     onToggleMonitor={handleBluetoothMonitor}

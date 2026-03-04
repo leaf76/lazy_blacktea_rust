@@ -29,6 +29,7 @@ type Props = {
   serial: string | null;
   serialLabel: string;
   busy: boolean;
+  monitoringDesired: boolean;
   singleSelectionWarning: boolean;
   singleSelectionWarningMessage: string;
   onToggleMonitor: (enable: boolean) => Promise<boolean>;
@@ -94,6 +95,7 @@ export const BluetoothMonitorPage = ({
   serial,
   serialLabel,
   busy,
+  monitoringDesired,
   singleSelectionWarning,
   singleSelectionWarningMessage,
   onToggleMonitor,
@@ -108,7 +110,6 @@ export const BluetoothMonitorPage = ({
   const [stateReceivedAtMs, setStateReceivedAtMs] = useState<number | null>(null);
   const [events, setEvents] = useState<BluetoothEventWithReceivedAt[]>([]);
   const [lastEventReceivedAtMs, setLastEventReceivedAtMs] = useState<number | null>(null);
-  const [monitoringDesired, setMonitoringDesired] = useState<boolean>(false);
   const [timelinePaused, setTimelinePaused] = useState(false);
   const [timelineNewCount, setTimelineNewCount] = useState(0);
   const [filterSearch, setFilterSearch] = useState<string>("");
@@ -132,7 +133,6 @@ export const BluetoothMonitorPage = ({
     setStateReceivedAtMs(null);
     setEvents([]);
     setLastEventReceivedAtMs(null);
-    setMonitoringDesired(false);
     setTimelinePaused(false);
     setTimelineNewCount(0);
     setCopyNotice(null);
@@ -343,10 +343,7 @@ export const BluetoothMonitorPage = ({
       return;
     }
     const next = !monitoringDesired;
-    const ok = await onToggleMonitor(next);
-    if (ok) {
-      setMonitoringDesired(next);
-    }
+    await onToggleMonitor(next);
   };
 
   return (
