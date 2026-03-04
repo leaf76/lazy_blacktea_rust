@@ -149,6 +149,65 @@ describe("installUpdateAndRelaunch", () => {
     expect(relaunch).toHaveBeenCalledTimes(1);
   });
 
+  it("retries once for transient install errors before succeeding", async () => {
+    const downloadAndInstall = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("update endpoint did not respond with a successful status code"))
+      .mockResolvedValueOnce(undefined);
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const update = { version: "0.0.54", downloadAndInstall };
+    (relaunch as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue(undefined);
+
+    const result = await installUpdateAndRelaunch(update, { retryDelayMs: 250, sleep });
+
+    expect(result.status).toBe("installed");
+    expect(downloadAndInstall).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(250);
+    expect(relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns publishing message when transient install failures persist", async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const update = {
+      version: "0.0.54",
+      downloadAndInstall: vi.fn().mockRejectedValue(new Error("update endpoint did not respond with a successful status code")),
+    };
+    (relaunch as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue(undefined);
+
+    const result = await installUpdateAndRelaunch(update, { retryDelayMs: 250, sleep });
+
+    expect(result.status).toBe("error");
+    if (result.status !== "error") {
+      throw new Error(`Expected error, got ${result.status}`);
+    }
+    expect(result.message).toMatch(/still publishing/i);
+    expect(result.message).not.toMatch(/successful status code/i);
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(0);
+  });
+
+  it("returns actionable message for permission-related install failures", async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const update = {
+      version: "0.0.54",
+      downloadAndInstall: vi.fn().mockRejectedValue(new Error("Permission denied")),
+    };
+    (relaunch as unknown as { mockResolvedValue: (value: unknown) => void }).mockResolvedValue(undefined);
+
+    const result = await installUpdateAndRelaunch(update, { retryDelayMs: 250, sleep });
+
+    expect(result.status).toBe("error");
+    if (result.status !== "error") {
+      throw new Error(`Expected error, got ${result.status}`);
+    }
+    expect(result.message).toMatch(/Move the app to Applications/i);
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledTimes(0);
+    expect(relaunch).toHaveBeenCalledTimes(0);
+  });
+
   it("returns installed_needs_restart when relaunch fails after install", async () => {
     const update = { version: "0.0.54", downloadAndInstall: vi.fn().mockResolvedValue(undefined) };
     (relaunch as unknown as { mockRejectedValue: (value: unknown) => void }).mockRejectedValue(new Error("no perms"));

@@ -29,6 +29,16 @@ const GENERIC_UPDATE_CHECK_ERROR_MESSAGE = "Unable to check for updates. Please 
 const UPDATE_ARTIFACTS_PENDING_MESSAGE =
   "A newer release is available, but update artifacts are still publishing. Please try again shortly.";
 const UPDATE_MANIFEST_MISSING_MESSAGE = "No published update package is available yet. Please try again later.";
+const GENERIC_UPDATE_INSTALL_ERROR_MESSAGE = "Unable to install updates. Please try again.";
+const UPDATE_INSTALL_PERMISSION_MESSAGE =
+  "Unable to replace the app in the current location. Move the app to Applications and try again.";
+const UPDATE_INSTALL_RETRYABLE_ERROR_PATTERN =
+  /did not respond with a successful status code|timed out|timeout|connection reset|connection aborted|connection refused|temporar(?:y|ily)|network/i;
+const UPDATE_INSTALL_ARTIFACT_ERROR_PATTERN = /did not respond with a successful status code|404|not found/i;
+const UPDATE_INSTALL_PERMISSION_ERROR_PATTERN = /permission denied|operation not permitted|access is denied|read-only file system/i;
+const DEFAULT_INSTALL_RETRY_DELAY_MS = 250;
+
+type SleepFn = (ms: number) => Promise<void>;
 
 function defaultStorage(): StorageLike | null {
   try {
@@ -167,6 +177,26 @@ function extractErrorMessage(error: unknown): string {
   return "";
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function shouldRetryInstall(errorMessage: string): boolean {
+  return UPDATE_INSTALL_RETRYABLE_ERROR_PATTERN.test(errorMessage);
+}
+
+function mapInstallErrorMessage(errorMessage: string): string {
+  if (UPDATE_INSTALL_ARTIFACT_ERROR_PATTERN.test(errorMessage)) {
+    return UPDATE_ARTIFACTS_PENDING_MESSAGE;
+  }
+  if (UPDATE_INSTALL_PERMISSION_ERROR_PATTERN.test(errorMessage)) {
+    return UPDATE_INSTALL_PERMISSION_MESSAGE;
+  }
+  return GENERIC_UPDATE_INSTALL_ERROR_MESSAGE;
+}
+
 export async function checkForUpdate(opts?: {
   storage?: StorageLike | null;
   nowMs?: number;
@@ -233,12 +263,39 @@ export async function checkForUpdate(opts?: {
   }
 }
 
-export async function installUpdateAndRelaunch(update: UpdaterUpdateLike): Promise<UpdateInstallResult> {
+export async function installUpdateAndRelaunch(
+  update: UpdaterUpdateLike,
+  opts?: {
+    retryDelayMs?: number;
+    sleep?: SleepFn;
+  },
+): Promise<UpdateInstallResult> {
+  const retryDelayMs = Math.max(0, opts?.retryDelayMs ?? DEFAULT_INSTALL_RETRY_DELAY_MS);
+  const sleepFn = opts?.sleep ?? sleep;
+  let installError: unknown = null;
+
   try {
     await update.downloadAndInstall();
   } catch (error) {
-    console.warn("Failed to download/install update.", error);
-    return { status: "error", message: "Unable to install updates. Please try again." };
+    installError = error;
+  }
+
+  if (installError) {
+    const firstErrorMessage = extractErrorMessage(installError);
+    if (shouldRetryInstall(firstErrorMessage)) {
+      try {
+        await sleepFn(retryDelayMs);
+        await update.downloadAndInstall();
+        installError = null;
+      } catch (retryError) {
+        installError = retryError;
+      }
+    }
+  }
+
+  if (installError) {
+    console.warn("Failed to download/install update.", installError);
+    return { status: "error", message: mapInstallErrorMessage(extractErrorMessage(installError)) };
   }
 
   try {
