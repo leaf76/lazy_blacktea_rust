@@ -4112,6 +4112,171 @@ button.danger:hover:not(:disabled) {
   line-height: 1.35;
 }
 
+.developer-options-scope-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.developer-options-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.developer-options-toolbar h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.developer-options-toolbar .muted {
+  margin: 4px 0 0;
+}
+
+.developer-options-scope-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.developer-options-scope-toggle {
+  font-weight: 600;
+}
+
+.developer-options-target-summary {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.developer-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.developer-options-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.developer-options-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.developer-options-group-header h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.developer-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.developer-options-option {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius-10);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-subtle);
+}
+
+.developer-options-option.is-disabled {
+  opacity: 0.72;
+}
+
+.developer-options-option.is-high-risk {
+  border-color: var(--alert-error-border);
+}
+
+.developer-options-option-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.developer-options-option-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.developer-options-option-label {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.developer-options-option-description {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.developer-options-option-control {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 150px;
+}
+
+.developer-options-option-control select {
+  min-width: 150px;
+}
+
+.developer-options-toggle {
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.developer-options-option-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.developer-options-risk-badge {
+  background: var(--pill-error-bg);
+  color: var(--pill-error-text);
+}
+
+.developer-options-option-message {
+  line-height: 1.3;
+}
+
+.developer-options-confirm-modal {
+  max-width: 520px;
+}
+
+@media (max-width: 900px) {
+  .developer-options-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .developer-options-option-main {
+    flex-direction: column;
+  }
+
+  .developer-options-option-control {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .developer-options-option-control select {
+    width: 100%;
+  }
+}
+
 .grid-two {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

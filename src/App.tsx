@@ -265,6 +265,24 @@ import {
   type ActiveBugreportCustomViewSession,
   type BugreportCustomViewTemplate,
 } from "./bugreportCustomViews";
+import {
+  DEVELOPER_OPTIONS,
+  buildDeveloperOptionSettingsProbeCommand,
+  buildApplyCommand,
+  buildReadCommands,
+  createDeveloperOptionSnapshot,
+  evaluateApplyResult,
+  getDeveloperOptionSettingsTarget,
+  getDeveloperOptionSettingsKeysByNamespace,
+  isHighRiskOption,
+  normalizeDeveloperOptionReadFailure,
+  parseSettingsListOutput,
+  parseReadResult,
+  type DeveloperOptionDefinition,
+  type DeveloperOptionKey,
+  type DeveloperOptionSnapshot,
+  type DeveloperOptionValue,
+} from "./developerOptions";
 import appPackage from "../package.json";
 import "./App.css";
 
@@ -345,6 +363,49 @@ const BUGREPORT_STATUS_TONE: Record<BugreportCardStatus, "idle" | "busy" | "ok" 
   cancelled: "warn",
   interrupted: "warn",
 };
+
+const createDeveloperOptionSupportMap = (value: boolean): Record<DeveloperOptionKey, boolean> => {
+  const map = {} as Record<DeveloperOptionKey, boolean>;
+  DEVELOPER_OPTIONS.forEach((option) => {
+    map[option.key] = value;
+  });
+  return map;
+};
+
+const createDeveloperOptionMessageMap = (): Record<DeveloperOptionKey, string | null> => {
+  const map = {} as Record<DeveloperOptionKey, string | null>;
+  DEVELOPER_OPTIONS.forEach((option) => {
+    map[option.key] = null;
+  });
+  return map;
+};
+
+const quoteShellCommandForAdbSh = (command: string): string => {
+  const escaped = command.replace(/'/g, `'\"'\"'`);
+  return `'${escaped}'`;
+};
+
+type DeveloperOptionCategory = DeveloperOptionDefinition["category"];
+
+const DEVELOPER_OPTION_CATEGORY_ORDER: DeveloperOptionCategory[] = [
+  "debugging",
+  "logging",
+  "input",
+  "animation",
+  "lifecycle",
+  "network",
+];
+
+const DEVELOPER_OPTION_CATEGORY_LABEL: Record<DeveloperOptionCategory, string> = {
+  debugging: "Debugging",
+  logging: "Logging",
+  input: "Input",
+  animation: "Animation",
+  lifecycle: "Lifecycle",
+  network: "Network",
+};
+
+const DEVELOPER_OPTIONS_READ_TIMEOUT_MS = 8_000;
 
 type StoredSharedLogFiltersV1 = {
   levels?: Record<string, unknown>;
@@ -1388,9 +1449,32 @@ function App() {
     templateKind: BugreportExtractTemplateKind;
     defaultInput: string;
   };
+  type DeveloperOptionsConfirmModal = {
+    optionKey: DeveloperOptionKey;
+    nextValue: DeveloperOptionValue;
+    targetCount: number;
+    skippedCount: number;
+  };
 
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
+  const [developerOptionsSnapshot, setDeveloperOptionsSnapshot] = useState<DeveloperOptionSnapshot>(
+    createDeveloperOptionSnapshot(),
+  );
+  const [developerOptionSupportedByKey, setDeveloperOptionSupportedByKey] = useState<
+    Record<DeveloperOptionKey, boolean>
+  >(createDeveloperOptionSupportMap(false));
+  const [developerOptionMessageByKey, setDeveloperOptionMessageByKey] = useState<
+    Record<DeveloperOptionKey, string | null>
+  >(createDeveloperOptionMessageMap());
+  const [developerOptionsLoading, setDeveloperOptionsLoading] = useState(false);
+  const [developerOptionsRefreshing, setDeveloperOptionsRefreshing] = useState(false);
+  const [developerOptionsError, setDeveloperOptionsError] = useState<string | null>(null);
+  const [developerOptionsApplyToSelected, setDeveloperOptionsApplyToSelected] = useState(false);
+  const [developerOptionsApplyingKey, setDeveloperOptionsApplyingKey] = useState<DeveloperOptionKey | null>(null);
+  const [developerOptionsConfirmModal, setDeveloperOptionsConfirmModal] =
+    useState<DeveloperOptionsConfirmModal | null>(null);
+  const developerOptionsRefreshTokenRef = useRef(0);
   type DeviceSelectionMode = "single" | "multi";
   const DEVICE_SELECTION_MODE_STORAGE_KEY = "lazy_blacktea_device_selection_mode_v1";
   const [deviceSelectionMode, setDeviceSelectionMode] = useState<DeviceSelectionMode>(() => {
@@ -1927,6 +2011,7 @@ function App() {
   const isPerformanceView = location.pathname === "/performance";
   const isNetworkView = location.pathname === "/network";
   const isUiInspectorView = location.pathname === "/ui-inspector";
+  const isDeveloperOptionsView = location.pathname === "/developer-options";
   useEffect(() => {
     if (!isBugreportLogViewer) {
       setBugreportLogAdvancedOpen(false);
@@ -2128,7 +2213,7 @@ function App() {
     : "Select files to enable bulk actions.";
   const requiresSingleSelection = useMemo(
     () =>
-      ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat", "/performance", "/network"].includes(
+      ["/files", "/ui-inspector", "/apps", "/bluetooth", "/logcat", "/performance", "/network", "/developer-options"].includes(
         location.pathname,
       ),
     [location.pathname],
@@ -2137,6 +2222,9 @@ function App() {
   const singleSelectionWarningMessage = singleSelectionWarning
     ? `Multiple devices selected. Using primary device: ${formatPrimaryDeviceLabel(activeSerial, activeDevice)}.`
     : "";
+  const developerOptionsConfirmOption = developerOptionsConfirmModal
+    ? DEVELOPER_OPTIONS.find((option) => option.key === developerOptionsConfirmModal.optionKey) ?? null
+    : null;
   useEffect(() => {
     const prevSerial = perfLastSerialRef.current;
     const prevNetSerial = netLastSerialRef.current;
@@ -5492,6 +5580,517 @@ function App() {
       setBusy(false);
     }
   };
+
+  const runDeveloperOptionsReadShell = useCallback(
+    async (serial: string, command: string) => {
+      let timeoutId: number | null = null;
+      try {
+        return await Promise.race([
+          runShell([serial], quoteShellCommandForAdbSh(command), false),
+          new Promise<never>((_, reject) => {
+            timeoutId = window.setTimeout(() => {
+              reject(new Error(`Developer Options read timed out after ${DEVELOPER_OPTIONS_READ_TIMEOUT_MS / 1000} seconds.`));
+            }, DEVELOPER_OPTIONS_READ_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timeoutId != null) {
+          window.clearTimeout(timeoutId);
+        }
+      }
+    },
+    [],
+  );
+
+  const refreshDeveloperOptionsSnapshot = useCallback(
+    async (options: { silent?: boolean; forceLoading?: boolean } = {}) => {
+      if (!activeSerial) {
+        developerOptionsRefreshTokenRef.current += 1;
+        setDeveloperOptionsSnapshot(createDeveloperOptionSnapshot());
+        setDeveloperOptionSupportedByKey(createDeveloperOptionSupportMap(false));
+        setDeveloperOptionMessageByKey(createDeveloperOptionMessageMap());
+        setDeveloperOptionsError(null);
+        setDeveloperOptionsLoading(false);
+        setDeveloperOptionsRefreshing(false);
+        return;
+      }
+
+      const refreshToken = developerOptionsRefreshTokenRef.current + 1;
+      developerOptionsRefreshTokenRef.current = refreshToken;
+      const refreshSerial = activeSerial;
+
+      const useLoading = options.forceLoading ?? false;
+      if (useLoading) {
+        setDeveloperOptionsLoading(true);
+      } else {
+        setDeveloperOptionsRefreshing(true);
+      }
+      setDeveloperOptionsError(null);
+
+      try {
+        const nextSnapshot = createDeveloperOptionSnapshot();
+        const nextSupported = createDeveloperOptionSupportMap(false);
+        const nextMessages = createDeveloperOptionMessageMap();
+        const settingsByNamespace: Record<"global" | "system", Record<string, string>> = {
+          global: {},
+          system: {},
+        };
+        const settingsKeysByNamespace = getDeveloperOptionSettingsKeysByNamespace();
+
+        let fatalReadMessage: string | null = null;
+        for (const namespace of ["global", "system"] as const) {
+          let namespaceMap: Record<string, string> | null = null;
+          let listFailure: ReturnType<typeof normalizeDeveloperOptionReadFailure> | null = null;
+          try {
+            const response = await runDeveloperOptionsReadShell(refreshSerial, `settings list ${namespace}`);
+            const result = response.data[0];
+            if (!result) {
+              fatalReadMessage = "No command output returned.";
+              break;
+            }
+
+            if ((result.exit_code ?? 0) !== 0) {
+              const normalizedFailure = normalizeDeveloperOptionReadFailure(
+                result.stderr.trim() || result.stdout.trim() || "Read command failed on this device.",
+              );
+              if (
+                normalizedFailure.timedOut ||
+                normalizedFailure.unauthorized ||
+                normalizedFailure.offline
+              ) {
+                fatalReadMessage = normalizedFailure.message;
+                break;
+              }
+              listFailure = normalizedFailure;
+            } else {
+              namespaceMap = parseSettingsListOutput(result.stdout);
+            }
+          } catch (error) {
+            const normalizedFailure = normalizeDeveloperOptionReadFailure(formatError(error));
+            if (
+              normalizedFailure.timedOut ||
+              normalizedFailure.unauthorized ||
+              normalizedFailure.offline
+            ) {
+              fatalReadMessage = normalizedFailure.message;
+              break;
+            }
+            listFailure = normalizedFailure;
+          }
+
+          if (!namespaceMap) {
+            try {
+              const probeCommand = buildDeveloperOptionSettingsProbeCommand(
+                namespace,
+                settingsKeysByNamespace[namespace],
+              );
+              const response = await runDeveloperOptionsReadShell(refreshSerial, probeCommand);
+              const result = response.data[0];
+              if (!result) {
+                fatalReadMessage = "No command output returned.";
+                break;
+              }
+              if ((result.exit_code ?? 0) !== 0) {
+                const normalizedFailure = normalizeDeveloperOptionReadFailure(
+                  result.stderr.trim() || result.stdout.trim() || "Read command failed on this device.",
+                );
+                fatalReadMessage = normalizedFailure.message;
+                break;
+              }
+              namespaceMap = parseSettingsListOutput(result.stdout);
+            } catch (error) {
+              fatalReadMessage = normalizeDeveloperOptionReadFailure(formatError(error)).message;
+              break;
+            }
+          }
+
+          if (!namespaceMap) {
+            fatalReadMessage = listFailure?.message ?? "Read command failed on this device.";
+            break;
+          }
+
+          settingsByNamespace[namespace] = namespaceMap;
+        }
+
+        if (fatalReadMessage) {
+          DEVELOPER_OPTIONS.forEach((option) => {
+            nextSupported[option.key] = false;
+            nextSnapshot[option.key] = null;
+            nextMessages[option.key] = fatalReadMessage;
+          });
+        } else {
+          DEVELOPER_OPTIONS.forEach((option) => {
+            if (option.key === "log_buffer_size") {
+              nextSupported[option.key] = false;
+              nextSnapshot[option.key] = null;
+              nextMessages[option.key] = "Reading...";
+              return;
+            }
+
+            const target = getDeveloperOptionSettingsTarget(option.key);
+            if (!target) {
+              nextSupported[option.key] = false;
+              nextSnapshot[option.key] = null;
+              nextMessages[option.key] = "Unsupported on this device.";
+              return;
+            }
+
+            let value =
+              settingsByNamespace[target.namespace][target.settingKey] ??
+              null;
+            if (
+              option.key === "bluetooth_btsnoop_default_mode" &&
+              (!value || value.toLowerCase() === "null")
+            ) {
+              value = settingsByNamespace.global.bluetooth_btsnoop_log_mode ?? null;
+            }
+
+            const parsed = parseReadResult(option.key, {
+              serial: refreshSerial,
+              stdout: value ?? "null",
+              stderr: "",
+              exit_code: 0,
+            });
+            if (parsed.supported) {
+              nextSupported[option.key] = true;
+              nextSnapshot[option.key] = parsed.value;
+              nextMessages[option.key] = null;
+            } else {
+              nextSupported[option.key] = false;
+              nextSnapshot[option.key] = null;
+              nextMessages[option.key] = parsed.message ?? "Unsupported on this device.";
+            }
+          });
+        }
+
+        const supportedCount = Object.values(nextSupported).filter(Boolean).length;
+        if (developerOptionsRefreshTokenRef.current !== refreshToken) {
+          return;
+        }
+        setDeveloperOptionsSnapshot(nextSnapshot);
+        setDeveloperOptionSupportedByKey(nextSupported);
+        setDeveloperOptionMessageByKey(nextMessages);
+        if (fatalReadMessage) {
+          setDeveloperOptionsError(fatalReadMessage);
+          if (!options.silent) {
+            pushToast(fatalReadMessage, "error");
+          }
+        } else if (supportedCount === 0) {
+          const message = "Unable to read developer options from this device.";
+          setDeveloperOptionsError(message);
+          if (!options.silent) {
+            pushToast(message, "error");
+          }
+        } else {
+          setDeveloperOptionsError(null);
+        }
+
+        if (!fatalReadMessage) {
+          const logBufferReadCommand = buildReadCommands().find(
+            (candidate) => candidate.optionKey === "log_buffer_size",
+          );
+          if (logBufferReadCommand) {
+            void (async () => {
+              const attempts = [
+                logBufferReadCommand.command,
+                ...(logBufferReadCommand.fallbackCommands ?? []),
+              ];
+              let parsedResult:
+                | ReturnType<typeof parseReadResult>
+                | { optionKey: DeveloperOptionKey; supported: false; value: null; message: string }
+                | null = null;
+
+              for (const command of attempts) {
+                if (developerOptionsRefreshTokenRef.current !== refreshToken) {
+                  return;
+                }
+                try {
+                  const response = await runDeveloperOptionsReadShell(refreshSerial, command);
+                  const result = response.data[0];
+                  if (!result) {
+                    parsedResult = {
+                      optionKey: "log_buffer_size",
+                      supported: false,
+                      value: null,
+                      message: "No command output returned.",
+                    };
+                    continue;
+                  }
+                  parsedResult = parseReadResult("log_buffer_size", result);
+                  if (parsedResult.supported) {
+                    break;
+                  }
+                } catch (error) {
+                  const normalizedError = normalizeDeveloperOptionReadFailure(formatError(error));
+                  parsedResult = {
+                    optionKey: "log_buffer_size",
+                    supported: false,
+                    value: null,
+                    message: normalizedError.message,
+                  };
+                  break;
+                }
+              }
+
+              if (developerOptionsRefreshTokenRef.current !== refreshToken) {
+                return;
+              }
+
+              if (parsedResult?.supported) {
+                setDeveloperOptionsSnapshot((prev) => ({
+                  ...prev,
+                  log_buffer_size: parsedResult.value,
+                }));
+                setDeveloperOptionSupportedByKey((prev) => ({
+                  ...prev,
+                  log_buffer_size: true,
+                }));
+                setDeveloperOptionMessageByKey((prev) => ({
+                  ...prev,
+                  log_buffer_size: null,
+                }));
+                setDeveloperOptionsError(null);
+                return;
+              }
+
+              setDeveloperOptionsSnapshot((prev) => ({
+                ...prev,
+                log_buffer_size: null,
+              }));
+              setDeveloperOptionSupportedByKey((prev) => ({
+                ...prev,
+                log_buffer_size: false,
+              }));
+              setDeveloperOptionMessageByKey((prev) => ({
+                ...prev,
+                log_buffer_size: parsedResult?.message ?? "Unsupported on this device.",
+              }));
+            })();
+          }
+        }
+      } catch (error) {
+        if (developerOptionsRefreshTokenRef.current !== refreshToken) {
+          return;
+        }
+        const message = normalizeDeveloperOptionReadFailure(formatError(error)).message;
+        setDeveloperOptionsError(message);
+        if (!options.silent) {
+          pushToast(message, "error");
+        }
+      } finally {
+        if (developerOptionsRefreshTokenRef.current === refreshToken) {
+          setDeveloperOptionsLoading(false);
+          setDeveloperOptionsRefreshing(false);
+        }
+      }
+    },
+    [activeSerial, runDeveloperOptionsReadShell],
+  );
+
+  const applyDeveloperOption = async (
+    optionKey: DeveloperOptionKey,
+    nextValue: DeveloperOptionValue,
+  ) => {
+    const option = DEVELOPER_OPTIONS.find((candidate) => candidate.key === optionKey);
+    if (!option) {
+      pushToast("Unknown developer option.", "error");
+      return;
+    }
+
+    const built = buildApplyCommand({ optionKey, value: nextValue });
+    if (!built.ok) {
+      pushToast(built.error, "error");
+      return;
+    }
+
+    const sourceSerials =
+      developerOptionsApplyToSelected
+        ? Array.from(new Set(selectedSerials))
+        : activeSerial
+          ? [activeSerial]
+          : [];
+    if (!sourceSerials.length) {
+      pushToast("No target device selected.", "error");
+      return;
+    }
+
+    const onlineSerialSet = new Set(
+      devices
+        .filter((device) => device.summary.state === "device")
+        .map((device) => device.summary.serial),
+    );
+    const targetSerials = sourceSerials.filter((serial) => onlineSerialSet.has(serial));
+    const skippedCount = sourceSerials.length - targetSerials.length;
+    if (!targetSerials.length) {
+      pushToast("No online devices available for this action.", "error");
+      return;
+    }
+
+    const taskId = beginTask({
+      kind: "shell",
+      title: `Developer Option: ${option.label}`,
+      serials: targetSerials,
+    });
+    targetSerials.forEach((serial) => {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: { status: "running", message: "Applying option..." },
+      });
+    });
+
+    setBusy(true);
+    setDeveloperOptionsApplyingKey(optionKey);
+    try {
+      const response = await runShell(
+        targetSerials,
+        quoteShellCommandForAdbSh(built.data.command),
+        true,
+      );
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+      const resultBySerial = new Map(response.data.map((result) => [result.serial, result]));
+      let successCount = 0;
+      let unsupportedCount = 0;
+      let failureCount = 0;
+
+      targetSerials.forEach((serial) => {
+        const result = resultBySerial.get(serial);
+        if (!result) {
+          failureCount += 1;
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial,
+            patch: { status: "error", message: "No command result returned." },
+          });
+          return;
+        }
+
+        const evaluation = evaluateApplyResult(result);
+        if (evaluation.success) {
+          successCount += 1;
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial,
+            patch: { status: "success", message: "Applied." },
+          });
+          return;
+        }
+
+        if (evaluation.unsupported) {
+          unsupportedCount += 1;
+        } else {
+          failureCount += 1;
+        }
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: { status: "error", message: evaluation.message },
+        });
+      });
+      dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
+
+      if (activeSerial && targetSerials.includes(activeSerial) && successCount > 0) {
+        setDeveloperOptionsSnapshot((prev) => ({
+          ...prev,
+          [optionKey]: built.data.normalizedValue,
+        }));
+        setDeveloperOptionSupportedByKey((prev) => ({
+          ...prev,
+          [optionKey]: true,
+        }));
+        setDeveloperOptionMessageByKey((prev) => ({
+          ...prev,
+          [optionKey]: null,
+        }));
+      }
+
+      const skipSuffix =
+        skippedCount > 0
+          ? ` Skipped ${skippedCount} offline device${skippedCount > 1 ? "s" : ""}.`
+          : "";
+      if (failureCount === 0 && unsupportedCount === 0) {
+        pushToast(`Applied ${option.label} to ${successCount} device${successCount > 1 ? "s" : ""}.${skipSuffix}`, "info");
+      } else if (successCount > 0) {
+        pushToast(
+          `Applied ${option.label} to ${successCount} device${successCount > 1 ? "s" : ""}; ${
+            unsupportedCount + failureCount
+          } failed.${skipSuffix}`,
+          "error",
+        );
+      } else {
+        pushToast(`Failed to apply ${option.label}.${skipSuffix}`, "error");
+      }
+    } catch (error) {
+      const message = formatError(error);
+      targetSerials.forEach((serial) => {
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: { status: "error", message },
+        });
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+      pushToast(message, "error");
+    } finally {
+      setBusy(false);
+      setDeveloperOptionsApplyingKey(null);
+    }
+  };
+
+  const requestDeveloperOptionApply = (optionKey: DeveloperOptionKey, nextValue: DeveloperOptionValue) => {
+    if (isHighRiskOption(optionKey)) {
+      const sourceSerials =
+        developerOptionsApplyToSelected
+          ? Array.from(new Set(selectedSerials))
+          : activeSerial
+            ? [activeSerial]
+            : [];
+      const onlineSerialSet = new Set(
+        devices
+          .filter((device) => device.summary.state === "device")
+          .map((device) => device.summary.serial),
+      );
+      const targetCount = sourceSerials.filter((serial) => onlineSerialSet.has(serial)).length;
+      const skippedCount = Math.max(0, sourceSerials.length - targetCount);
+      if (!targetCount) {
+        pushToast("No online devices available for this action.", "error");
+        return;
+      }
+      setDeveloperOptionsConfirmModal({
+        optionKey,
+        nextValue,
+        targetCount,
+        skippedCount,
+      });
+      return;
+    }
+    void applyDeveloperOption(optionKey, nextValue);
+  };
+
+  const closeDeveloperOptionsConfirmModal = () => {
+    setDeveloperOptionsConfirmModal(null);
+  };
+
+  const handleDeveloperOptionsConfirmApply = () => {
+    if (!developerOptionsConfirmModal) {
+      return;
+    }
+    const { optionKey, nextValue } = developerOptionsConfirmModal;
+    closeDeveloperOptionsConfirmModal();
+    void applyDeveloperOption(optionKey, nextValue);
+  };
+
+  useEffect(() => {
+    if (!isDeveloperOptionsView) {
+      return;
+    }
+    void refreshDeveloperOptionsSnapshot({ silent: true, forceLoading: true });
+  }, [isDeveloperOptionsView, activeSerial, refreshDeveloperOptionsSnapshot]);
 
   const handleInstallApk = async () => {
     if (!selectedSerials.length) {
@@ -11504,7 +12103,7 @@ function App() {
           </div>
         )}
 
-        <section className="panel perf-panel">
+	        <section className="panel perf-panel">
           <div className="panel-header">
             <div>
               <h2>Live Monitor</h2>
@@ -11588,13 +12187,13 @@ function App() {
               </div>
               {renderPerfSparkline(missedValues)}
             </div>
-          </div>
-        </section>
+	          </div>
+	        </section>
 
         <NetworkBreakdownPanel />
-      </div>
-    );
-  };
+	      </div>
+	    );
+	  };
 
   const NetworkView = () => {
     if (!activeSerial) {
@@ -11642,6 +12241,250 @@ function App() {
     );
   };
 
+  const DeveloperOptionsView = () => {
+    if (!activeSerial) {
+      return (
+        <div className="page-section developer-options-page">
+          <div className="page-header">
+            <div>
+              <h1>Developer Options</h1>
+              <p className="muted">Read from the primary device and apply values instantly.</p>
+            </div>
+          </div>
+          <section className="panel empty-state">
+            <div>
+              <h2>Select a device</h2>
+              <p className="muted">Choose a primary device to read developer options.</p>
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+                Go to Device Manager
+              </button>
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    const onlineSerialSet = new Set(
+      devices
+        .filter((device) => device.summary.state === "device")
+        .map((device) => device.summary.serial),
+    );
+    const primaryOnline = onlineSerialSet.has(activeSerial);
+    const uniqueSelectedSerials = Array.from(new Set(selectedSerials));
+    const selectedOnlineSerials = uniqueSelectedSerials.filter((serial) => onlineSerialSet.has(serial));
+    const selectedOfflineCount = Math.max(0, uniqueSelectedSerials.length - selectedOnlineSerials.length);
+    const targetSerials = developerOptionsApplyToSelected
+      ? selectedOnlineSerials
+      : primaryOnline
+        ? [activeSerial]
+        : [];
+    const supportedCount = DEVELOPER_OPTIONS.filter((option) => developerOptionSupportedByKey[option.key]).length;
+    const hasReadableOptions = supportedCount > 0;
+    const groupedOptions = DEVELOPER_OPTION_CATEGORY_ORDER
+      .map((category) => ({
+        category,
+        label: DEVELOPER_OPTION_CATEGORY_LABEL[category],
+        options: DEVELOPER_OPTIONS.filter((option) => option.category === category),
+      }))
+      .filter((group) => group.options.length > 0);
+    const refreshBusy = developerOptionsLoading || developerOptionsRefreshing;
+    const hasOnlineTarget = targetSerials.length > 0;
+
+    return (
+      <div className="page-section developer-options-page">
+        <div className="page-header">
+          <div>
+            <h1>Developer Options</h1>
+            <p className="muted">Read from the primary device and apply values instantly.</p>
+          </div>
+          <div className="page-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => void refreshDeveloperOptionsSnapshot({ silent: false, forceLoading: true })}
+              disabled={refreshBusy}
+            >
+              {refreshBusy ? "Refreshing..." : "Refresh"}
+            </button>
+            <span className={`status-pill ${refreshBusy ? "busy" : hasReadableOptions ? "ok" : "warn"}`}>
+              {refreshBusy ? "Loading" : hasReadableOptions ? "Ready" : "Unavailable"}
+            </span>
+          </div>
+        </div>
+
+        {singleSelectionWarning && (
+          <div className="inline-alert info">
+            <strong>Primary device in use</strong>
+            <span>{singleSelectionWarningMessage}</span>
+          </div>
+        )}
+
+        <section className="panel developer-options-scope-panel">
+          <div className="developer-options-toolbar">
+            <div>
+              <h2>Apply Scope</h2>
+              <p className="muted">
+                Read source: <code>{activeSerial}</code>
+              </p>
+            </div>
+            {developerOptionsLoading && <span className="status-pill busy">Loading snapshot...</span>}
+          </div>
+
+          <div className="developer-options-scope-controls">
+            <label className="toggle developer-options-scope-toggle">
+              <input
+                type="checkbox"
+                checked={developerOptionsApplyToSelected}
+                onChange={(event) => setDeveloperOptionsApplyToSelected(event.target.checked)}
+                disabled={busy || developerOptionsApplyingKey != null || uniqueSelectedSerials.length === 0}
+              />
+              Apply to selected online devices
+            </label>
+            <p className="muted developer-options-target-summary">
+              {developerOptionsApplyToSelected
+                ? selectedOnlineSerials.length > 0
+                  ? `${selectedOnlineSerials.length} online target${
+                      selectedOnlineSerials.length > 1 ? "s" : ""
+                    } available.`
+                  : "No online selected devices. Actions are disabled."
+                : primaryOnline
+                  ? `Primary target: ${activeSerial}`
+                  : `Primary device ${activeSerial} is offline. Actions are disabled.`}
+            </p>
+            {developerOptionsApplyToSelected && selectedOfflineCount > 0 && (
+              <p className="muted developer-options-target-summary">
+                {selectedOfflineCount} offline selected device{selectedOfflineCount > 1 ? "s" : ""} will be skipped.
+              </p>
+            )}
+          </div>
+        </section>
+
+        {developerOptionsError && (
+          <div className={`inline-alert ${hasReadableOptions ? "info" : "error"}`}>
+            <strong>{hasReadableOptions ? "Partial data loaded" : "Unable to load options"}</strong>
+            <span>{developerOptionsError}</span>
+          </div>
+        )}
+
+        {!hasOnlineTarget && (
+          <div className="inline-alert info">
+            <strong>No online apply target</strong>
+            <span>Connect the primary device or switch selected devices to online targets.</span>
+          </div>
+        )}
+
+        {developerOptionsLoading ? (
+          <section className="panel empty-state">
+            <div>
+              <h2>Loading developer options</h2>
+              <p className="muted">Reading values from the primary device.</p>
+            </div>
+          </section>
+        ) : !hasReadableOptions ? (
+          <section className="panel empty-state">
+            <div>
+              <h2>No readable options</h2>
+              <p className="muted">
+                This device may block developer option reads. Try refreshing or switch to another device.
+              </p>
+            </div>
+          </section>
+        ) : (
+          <div className="developer-options-grid">
+            {groupedOptions.map((group) => (
+              <section key={group.category} className="panel card developer-options-group">
+                <div className="developer-options-group-header">
+                  <h2>{group.label}</h2>
+                  <span className="badge">{group.options.length} options</span>
+                </div>
+                <div className="developer-options-list">
+                  {group.options.map((option) => {
+                    const value = developerOptionsSnapshot[option.key];
+                    const supported = developerOptionSupportedByKey[option.key];
+                    const message = developerOptionMessageByKey[option.key];
+                    const applying = developerOptionsApplyingKey === option.key;
+                    const disabled =
+                      !supported || !hasOnlineTarget || busy || developerOptionsLoading || applying;
+                    const controlId = `developer-option-${option.key}`;
+
+                    return (
+                      <div
+                        key={option.key}
+                        className={`developer-options-option${supported ? "" : " is-disabled"}${
+                          option.highRisk ? " is-high-risk" : ""
+                        }`}
+                      >
+                        <div className="developer-options-option-main">
+                          <div className="developer-options-option-copy">
+                            <label htmlFor={controlId} className="developer-options-option-label">
+                              {option.label}
+                            </label>
+                            <p className="muted developer-options-option-description">{option.description}</p>
+                          </div>
+                          <div className="developer-options-option-control">
+                            {option.control === "toggle" ? (
+                              <label className="toggle developer-options-toggle">
+                                <input
+                                  id={controlId}
+                                  type="checkbox"
+                                  checked={Boolean(value)}
+                                  disabled={disabled}
+                                  onChange={(event) => {
+                                    const nextValue = event.target.checked;
+                                    if (value === nextValue) {
+                                      return;
+                                    }
+                                    requestDeveloperOptionApply(option.key, nextValue);
+                                  }}
+                                />
+                                {Boolean(value) ? "On" : "Off"}
+                              </label>
+                            ) : (
+                              <select
+                                id={controlId}
+                                value={typeof value === "string" ? value : ""}
+                                disabled={disabled}
+                                onChange={(event) => {
+                                  const nextValue = event.target.value;
+                                  if (!nextValue || value === nextValue) {
+                                    return;
+                                  }
+                                  requestDeveloperOptionApply(option.key, nextValue);
+                                }}
+                              >
+                                <option value="" disabled>
+                                  {supported ? "Select value" : "Unsupported"}
+                                </option>
+                                {(option.options ?? []).map((item) => (
+                                  <option key={item.value} value={item.value}>
+                                    {item.label}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                        </div>
+                        <div className="developer-options-option-meta">
+                          {option.highRisk && <span className="badge developer-options-risk-badge">High risk</span>}
+                          {applying && <span className="status-pill busy">Applying...</span>}
+                          {!supported && message && (
+                            <span className="muted developer-options-option-message">{message}</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`}>
       {!isDetachedPopupWindow && (
@@ -11664,6 +12507,7 @@ function App() {
             <span className="nav-title">Debug</span>
             <NavLink to="/logcat">Logcat</NavLink>
             <NavLink to="/network">Network</NavLink>
+            <NavLink to="/developer-options">Developer Options</NavLink>
             <NavLink to="/ui-inspector">UI Inspector</NavLink>
             <NavLink to="/bugreport">Bugreport</NavLink>
             <NavLink to="/bugreport-logviewer">Bugreport Logs</NavLink>
@@ -11976,6 +12820,7 @@ function App() {
             <Route path="/quick-actions" element={<QuickActionsView />} />
             <Route path="/performance" element={<PerformanceView />} />
             <Route path="/network" element={<NetworkView />} />
+            <Route path="/developer-options" element={<DeveloperOptionsView />} />
             <Route
               path="/tasks"
               element={
@@ -16525,6 +17370,61 @@ function App() {
               <button onClick={openTaskCenterFromCompletionModal}>View Task Center</button>
               <button className="ghost" onClick={closeTaskCompletionModal}>
                 Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {developerOptionsConfirmModal && (
+        <div className="modal-backdrop" onClick={closeDeveloperOptionsConfirmModal}>
+          <div className="modal danger-modal developer-options-confirm-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Confirm Developer Option Change</h3>
+                <p className="muted">This option may interrupt ADB connectivity and active debugging sessions.</p>
+              </div>
+              <button className="ghost" onClick={closeDeveloperOptionsConfirmModal} disabled={busy}>
+                Close
+              </button>
+            </div>
+            <div className="stack">
+              <div className="inline-alert error">
+                <strong>High-risk action</strong>
+                <span>Confirmation is required every time this option changes.</span>
+              </div>
+              <p className="muted">
+                Option:{" "}
+                <strong>
+                  {developerOptionsConfirmOption?.label ?? developerOptionsConfirmModal.optionKey}
+                </strong>
+              </p>
+              <p className="muted">
+                New value:{" "}
+                <strong>
+                  {typeof developerOptionsConfirmModal.nextValue === "boolean"
+                    ? developerOptionsConfirmModal.nextValue
+                      ? "On"
+                      : "Off"
+                    : String(developerOptionsConfirmModal.nextValue)}
+                </strong>
+              </p>
+              <p className="muted">
+                Targets: <strong>{developerOptionsConfirmModal.targetCount}</strong> online device
+                {developerOptionsConfirmModal.targetCount > 1 ? "s" : ""}
+                {developerOptionsConfirmModal.skippedCount > 0
+                  ? ` • Skipped ${developerOptionsConfirmModal.skippedCount} offline device${
+                      developerOptionsConfirmModal.skippedCount > 1 ? "s" : ""
+                    }`
+                  : ""}
+              </p>
+            </div>
+            <div className="button-row">
+              <button className="danger" onClick={handleDeveloperOptionsConfirmApply} disabled={busy}>
+                Confirm Apply
+              </button>
+              <button className="ghost" onClick={closeDeveloperOptionsConfirmModal} disabled={busy}>
+                Cancel
               </button>
             </div>
           </div>
