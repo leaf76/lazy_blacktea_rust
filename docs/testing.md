@@ -165,6 +165,22 @@ Then validate the following flows on a real connected device:
 - Batch/multi-device install reports per-device results clearly.
 - Launch-after-install works (if enabled).
 
+### Updater (Settings > Update)
+
+Preconditions:
+- Use an app build older than the latest release (for example `Current: 0.0.60`, `Latest: 0.0.62`).
+- Run one pass with stable network and one pass with unstable network.
+- On macOS, run one pass from `/Applications` and one pass from a non-writable location.
+
+Checks:
+- `Check for updates` updates the `Last checked` timestamp and shows either `Up to date` or a newer version.
+- Opening the update modal shows current/latest version and release notes (if available).
+- While checking/installing, related action buttons are disabled and no duplicate actions are triggered.
+- Success path: `Install and restart` eventually relaunches the app, or shows `Update installed. Please restart the app manually.` when relaunch fails.
+- Transient failure path: if the updater endpoint is temporarily unavailable, install retries once automatically; if it still fails, the message indicates artifacts are still publishing (no raw internal error text).
+- Permission failure path: when install cannot replace the app binary (for example, non-writable location), the message instructs moving the app to `Applications`.
+- Retry path: after an error, running `Install and restart` again is still possible and behaves consistently.
+
 ### Bugreport / UI Inspector (if used)
 - Bugreport generation progress updates and completes.
 - Bugreport log viewer can search/filter without freezing.
