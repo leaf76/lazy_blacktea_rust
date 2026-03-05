@@ -32,7 +32,6 @@ import {
   sendDesktopNotification,
   type DesktopNotificationPermissionState,
 } from "./desktopNotifications";
-import { BluetoothMonitorPage } from "./BluetoothMonitorPage";
 import type {
   AdbInfo,
   AppConfig,
@@ -475,6 +474,12 @@ const DEVELOPER_OPTION_CATEGORY_LABEL: Record<DeveloperOptionCategory, string> =
 };
 
 const LazyDeveloperOptionsPage = lazy(() => import("./DeveloperOptionsPage"));
+const LazyBluetoothMonitorPage = lazy(async () => {
+  const module = await import("./BluetoothMonitorPage");
+  return { default: module.BluetoothMonitorPage };
+});
+const LazyUiInspectorPage = lazy(() => import("./UiInspectorPage"));
+const LazyBugreportPage = lazy(() => import("./BugreportMainPage"));
 
 type StoredSharedLogFiltersV1 = {
   levels?: Record<string, unknown>;
@@ -15443,324 +15448,72 @@ function App() {
             <Route
               path="/ui-inspector"
               element={
-                <div className="page-section page-section-stretch ui-inspector-workspace">
-                  <div className="page-header">
-                    <div>
-                      <h1>UI Inspector</h1>
-                      <p className="muted">Capture hierarchy, inspect XML, and export assets.</p>
-                    </div>
-                  </div>
-	                  <section className="panel panel-stretch">
-	                    <div className="panel-header">
-	                      <div>
-	                        <h2>Inspector Workspace</h2>
-	                        <span>{selectedSummaryLabel}</span>
-	                      </div>
-	                      <div className="button-row compact">
-	                        <button onClick={handleUiInspect} disabled={busy || !activeSerial}>
-	                          Sync
-	                        </button>
-	                        <button className="ghost" onClick={handleUiExport} disabled={busy || !activeSerial}>
-	                          Export
-	                        </button>
-	                        <select
-	                          aria-label="Auto sync interval"
-	                          title="Auto sync interval"
-	                          value={uiAutoSyncIntervalMs}
-	                          onChange={(event) => setUiAutoSyncIntervalMs(Number(event.target.value))}
-	                          disabled={!activeSerial}
-	                        >
-	                          <option value={500}>0.5s</option>
-	                          <option value={1000}>1s</option>
-	                          <option value={2000}>2s</option>
-	                        </select>
-	                        <button
-	                          type="button"
-	                          className={`ghost ${uiAutoSyncEnabled ? "active" : ""}`}
-	                          onClick={handleUiAutoSyncToggle}
-	                          disabled={!activeSerial}
-	                          title="Automatically refresh screenshot and hierarchy"
-	                        >
-	                          Auto Sync
-	                        </button>
-	                      </div>
-	                    </div>
-	                    {singleSelectionWarning && (
-	                      <div className="inline-alert info">
-	                        <strong>Primary device in use</strong>
-	                        <span>{singleSelectionWarningMessage}</span>
-	                      </div>
-	                    )}
-	                    {uiExportResult && (
-	                      <div className="inline-alert info">
-	                        <strong>Exported</strong>
-	                        <span>{uiExportResult}</span>
-	                      </div>
-	                    )}
-                    <div className="split inspector-split split-stretch">
-                      <div className="panel-sub inspector-pane">
-                        <div className="panel-header">
-                          <h3>Screenshot</h3>
-                          <span className="muted">
-								{uiAutoSyncEnabled
-									? `Auto sync${uiAutoSyncLastAt ? ` · ${new Date(uiAutoSyncLastAt).toLocaleTimeString()}` : ""}`
-									: uiScreenshotSrc
-										? "Captured"
-										: "No screenshot"}
-                          </span>
+                <Suspense
+                  fallback={
+                    <div className="page-section page-section-stretch ui-inspector-workspace">
+                      <div className="page-header">
+                        <div>
+                          <h1>UI Inspector</h1>
+                          <p className="muted">Loading inspector workspace...</p>
                         </div>
-							{uiAutoSyncEnabled && uiAutoSyncError && (
-								<div className="inline-alert error">
-									<strong>Auto sync error</strong>
-									<span>{uiAutoSyncError}</span>
-								</div>
-							)}
-                        <div className="form-row">
-                          <label>Zoom</label>
-                          <input
-                            type="range"
-                            min={0.5}
-                            max={2}
-                            step={0.1}
-                            value={uiZoom}
-                            onChange={(event) => setUiZoom(Number(event.target.value))}
-                          />
-                          <span className="muted">{Math.round(uiZoom * 100)}%</span>
-                        </div>
-                        <div className="preview-panel inspector-preview">
-                          {uiScreenshotSrc ? (
-                            <div
-                              className="inspector-screenshot-stage"
-                              style={{ transform: `scale(${uiZoom})`, transformOrigin: "top left" }}
-                            >
-                              <img
-                                ref={uiScreenshotImgRef}
-                                src={uiScreenshotSrc}
-                                alt="UI Screenshot"
-                                onLoad={() => {
-                                  const img = uiScreenshotImgRef.current;
-                                  if (!img) {
-                                    return;
-                                  }
-                                  setUiScreenshotSize({
-                                    width: img.naturalWidth,
-                                    height: img.naturalHeight,
-                                  });
-                                }}
-                              />
-                              <canvas
-                                ref={uiBoundsCanvasRef}
-                                aria-label="UI hierarchy bounds overlay"
-                                onMouseMove={(event) => {
-                                  if (!uiBoundsEnabled) {
-                                    setUiHoveredNodeIndex(-1);
-                                    return;
-                                  }
-                                  const canvas = uiBoundsCanvasRef.current;
-                                  if (!canvas) {
-                                    return;
-                                  }
-                                  uiLastPointerRef.current = { x: event.clientX, y: event.clientY };
-                                  if (uiHoverRafRef.current !== null) {
-                                    return;
-                                  }
-                                  uiHoverRafRef.current = window.requestAnimationFrame(() => {
-                                    uiHoverRafRef.current = null;
-                                    const latest = uiLastPointerRef.current;
-                                    const activeCanvas = uiBoundsCanvasRef.current;
-                                    if (!latest || !activeCanvas) {
-                                      return;
-                                    }
-                                    const rect = activeCanvas.getBoundingClientRect();
-                                    if (rect.width <= 0 || rect.height <= 0) {
-                                      return;
-                                    }
-                                    const x =
-                                      (latest.x - rect.left) * (activeCanvas.width / rect.width);
-                                    const y =
-                                      (latest.y - rect.top) * (activeCanvas.height / rect.height);
-                                    const idx = pickUiNodeAtPoint(uiNodesParse.nodes, x, y);
-                                    setUiHoveredNodeIndex(idx);
-                                  });
-                                }}
-                                onMouseLeave={() => {
-                                  uiLastPointerRef.current = null;
-                                  if (uiHoverRafRef.current !== null) {
-                                    window.cancelAnimationFrame(uiHoverRafRef.current);
-                                    uiHoverRafRef.current = null;
-                                  }
-                                  setUiHoveredNodeIndex(-1);
-                                }}
-                                onClick={() => {
-                                  if (uiHoveredNodeIndex >= 0) {
-                                    setUiSelectedNodeIndex(uiHoveredNodeIndex);
-                                  } else {
-                                    setUiSelectedNodeIndex(-1);
-                                  }
-                                }}
-                              />
-                            </div>
-                          ) : (
-                            <p className="muted">
-                              {uiScreenshotError
-                                ? `Screenshot unavailable: ${uiScreenshotError}`
-                                : "Capture UI hierarchy to include a screenshot."}
-                            </p>
-                          )}
-                        </div>
-                        <div className="form-row">
-                          <label>Bounds</label>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={uiBoundsEnabled}
-                              onChange={(event) => setUiBoundsEnabled(event.target.checked)}
-                              disabled={!uiScreenshotSrc}
-                            />
-                            Show hierarchy bounds
-                          </label>
-                          <span className="muted">
-                            {uiScreenshotSrc
-                              ? `${uiNodesParse.nodes.length}${uiNodesParse.truncated ? "+" : ""} nodes`
-                              : "--"}
-                          </span>
-                        </div>
-                        {(uiSelectedNode || uiHoveredNode) && (
-                          <div className="ui-node-meta">
-                            {uiSelectedNode && (
-                              <>
-                                <div className="ui-node-meta-row">
-                                  <span className="ui-node-meta-label">Selected</span>
-                                  <span className="ui-node-meta-value">
-                                    {[
-                                      uiSelectedNode.resourceId,
-                                      uiSelectedNode.text ? `"${uiSelectedNode.text}"` : null,
-                                      uiSelectedNode.className,
-                                    ]
-                                      .filter(Boolean)
-                                      .join(" · ") || "Node"}
-                                  </span>
-                                </div>
-                                <div className="ui-node-meta-row">
-                                  <span className="ui-node-meta-label">Bounds</span>
-                                  <span className="ui-node-meta-value">{uiSelectedNode.bounds}</span>
-                                </div>
-                              </>
-                            )}
-                            {uiHoveredNode && (
-                              <>
-                                <div className="ui-node-meta-row">
-                                  <span className="ui-node-meta-label">Hover</span>
-                                  <span className="ui-node-meta-value">
-                                    {[
-                                      uiHoveredNode.resourceId,
-                                      uiHoveredNode.text ? `"${uiHoveredNode.text}"` : null,
-                                      uiHoveredNode.className,
-                                    ]
-                                      .filter(Boolean)
-                                      .join(" · ") || "Node"}
-                                  </span>
-                                </div>
-                                <div className="ui-node-meta-row">
-                                  <span className="ui-node-meta-label">Bounds</span>
-                                  <span className="ui-node-meta-value">{uiHoveredNode.bounds}</span>
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        )}
                       </div>
-                      <div className="panel-sub inspector-pane">
-                        <div className="panel-header">
-                          <h3>Hierarchy</h3>
-                          <div className="button-row compact inspector-hierarchy-controls">
-                            <div className="toggle-group">
-                              <button
-                                type="button"
-                                className={`toggle ${uiInspectorTab === "hierarchy" ? "active" : ""}`}
-                                onClick={() => setUiInspectorTab("hierarchy")}
-                              >
-                                Tree
-                              </button>
-                              <button
-                                type="button"
-                                className={`toggle ${uiInspectorTab === "xml" ? "active" : ""}`}
-                                onClick={() => setUiInspectorTab("xml")}
-                              >
-                                XML
-                              </button>
-                            </div>
-                            {uiInspectorTab === "xml" && (
-                              <>
-                                <div className="toggle-group">
-                                  <button
-                                    type="button"
-                                    className={`toggle ${uiXmlViewMode === "raw" ? "active" : ""}`}
-                                    onClick={() => setUiXmlViewMode("raw")}
-                                  >
-                                    Raw
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={`toggle ${uiXmlViewMode === "pretty" ? "active" : ""}`}
-                                    onClick={() => setUiXmlViewMode("pretty")}
-                                  >
-                                    Pretty
-                                  </button>
-                                </div>
-                                <button
-                                  type="button"
-                                  className="ghost"
-                                  onClick={() => void handleUiCopyXml()}
-                                  disabled={!filteredUiXml.trim()}
-                                >
-                                  Copy
-                                </button>
-                              </>
-                            )}
-                          </div>
+                      <section className="panel empty-state">
+                        <div>
+                          <h2>Loading UI Inspector</h2>
+                          <p className="muted">Preparing capture and hierarchy modules.</p>
                         </div>
-                        <div className="form-row">
-                          <label>Search</label>
-                          <input
-                            value={uiInspectorSearch}
-                            onChange={(event) => setUiInspectorSearch(event.target.value)}
-                            placeholder="Filter XML lines"
-                          />
-                        </div>
-                        {uiInspectorTab === "hierarchy" ? (
-                          uiHtml ? (
-                            <iframe
-                              ref={uiHierarchyFrameRef}
-                              title="UI Inspector"
-                              srcDoc={uiHtml}
-                              className="ui-frame"
-                              onLoad={() => setUiHierarchyFrameToken((value) => value + 1)}
-                            />
-                          ) : (
-                            <p className="muted">Capture UI hierarchy to preview the structure.</p>
-                          )
-                        ) : (
-                          <>
-                            {uiXmlViewMode === "pretty" && uiXml.trim() && !uiXmlView.prettyAvailable && (
-                              <div className="inline-alert info">
-                                <strong>Pretty unavailable</strong>
-                                <span>Showing raw XML because this capture could not be formatted.</span>
-                              </div>
-                            )}
-                            <div className="output-block inspector-xml">
-                              {filteredUiXml ? (
-                                <pre>{filteredUiXml}</pre>
-                              ) : (
-                                <p className="muted">No XML captured.</p>
-                              )}
-                            </div>
-                          </>
-                        )}
-                      </div>
+                      </section>
                     </div>
-                  </section>
-                </div>
+                  }
+                >
+                  <LazyUiInspectorPage
+                    selectedSummaryLabel={selectedSummaryLabel}
+                    busy={busy}
+                    activeSerial={activeSerial}
+                    handleUiInspect={handleUiInspect}
+                    handleUiExport={handleUiExport}
+                    uiAutoSyncIntervalMs={uiAutoSyncIntervalMs}
+                    setUiAutoSyncIntervalMs={setUiAutoSyncIntervalMs}
+                    uiAutoSyncEnabled={uiAutoSyncEnabled}
+                    handleUiAutoSyncToggle={handleUiAutoSyncToggle}
+                    singleSelectionWarning={singleSelectionWarning}
+                    singleSelectionWarningMessage={singleSelectionWarningMessage}
+                    uiExportResult={uiExportResult}
+                    uiAutoSyncLastAt={uiAutoSyncLastAt}
+                    uiScreenshotSrc={uiScreenshotSrc}
+                    uiAutoSyncError={uiAutoSyncError}
+                    uiZoom={uiZoom}
+                    setUiZoom={setUiZoom}
+                    uiScreenshotImgRef={uiScreenshotImgRef}
+                    setUiScreenshotSize={setUiScreenshotSize}
+                    uiBoundsCanvasRef={uiBoundsCanvasRef}
+                    uiBoundsEnabled={uiBoundsEnabled}
+                    setUiHoveredNodeIndex={setUiHoveredNodeIndex}
+                    uiLastPointerRef={uiLastPointerRef}
+                    uiHoverRafRef={uiHoverRafRef}
+                    uiNodesParse={uiNodesParse}
+                    pickUiNodeAtPoint={pickUiNodeAtPoint}
+                    setUiSelectedNodeIndex={setUiSelectedNodeIndex}
+                    uiHoveredNodeIndex={uiHoveredNodeIndex}
+                    uiScreenshotError={uiScreenshotError}
+                    setUiBoundsEnabled={setUiBoundsEnabled}
+                    uiSelectedNode={uiSelectedNode}
+                    uiHoveredNode={uiHoveredNode}
+                    uiInspectorTab={uiInspectorTab}
+                    setUiInspectorTab={setUiInspectorTab}
+                    uiXmlViewMode={uiXmlViewMode}
+                    setUiXmlViewMode={setUiXmlViewMode}
+                    handleUiCopyXml={handleUiCopyXml}
+                    filteredUiXml={filteredUiXml}
+                    uiInspectorSearch={uiInspectorSearch}
+                    setUiInspectorSearch={setUiInspectorSearch}
+                    uiHtml={uiHtml}
+                    uiHierarchyFrameRef={uiHierarchyFrameRef}
+                    setUiHierarchyFrameToken={setUiHierarchyFrameToken}
+                    uiXml={uiXml}
+                    uiXmlView={uiXmlView}
+                  />
+                </Suspense>
               }
             />
             <Route
@@ -16157,172 +15910,51 @@ function App() {
             <Route
               path="/bugreport"
               element={
-                <div className="page-section bugreport-page">
-                  <div className="page-header">
-                    <div>
-                      <h1>Bugreport</h1>
-                      <p className="muted">Batch bugreport generation with per-device progress and recovery actions.</p>
-                    </div>
-                  </div>
-                  <div className="stack">
-                    {bugreportCardSummary.selected > 0 ? (
-                      <section className="panel bugreport-panel">
-                        <div className="panel-header">
-                          <h2>Batch Run</h2>
-                          <span>{selectedSummaryLabel}</span>
+                <Suspense
+                  fallback={
+                    <div className="page-section bugreport-page">
+                      <div className="page-header">
+                        <div>
+                          <h1>Bugreport</h1>
+                          <p className="muted">Loading bugreport workspace...</p>
                         </div>
-                        <div className="bugreport-toolbar">
-                          <div className="bugreport-toolbar-copy">
-                            <p className="muted">
-                              Target devices come from the global selector in the top bar.
-                            </p>
-                          </div>
-                          <div className="button-row compact bugreport-toolbar-actions">
-                            <button
-                              onClick={() => void handleBugreport()}
-                              disabled={busy || bugreportCardSummary.selected === 0 || bugreportCardSummary.running > 0}
-                            >
-                              {bugreportGenerateLabel}
-                            </button>
-                            <button
-                              className="ghost"
-                              onClick={() => void handleCancelBugreport()}
-                              disabled={bugreportCardSummary.running === 0}
-                            >
-                              Cancel Running
-                            </button>
-                            <button
-                              className="ghost"
-                              onClick={() => void handleOpenBugreportOutputs()}
-                              disabled={busy || bugreportOutputPaths.length === 0}
-                            >
-                              Open Outputs ({bugreportOutputPaths.length})
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="bugreport-batch-strip" role="status" aria-live="polite">
-                          <strong>Batch Status</strong>
-                          <span className="badge">{bugreportCardSummary.selected} selected</span>
-                          <span className="badge">{bugreportCardSummary.online} online</span>
-                          <span className="badge">{bugreportCardSummary.running} running</span>
-                          <span className="badge">{bugreportCardSummary.success} success</span>
-                          <span className="badge">{bugreportCardSummary.error} errors</span>
-                          {(bugreportCardSummary.cancelled > 0 || bugreportCardSummary.interrupted > 0) && (
-                            <span className="badge">
-                              {bugreportCardSummary.cancelled + bugreportCardSummary.interrupted} cancelled/interrupted
-                            </span>
-                          )}
-                        </div>
-
-                        {bugreportCardSummary.offline > 0 && (
-                          <div className="inline-alert info">
-                            <strong>{bugreportCardSummary.offline} offline device(s) selected.</strong>
-                            <span>They remain visible here and will fail or be skipped until they reconnect.</span>
-                          </div>
-                        )}
-
-                        <div className="bugreport-card-grid" role="list">
-                          {bugreportCards.map((card) => {
-                            const statusTone = BUGREPORT_STATUS_TONE[card.status];
-                            const statusLabel = BUGREPORT_STATUS_LABEL[card.status];
-                            const progressValue =
-                              card.progress ?? (card.status === "running" ? 36 : card.status === "success" ? 100 : 0);
-                            const progressLabel =
-                              card.progress != null
-                                ? `${card.progress}%`
-                                : card.status === "running"
-                                  ? "Running..."
-                                  : statusLabel;
-                            return (
-                              <article
-                                key={card.serial}
-                                role="listitem"
-                                className={`bugreport-card bugreport-card-${card.status}`}
-                                tabIndex={0}
-                                onKeyDown={(event) =>
-                                  openDeviceQuickContextMenuFromKeyboard(event, card.serial, {
-                                    source: "task",
-                                    outputPath: card.output_path,
-                                  })
-                                }
-                                onContextMenu={(event) =>
-                                  openDeviceQuickContextMenuFromPointer(event, card.serial, {
-                                    source: "task",
-                                    outputPath: card.output_path,
-                                    showSelectionHint: true,
-                                  })
-                                }
-                              >
-                                <div className="bugreport-card-head">
-                                  <div className="bugreport-card-title">
-                                    <strong>{card.display_name}</strong>
-                                    <span className="muted">
-                                      <code>{card.serial}</code> · {card.online ? "Online" : "Offline"}
-                                    </span>
-                                  </div>
-                                  <span className={`status-pill ${statusTone}`}>{statusLabel}</span>
-                                </div>
-                                <div className="bugreport-card-progress">
-                                  <div className="progress-bar">
-                                    <div
-                                      className={`progress-fill${
-                                        card.status === "running" && card.progress == null
-                                          ? " bugreport-progress-indeterminate"
-                                          : ""
-                                      }`}
-                                      style={{ width: `${progressValue}%` }}
-                                    />
-                                  </div>
-                                  <span className="muted">{progressLabel}</span>
-                                </div>
-                                {card.message && <p className="muted bugreport-card-message">{card.message}</p>}
-                                <div className="button-row compact bugreport-card-actions">
-                                  {card.output_path && (
-                                    <button className="ghost" onClick={() => openPath(card.output_path!)}>
-                                      Open output
-                                    </button>
-                                  )}
-                                  {card.can_cancel && (
-                                    <button
-                                      className="ghost"
-                                      onClick={() => void cancelBugreportForSerials([card.serial])}
-                                    >
-                                      Cancel
-                                    </button>
-                                  )}
-                                  {card.can_retry && (
-                                    <button onClick={() => void handleRetryBugreport(card.serial)} disabled={busy}>
-                                      Retry
-                                    </button>
-                                  )}
-                                </div>
-                              </article>
-                            );
-                          })}
-                        </div>
-                      </section>
-                    ) : (
+                      </div>
                       <section className="panel empty-state bugreport-empty-state">
                         <div>
-                          <h2>No devices selected</h2>
-                          <p className="muted">
-                            Use the top global device selector to choose targets, or open Device Manager to adjust
-                            selection.
-                          </p>
-                        </div>
-                        <div className="button-row">
-                          <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
-                            Go to Device Manager
-                          </button>
-                          <button onClick={refreshDevices} disabled={busy}>
-                            Refresh Devices
-                          </button>
+                          <h2>Loading Bugreport</h2>
+                          <p className="muted">Preparing batch run panel and device status cards.</p>
                         </div>
                       </section>
-                    )}
-                  </div>
-                </div>
+                    </div>
+                  }
+                >
+                  <LazyBugreportPage
+                    busy={busy}
+                    selectedSummaryLabel={selectedSummaryLabel}
+                    bugreportCardSummary={bugreportCardSummary}
+                    bugreportGenerateLabel={bugreportGenerateLabel}
+                    bugreportOutputPaths={bugreportOutputPaths}
+                    bugreportCards={bugreportCards}
+                    bugreportStatusTone={BUGREPORT_STATUS_TONE}
+                    bugreportStatusLabel={BUGREPORT_STATUS_LABEL}
+                    onRunBugreport={() => void handleBugreport()}
+                    onCancelRunning={() => void handleCancelBugreport()}
+                    onOpenOutputs={() => void handleOpenBugreportOutputs()}
+                    onOpenDeviceContextKeyboard={openDeviceQuickContextMenuFromKeyboard}
+                    onOpenDeviceContextPointer={openDeviceQuickContextMenuFromPointer}
+                    onOpenOutputPath={(path) => {
+                      void openPath(path);
+                    }}
+                    onCancelSerial={(serial) => {
+                      void cancelBugreportForSerials([serial]);
+                    }}
+                    onRetrySerial={(serial) => {
+                      void handleRetryBugreport(serial);
+                    }}
+                    onGoDeviceManager={() => navigate("/devices")}
+                    onRefreshDevices={refreshDevices}
+                  />
+                </Suspense>
               }
             />
             <Route
@@ -17045,15 +16677,26 @@ function App() {
                       <p className="muted">State dashboard and event timeline for the selected device.</p>
                     </div>
                   </div>
-                  <BluetoothMonitorPage
-                    serial={activeSerial}
-                    serialLabel={selectedSummaryLabel}
-                    busy={busy}
-                    monitoringDesired={activeSerial ? (bluetoothMonitorRunningBySerial[activeSerial] ?? false) : false}
-                    singleSelectionWarning={singleSelectionWarning}
-                    singleSelectionWarningMessage={singleSelectionWarningMessage}
-                    onToggleMonitor={handleBluetoothMonitor}
-                  />
+                  <Suspense
+                    fallback={
+                      <section className="panel empty-state">
+                        <div>
+                          <h2>Loading Bluetooth monitor</h2>
+                          <p className="muted">Preparing dashboard module.</p>
+                        </div>
+                      </section>
+                    }
+                  >
+                    <LazyBluetoothMonitorPage
+                      serial={activeSerial}
+                      serialLabel={selectedSummaryLabel}
+                      busy={busy}
+                      monitoringDesired={activeSerial ? (bluetoothMonitorRunningBySerial[activeSerial] ?? false) : false}
+                      singleSelectionWarning={singleSelectionWarning}
+                      singleSelectionWarningMessage={singleSelectionWarningMessage}
+                      onToggleMonitor={handleBluetoothMonitor}
+                    />
+                  </Suspense>
                 </div>
               }
             />
