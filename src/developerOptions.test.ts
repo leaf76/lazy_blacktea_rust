@@ -121,6 +121,22 @@ bluetooth_btsnoop_default_mode=full
     expect(rejected.ok).toBe(false);
   });
 
+  it("builds plain shell snippets without outer quote wrapping", () => {
+    const toggle = buildApplyCommand({ optionKey: "show_touches", value: true });
+    expect(toggle.ok).toBe(true);
+    if (toggle.ok) {
+      expect(toggle.data.command.startsWith("'")).toBe(false);
+      expect(toggle.data.command).toBe("settings put system show_touches 1");
+    }
+
+    const logBuffer = buildApplyCommand({ optionKey: "log_buffer_size", value: "1M" });
+    expect(logBuffer.ok).toBe(true);
+    if (logBuffer.ok) {
+      expect(logBuffer.data.command.startsWith("'")).toBe(false);
+      expect(logBuffer.data.command).toBe("logcat -G 1M");
+    }
+  });
+
   it("parses logcat -g output into normalized log buffer value", () => {
     const output = `
 main: ring buffer is 1024 KiB (256 KiB consumed)
