@@ -626,16 +626,86 @@ textarea {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
-.top-actions-deemphasized > button.ghost {
+.top-overview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.top-overview-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  max-width: 220px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-subtle);
+}
+
+.top-overview-label {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.top-overview-chip strong {
+  font-size: 12px;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.top-overview-primary {
+  display: inline-block;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-overview-primary.ok {
+  color: var(--color-success);
+}
+
+.top-overview-primary.error {
+  color: var(--color-danger);
+}
+
+.top-overview-primary.warn {
+  color: var(--color-warning);
+}
+
+.top-actions-menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.context-menu.top-actions-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 220px;
+  z-index: 12;
+}
+
+.top-actions-deemphasized > button.ghost,
+.top-actions-deemphasized .top-actions-menu-anchor > button.ghost {
   color: var(--color-text-muted);
   border-color: var(--color-border);
   background: transparent;
 }
 
 .top-actions-deemphasized > button.ghost:hover:not(:disabled),
-.top-actions-deemphasized > button.ghost:focus-visible {
+.top-actions-deemphasized > button.ghost:focus-visible,
+.top-actions-deemphasized .top-actions-menu-anchor > button.ghost:hover:not(:disabled),
+.top-actions-deemphasized .top-actions-menu-anchor > button.ghost:focus-visible {
   color: var(--color-text);
   border-color: var(--nav-active-border);
   background: var(--color-bg-subtle);
@@ -6358,6 +6428,15 @@ textarea:disabled {
     min-width: 0;
     width: 100%;
   }
+
+  .top-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .top-overview {
+    flex: 1 1 auto;
+  }
 }
 
 @media (max-width: 720px) {
@@ -6404,6 +6483,20 @@ textarea:disabled {
   .modal .logcat-popup-selector-row .status-pill {
     grid-area: status;
     align-self: start;
+  }
+
+  .top-overview-chip.is-online {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .top-overview-chip.is-selected {
+    display: none;
+  }
+
+  .top-overview-primary {
+    max-width: 110px;
   }
 }
 

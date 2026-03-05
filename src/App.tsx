@@ -195,6 +195,7 @@ import {
 } from "./taskNotificationRules";
 import {
   applyDeviceDetailPatch,
+  buildTopbarOverview,
   buildDeviceQuickMenuActions,
   computeContextMenuPosition,
   filterDevicesBySearch,
@@ -2013,6 +2014,7 @@ function App() {
   const [devicePopoverOpen, setDevicePopoverOpen] = useState(false);
   const [devicePopoverLeft, setDevicePopoverLeft] = useState<number | null>(null);
   const [devicePopoverSearch, setDevicePopoverSearch] = useState("");
+  const [topActionsMenuOpen, setTopActionsMenuOpen] = useState(false);
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -2041,6 +2043,9 @@ function App() {
   const devicePopoverRef = useRef<HTMLDivElement | null>(null);
   const devicePopoverTriggerRef = useRef<HTMLDivElement | null>(null);
   const devicePopoverSearchRef = useRef<HTMLInputElement | null>(null);
+  const topActionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const topActionsMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const topActionsMenuWasOpenRef = useRef(false);
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
   const apkInstallTaskByTraceIdRef = useRef<Record<string, string>>({});
   const prevTaskItemsRef = useRef<TaskItem[] | null>(null);
@@ -2669,6 +2674,55 @@ function App() {
     };
   }, [devicePopoverOpen]);
 
+  useEffect(() => {
+    if (!topActionsMenuOpen) {
+      return;
+    }
+    topActionsMenuWasOpenRef.current = true;
+    const focusFrame = window.requestAnimationFrame(() => {
+      const firstItem = topActionsMenuRef.current?.querySelector<HTMLButtonElement>(
+        ".context-menu-item:not(:disabled)",
+      );
+      firstItem?.focus();
+    });
+    const handlePointer = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+      if (topActionsMenuRef.current?.contains(target) || topActionsMenuButtonRef.current?.contains(target)) {
+        return;
+      }
+      setTopActionsMenuOpen(false);
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setTopActionsMenuOpen(false);
+      }
+    };
+    const handleScroll = () => setTopActionsMenuOpen(false);
+    window.addEventListener("mousedown", handlePointer);
+    window.addEventListener("keydown", handleKey);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("mousedown", handlePointer);
+      window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [topActionsMenuOpen]);
+
+  useEffect(() => {
+    if (topActionsMenuOpen) {
+      return;
+    }
+    if (!topActionsMenuWasOpenRef.current) {
+      return;
+    }
+    topActionsMenuWasOpenRef.current = false;
+    topActionsMenuButtonRef.current?.focus();
+  }, [topActionsMenuOpen]);
+
   useLayoutEffect(() => {
     if (!devicePopoverOpen) {
       setDevicePopoverLeft(null);
@@ -2701,6 +2755,7 @@ function App() {
 
   useEffect(() => {
     setDevicePopoverOpen(false);
+    setTopActionsMenuOpen(false);
     setDashboardConfigOpen(false);
   }, [location.pathname]);
 
@@ -10226,6 +10281,63 @@ function App() {
     await handleReboot(rebootConfirmMode === "normal" ? undefined : rebootConfirmMode);
   };
 
+  const closeTopActionsMenu = () => {
+    setTopActionsMenuOpen(false);
+  };
+
+  const runTopActionsMenuCommand = (run: () => void) => {
+    closeTopActionsMenu();
+    run();
+  };
+
+  const focusTopActionsMenuItem = (direction: 1 | -1) => {
+    const items =
+      topActionsMenuRef.current?.querySelectorAll<HTMLButtonElement>(".context-menu-item:not(:disabled)") ?? [];
+    if (!items.length) {
+      return;
+    }
+    const list = Array.from(items);
+    const currentIndex = list.findIndex((item) => item === document.activeElement);
+    const nextIndex =
+      currentIndex < 0
+        ? direction > 0
+          ? 0
+          : list.length - 1
+        : (currentIndex + direction + list.length) % list.length;
+    list[nextIndex]?.focus();
+  };
+
+  const handleTopActionsMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusTopActionsMenuItem(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusTopActionsMenuItem(-1);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      const firstItem = topActionsMenuRef.current?.querySelector<HTMLButtonElement>(
+        ".context-menu-item:not(:disabled)",
+      );
+      firstItem?.focus();
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      const items = topActionsMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+        ".context-menu-item:not(:disabled)",
+      );
+      if (!items?.length) {
+        return;
+      }
+      items[items.length - 1]?.focus();
+    }
+  };
+
   const handleBluetoothMonitor = async (enable: boolean) => {
     const serial = ensureSingleSelection("bluetooth monitor");
     if (!serial) {
@@ -10731,6 +10843,10 @@ function App() {
     selectedOfflineCount > 0
       ? ` ${selectedOfflineCount} offline device${selectedOfflineCount > 1 ? "s" : ""} will be skipped.`
       : "";
+  const topbarOverview = useMemo(
+    () => buildTopbarOverview(devices, selectedSerials, activeSerial),
+    [devices, selectedSerials, activeSerial],
+  );
 
   const handleQuickWifiToggle = () => {
     void handleToggleWifi(wifiToggleEnable);
@@ -13388,33 +13504,99 @@ function App() {
             )}
           </div>
           <div className="top-actions top-actions-deemphasized">
-            <button
-              className="ghost"
-              onClick={handleQuickScreenshot}
-              disabled={busy || selectedSerials.length === 0}
-            >
-              Screenshot
-            </button>
-            <button
-              className="ghost"
-              onClick={requestRebootConfirm}
-              disabled={busy || selectedSerials.length === 0}
-            >
-              Reboot
-            </button>
-            <button className="ghost" onClick={openPairingModal} disabled={busy}>
-              Wireless Pairing
-            </button>
-            <button className="ghost" onClick={refreshDevices} disabled={busy}>
-              Refresh
-            </button>
-            <button
-              className="ghost"
-              onClick={handleScrcpyLaunch}
-              disabled={busy || selectedSerials.length === 0}
-            >
-              Live Mirror
-            </button>
+            <div className="top-overview" role="status" aria-live="polite">
+              <span className="top-overview-chip is-selected" aria-label={`${topbarOverview.selectedCount} selected devices`}>
+                <span className="top-overview-label">Selected</span>
+                <strong>{topbarOverview.selectedCount}</strong>
+              </span>
+              <span className="top-overview-chip is-online" aria-label={`${topbarOverview.onlineSelectedCount} online selected devices`}>
+                <span className="top-overview-label">Online</span>
+                <strong>{topbarOverview.onlineSelectedCount}</strong>
+              </span>
+              <span className="top-overview-chip is-primary" aria-label={`Primary device ${topbarOverview.primaryLabel}`}>
+                <span className="top-overview-label">Primary</span>
+                <strong className={`top-overview-primary ${topbarOverview.primaryTone}`} title={topbarOverview.primaryLabel}>
+                  {topbarOverview.primaryLabel}
+                </strong>
+              </span>
+            </div>
+            <div className="top-actions-menu-anchor">
+              <button
+                ref={topActionsMenuButtonRef}
+                type="button"
+                className="ghost"
+                aria-haspopup="menu"
+                aria-expanded={topActionsMenuOpen}
+                aria-controls="top-actions-menu"
+                onClick={() => setTopActionsMenuOpen((prev) => !prev)}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowDown") {
+                    return;
+                  }
+                  event.preventDefault();
+                  setTopActionsMenuOpen(true);
+                }}
+                disabled={busy}
+              >
+                Actions
+              </button>
+              {topActionsMenuOpen && (
+                <div
+                  id="top-actions-menu"
+                  ref={topActionsMenuRef}
+                  className="context-menu top-actions-menu"
+                  role="menu"
+                  aria-label="Top actions"
+                  onKeyDown={handleTopActionsMenuKeyDown}
+                >
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    role="menuitem"
+                    onClick={() => runTopActionsMenuCommand(() => void handleQuickScreenshot())}
+                    disabled={busy || selectedSerials.length === 0}
+                  >
+                    Screenshot
+                  </button>
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    role="menuitem"
+                    onClick={() => runTopActionsMenuCommand(requestRebootConfirm)}
+                    disabled={busy || selectedSerials.length === 0}
+                  >
+                    Reboot
+                  </button>
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    role="menuitem"
+                    onClick={() => runTopActionsMenuCommand(openPairingModal)}
+                    disabled={busy}
+                  >
+                    Wireless Pairing
+                  </button>
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    role="menuitem"
+                    onClick={() => runTopActionsMenuCommand(() => void refreshDevices())}
+                    disabled={busy}
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    role="menuitem"
+                    onClick={() => runTopActionsMenuCommand(() => void handleScrcpyLaunch())}
+                    disabled={busy || selectedSerials.length === 0}
+                  >
+                    Live Mirror
+                  </button>
+                </div>
+              )}
+            </div>
             <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working..." : "Idle"}</span>
             <button
               type="button"

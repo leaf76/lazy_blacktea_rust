@@ -4,8 +4,15 @@ import { formatBytes } from "./perf";
 type DeviceDetailPatch = Partial<Omit<DeviceDetail, "serial">>;
 type DeviceValue = string | number | boolean | null | undefined;
 type ConnectivityFlagKey = "wifi_is_on" | "bt_is_on";
+type TopbarTone = "ok" | "error" | "warn";
 export type DeviceQuickMenuSource = "device_manager" | "quick_actions" | "task";
 export type DeviceQuickMenuAction = "set_primary" | "copy_device_info" | "open_output";
+export type TopbarOverview = {
+  selectedCount: number;
+  onlineSelectedCount: number;
+  primaryLabel: string;
+  primaryTone: TopbarTone;
+};
 type ContextMenuPositionParams = {
   anchorX: number;
   anchorY: number;
@@ -243,4 +250,38 @@ export const shouldEnableConnectivityForSelection = (
     }
   }
   return false;
+};
+
+const toTopbarTone = (state: string | undefined): TopbarTone => {
+  if (state === "device") {
+    return "ok";
+  }
+  if (state === "unauthorized") {
+    return "error";
+  }
+  return "warn";
+};
+
+export const buildTopbarOverview = (
+  devices: DeviceInfo[],
+  selectedSerials: string[],
+  activeSerial: string | null,
+): TopbarOverview => {
+  const selectedCount = selectedSerials.length;
+  const deviceBySerial = new Map(devices.map((device) => [device.summary.serial, device]));
+  const onlineSelectedCount = selectedSerials.reduce((count, serial) => {
+    return count + (deviceBySerial.get(serial)?.summary.state === "device" ? 1 : 0);
+  }, 0);
+
+  const primaryDevice = activeSerial ? deviceBySerial.get(activeSerial) : undefined;
+  const primaryLabel =
+    primaryDevice?.detail?.model ?? primaryDevice?.summary.model ?? primaryDevice?.summary.serial ?? "None";
+  const primaryTone = toTopbarTone(primaryDevice?.summary.state);
+
+  return {
+    selectedCount,
+    onlineSelectedCount,
+    primaryLabel,
+    primaryTone,
+  };
 };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyDeviceDetailPatch,
+  buildTopbarOverview,
   buildDeviceQuickMenuActions,
   computeContextMenuPosition,
   filterDevicesBySearch,
@@ -259,6 +260,86 @@ describe("deviceUtils", () => {
       "set_primary",
       "copy_device_info",
     ]);
+  });
+
+  it("builds topbar overview for empty selection", () => {
+    const overview = buildTopbarOverview([], [], null);
+    expect(overview).toEqual({
+      selectedCount: 0,
+      onlineSelectedCount: 0,
+      primaryLabel: "None",
+      primaryTone: "warn",
+    });
+  });
+
+  it("builds topbar overview with selected devices and offline members", () => {
+    const devices: DeviceInfo[] = [
+      {
+        summary: { serial: "alpha", state: "device", model: "Pixel 9" },
+        detail: { serial: "alpha", model: "Pixel 9 Pro" },
+      },
+      {
+        summary: { serial: "bravo", state: "offline", model: "Galaxy" },
+        detail: { serial: "bravo", model: "Galaxy S24" },
+      },
+      {
+        summary: { serial: "charlie", state: "device", model: "Nexus" },
+        detail: null,
+      },
+    ];
+
+    const overview = buildTopbarOverview(devices, ["alpha", "bravo", "charlie"], "alpha");
+
+    expect(overview).toEqual({
+      selectedCount: 3,
+      onlineSelectedCount: 2,
+      primaryLabel: "Pixel 9 Pro",
+      primaryTone: "ok",
+    });
+  });
+
+  it("falls back to summary model and serial when primary detail model is unavailable", () => {
+    const devices: DeviceInfo[] = [
+      {
+        summary: { serial: "alpha", state: "device", model: "Pixel 8" },
+        detail: { serial: "alpha" },
+      },
+      {
+        summary: { serial: "bravo", state: "offline" },
+        detail: null,
+      },
+    ];
+
+    expect(buildTopbarOverview(devices, ["alpha"], "alpha")).toEqual({
+      selectedCount: 1,
+      onlineSelectedCount: 1,
+      primaryLabel: "Pixel 8",
+      primaryTone: "ok",
+    });
+
+    expect(buildTopbarOverview([{ summary: { serial: "solo", state: "offline" }, detail: null }], ["solo"], "solo")).toEqual({
+      selectedCount: 1,
+      onlineSelectedCount: 0,
+      primaryLabel: "solo",
+      primaryTone: "warn",
+    });
+  });
+
+  it("handles missing primary device gracefully", () => {
+    const devices: DeviceInfo[] = [
+      {
+        summary: { serial: "alpha", state: "device", model: "Pixel 7" },
+        detail: { serial: "alpha", model: "Pixel 7" },
+      },
+    ];
+
+    const overview = buildTopbarOverview(devices, ["alpha"], "missing");
+    expect(overview).toEqual({
+      selectedCount: 1,
+      onlineSelectedCount: 1,
+      primaryLabel: "None",
+      primaryTone: "warn",
+    });
   });
 
   it("computes context-menu position without overflow in normal viewport area", () => {
