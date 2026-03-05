@@ -6094,6 +6094,7 @@ pub fn stop_bluetooth_monitor(
             ))
         }
     };
+    drop(guard);
     handle.stop();
 
     Ok(CommandResponse {

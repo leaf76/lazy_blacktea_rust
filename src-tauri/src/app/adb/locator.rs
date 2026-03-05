@@ -114,11 +114,9 @@ fn build_default_adb_candidates(
     }
 
     let mut sdk_roots: Vec<PathBuf> = Vec::new();
-    for value in [android_sdk_root, android_home] {
-        if let Some(root) = value {
-            if !root.is_empty() {
-                sdk_roots.push(PathBuf::from(root));
-            }
+    for root in [android_sdk_root, android_home].into_iter().flatten() {
+        if !root.is_empty() {
+            sdk_roots.push(PathBuf::from(root));
         }
     }
     if let Some(home) = home_env {

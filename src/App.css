@@ -917,10 +917,12 @@ textarea {
 /* Bluetooth Monitor */
 
 .bluetooth-monitor {
+  display: flex;
+  flex-direction: column;
   gap: 14px;
 }
 
-.bluetooth-monitor-header {
+.bluetooth-monitor-hero {
   position: sticky;
   top: 10px;
   z-index: 10;
@@ -935,14 +937,15 @@ textarea {
   backdrop-filter: blur(12px);
 }
 
-.bluetooth-monitor-header-left {
+.bluetooth-monitor-hero-main {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
-.bluetooth-monitor-header-right {
+.bluetooth-monitor-hero-actions {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -950,21 +953,10 @@ textarea {
   flex: 0 0 auto;
 }
 
-.bluetooth-monitor-header-note {
-  font-size: 11px;
-}
-
 .bluetooth-monitor-status-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
-}
-
-.bluetooth-monitor-state-pills {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   flex-wrap: wrap;
 }
 
@@ -978,39 +970,29 @@ textarea {
   margin-top: 2px;
 }
 
-.bluetooth-monitor-card-adv {
-  grid-column: span 6;
-  min-height: 260px;
-}
-
-.bluetooth-monitor-card-scan {
-  grid-column: span 6;
-  min-height: 260px;
-}
-
-.bluetooth-monitor-card-bond {
-  grid-column: span 4;
-  min-height: 360px;
-}
-
 .bluetooth-monitor-card-timeline {
   grid-column: span 8;
-  min-height: 360px;
+  min-height: 420px;
+}
+
+.bluetooth-monitor-card-snapshot,
+.bluetooth-monitor-card-devices {
+  grid-column: span 4;
+  min-height: 300px;
 }
 
 @media (max-width: 980px) {
-  .bluetooth-monitor-header {
+  .bluetooth-monitor-hero {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .bluetooth-monitor-header-right {
+  .bluetooth-monitor-hero-actions {
     align-items: flex-start;
   }
 
-  .bluetooth-monitor-card-adv,
-  .bluetooth-monitor-card-scan,
-  .bluetooth-monitor-card-bond,
+  .bluetooth-monitor-card-snapshot,
+  .bluetooth-monitor-card-devices,
   .bluetooth-monitor-card-timeline {
     grid-column: span 12;
   }
@@ -1018,7 +1000,26 @@ textarea {
 
 .bluetooth-monitor-kpis {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.bluetooth-monitor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bluetooth-monitor-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bluetooth-monitor-section-header h3 {
+  margin: 0;
+  font-size: 14px;
 }
 
 .bluetooth-monitor-list {
@@ -1026,7 +1027,7 @@ textarea {
   flex-direction: column;
   gap: 8px;
   overflow: auto;
-  max-height: 260px;
+  max-height: 220px;
   padding-right: 2px;
 }
 
@@ -1076,16 +1077,24 @@ textarea {
   gap: 6px;
 }
 
-.bluetooth-monitor-timeline-toolbar {
+.bluetooth-monitor-toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
 }
 
-.bluetooth-monitor-timeline-toolbar input {
+.bluetooth-monitor-toolbar input {
   min-width: 200px;
   flex: 1 1 240px;
+}
+
+.bluetooth-monitor-toolbar-compact {
+  align-items: stretch;
+}
+
+.bluetooth-monitor-toolbar-compact button {
+  flex: 0 0 auto;
 }
 
 .bluetooth-monitor-filterchips {
@@ -1112,20 +1121,32 @@ textarea {
   margin-top: 8px;
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  overflow: auto;
+  overflow: hidden auto;
   max-height: 420px;
   background: rgba(15, 23, 42, 0.08);
 }
 
 .bluetooth-monitor-event {
-  display: flex;
-  gap: 10px;
-  padding: 10px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
 }
 
 .bluetooth-monitor-event:last-child {
   border-bottom: none;
+}
+
+.bluetooth-monitor-event summary {
+  list-style: none;
+}
+
+.bluetooth-monitor-event summary::-webkit-details-marker {
+  display: none;
+}
+
+.bluetooth-monitor-event-summary {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
 }
 
 .bluetooth-monitor-event-time {
@@ -1176,8 +1197,29 @@ textarea {
   font-size: 12px;
   color: var(--color-text);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.bluetooth-monitor-event-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px 108px;
+}
+
+.bluetooth-monitor-event-raw {
+  margin: 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.2);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  color: var(--color-text);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .bluetooth-monitor-empty {
@@ -1185,6 +1227,14 @@ textarea {
   border-radius: 12px;
   padding: 12px;
   background: rgba(15, 23, 42, 0.06);
+}
+
+.bluetooth-monitor-empty p {
+  margin: 0;
+}
+
+.bluetooth-monitor-empty-compact {
+  padding: 10px;
 }
 
 .bluetooth-monitor-raw {
@@ -1201,6 +1251,10 @@ textarea {
   gap: 10px;
 }
 
+.bluetooth-monitor-raw-header p {
+  margin: 4px 0 0;
+}
+
 .bluetooth-monitor-raw-header h3 {
   margin: 0;
   font-size: 14px;
@@ -1208,6 +1262,20 @@ textarea {
 
 .bluetooth-monitor-raw-output {
   height: 320px;
+}
+
+@media (max-width: 700px) {
+  .bluetooth-monitor-event-summary {
+    flex-direction: column;
+  }
+
+  .bluetooth-monitor-event-time {
+    width: auto;
+  }
+
+  .bluetooth-monitor-event-details {
+    padding-left: 12px;
+  }
 }
 
 .dashboard-page .page-header {
@@ -5810,6 +5878,12 @@ textarea:disabled {
   border-color: var(--alert-info-border);
   background: var(--alert-info-bg);
   color: var(--alert-info-text);
+}
+
+.inline-alert.warn {
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
 }
 
 .task-summary {

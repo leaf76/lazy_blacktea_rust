@@ -1679,6 +1679,8 @@ function App() {
   const [logcatRunningBySerial, setLogcatRunningBySerial] = useState<Record<string, boolean>>({});
   const [logcatStatusLoadingBySerial, setLogcatStatusLoadingBySerial] = useState<Record<string, boolean>>({});
   const [bluetoothMonitorRunningBySerial, setBluetoothMonitorRunningBySerial] = useState<Record<string, boolean>>({});
+  const [bluetoothMonitorBusy, setBluetoothMonitorBusy] = useState(false);
+  const [bluetoothToggleBusy, setBluetoothToggleBusy] = useState(false);
   const [sharedLogTextChips, setSharedLogTextChips] = useState<LogTextChip[]>(
     () => loadSharedLogFiltersFromStorage().textChips,
   );
@@ -5810,6 +5812,90 @@ function App() {
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const setBluetoothMonitorDesired = useCallback(
+    async (
+      serial: string,
+      enable: boolean,
+      options: { announce?: boolean } = {},
+    ): Promise<{ ok: boolean; running: boolean; message?: string }> => {
+      const announce = options.announce ?? true;
+      setBluetoothMonitorBusy(true);
+      try {
+        if (enable) {
+          await startBluetoothMonitor(serial);
+        } else {
+          await stopBluetoothMonitor(serial);
+        }
+        setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: enable }));
+        bluetoothMonitorRunningBySerialRef.current = {
+          ...bluetoothMonitorRunningBySerialRef.current,
+          [serial]: enable,
+        };
+        if (announce) {
+          pushToast(enable ? "Bluetooth monitor started." : "Bluetooth monitor stopped.", "info");
+        }
+        return { ok: true, running: enable };
+      } catch (error) {
+        const message = formatError(error);
+        const lower = message.toLowerCase();
+        if (enable && lower.includes("already running")) {
+          setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: true }));
+          bluetoothMonitorRunningBySerialRef.current = {
+            ...bluetoothMonitorRunningBySerialRef.current,
+            [serial]: true,
+          };
+          if (announce) {
+            pushToast("Bluetooth monitor is already running.", "info");
+          }
+          return { ok: true, running: true, message };
+        }
+        if (!enable && lower.includes("not running")) {
+          setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: false }));
+          bluetoothMonitorRunningBySerialRef.current = {
+            ...bluetoothMonitorRunningBySerialRef.current,
+            [serial]: false,
+          };
+          if (announce) {
+            pushToast("Bluetooth monitor is already stopped.", "info");
+          }
+          return { ok: true, running: false, message };
+        }
+        if (announce) {
+          pushToast(message, "error");
+        }
+        return { ok: false, running: !enable, message };
+      } finally {
+        setBluetoothMonitorBusy(false);
+      }
+    },
+    [],
+  );
+
+  const enableBluetoothForSerial = async (
+    serial: string,
+  ): Promise<{ ok: boolean; message?: string }> => {
+    setBluetoothToggleBusy(true);
+    try {
+      const response = await setBluetoothState([serial], true);
+      const result = response.data[0];
+      if (result?.exit_code === 0) {
+        setDevices((prev) => applyDeviceDetailPatch(prev, [serial], { bt_is_on: true }));
+        scheduleDeviceDetailRefresh(800, { notifyOnError: false });
+        pushToast("Bluetooth enabled.", "info");
+        return { ok: true };
+      }
+      const message = result?.stderr?.trim() || result?.stdout?.trim() || "Bluetooth enable failed.";
+      pushToast(message, "error");
+      return { ok: false, message };
+    } catch (error) {
+      const message = formatError(error);
+      pushToast(message, "error");
+      return { ok: false, message };
+    } finally {
+      setBluetoothToggleBusy(false);
     }
   };
 
@@ -10335,41 +10421,6 @@ function App() {
         return;
       }
       items[items.length - 1]?.focus();
-    }
-  };
-
-  const handleBluetoothMonitor = async (enable: boolean) => {
-    const serial = ensureSingleSelection("bluetooth monitor");
-    if (!serial) {
-      return false;
-    }
-    setBusy(true);
-    try {
-      if (enable) {
-        await startBluetoothMonitor(serial);
-      } else {
-        await stopBluetoothMonitor(serial);
-      }
-      setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: enable }));
-      pushToast(enable ? "Bluetooth monitor started." : "Bluetooth monitor stopped.", "info");
-      return true;
-    } catch (error) {
-      const message = formatError(error);
-      const lower = message.toLowerCase();
-      if (enable && lower.includes("already running")) {
-        setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: true }));
-        pushToast("Bluetooth monitor is already running.", "info");
-        return true;
-      }
-      if (!enable && lower.includes("not running")) {
-        setBluetoothMonitorRunningBySerial((prev) => ({ ...prev, [serial]: false }));
-        pushToast("Bluetooth monitor is already stopped.", "info");
-        return true;
-      }
-      pushToast(message, "error");
-      return false;
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -16872,11 +16923,12 @@ function App() {
                     <LazyBluetoothMonitorPage
                       serial={activeSerial}
                       serialLabel={selectedSummaryLabel}
-                      busy={busy}
+                      commandBusy={bluetoothMonitorBusy || bluetoothToggleBusy}
                       monitoringDesired={activeSerial ? (bluetoothMonitorRunningBySerial[activeSerial] ?? false) : false}
                       singleSelectionWarning={singleSelectionWarning}
                       singleSelectionWarningMessage={singleSelectionWarningMessage}
-                      onToggleMonitor={handleBluetoothMonitor}
+                      onSetMonitorDesired={setBluetoothMonitorDesired}
+                      onEnableBluetooth={enableBluetoothForSerial}
                     />
                   </Suspense>
                 </div>
