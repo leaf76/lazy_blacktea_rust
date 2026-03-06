@@ -12,7 +12,23 @@ permissions:
   contents: write
 
 jobs:
+  mark-release-prerelease:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Mark release as prerelease while assets publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
+            -F prerelease=true \
+            -F make_latest=false \
+            --silent
+
   build-and-upload:
+    needs: mark-release-prerelease
     strategy:
       fail-fast: false
       matrix:
@@ -510,3 +526,56 @@ jobs:
             echo "Upload failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
             sleep "$sleep_seconds"
           done
+
+  promote-release:
+    needs: publish-latest-json
+    runs-on: ubuntu-24.04
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+    steps:
+      - name: Verify release assets are ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release view "${TAG}" --repo "${REPO}" --json assets > release-assets.json
+          python3 - <<'PY'
+          import json
+          import os
+
+          require_latest_json = os.environ.get("HAS_SIGNING_KEY", "").lower() == "true"
+          with open("release-assets.json", "r", encoding="utf-8") as fh:
+            release = json.load(fh)
+
+          names = [asset.get("name", "") for asset in release.get("assets") or []]
+
+          def has_suffix(suffix: str) -> bool:
+            return any(name.endswith(suffix) for name in names)
+
+          missing = []
+          if not has_suffix(".dmg"):
+            missing.append(".dmg")
+          if not has_suffix(".AppImage"):
+            missing.append(".AppImage")
+          if not has_suffix(".deb"):
+            missing.append(".deb")
+          if require_latest_json and "latest.json" not in names:
+            missing.append("latest.json")
+
+          if missing:
+            raise SystemExit(f"Release assets are incomplete: {', '.join(missing)}")
+          PY
+
+      - name: Promote release to latest stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
+            -F prerelease=false \
+            -F make_latest=true \
+            --silent

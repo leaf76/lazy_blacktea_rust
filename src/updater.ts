@@ -14,11 +14,13 @@ export type UpdaterUpdateLike = {
 export type UpdateCheckResult =
   | { status: "up_to_date" }
   | { status: "update_available"; update: UpdaterUpdateLike }
+  | { status: "publishing_pending"; message: string; latestVersion?: string }
   | { status: "error"; message: string };
 
 export type UpdateInstallResult =
   | { status: "installed" }
   | { status: "installed_needs_restart"; message: string }
+  | { status: "publishing_pending"; message: string; latestVersion?: string }
   | { status: "error"; message: string };
 
 const UPDATE_LAST_CHECKED_KEY = "lazy_blacktea_update_last_checked_ms_v1";
@@ -187,14 +189,29 @@ function shouldRetryInstall(errorMessage: string): boolean {
   return UPDATE_INSTALL_RETRYABLE_ERROR_PATTERN.test(errorMessage);
 }
 
-function mapInstallErrorMessage(errorMessage: string): string {
+function buildPublishingPendingResult(latestVersion?: string | null) {
+  if (latestVersion) {
+    return {
+      status: "publishing_pending" as const,
+      message: UPDATE_ARTIFACTS_PENDING_MESSAGE,
+      latestVersion,
+    };
+  }
+
+  return {
+    status: "publishing_pending" as const,
+    message: UPDATE_ARTIFACTS_PENDING_MESSAGE,
+  };
+}
+
+function mapInstallErrorResult(errorMessage: string, latestVersion?: string | null): UpdateInstallResult {
   if (UPDATE_INSTALL_ARTIFACT_ERROR_PATTERN.test(errorMessage)) {
-    return UPDATE_ARTIFACTS_PENDING_MESSAGE;
+    return buildPublishingPendingResult(latestVersion);
   }
   if (UPDATE_INSTALL_PERMISSION_ERROR_PATTERN.test(errorMessage)) {
-    return UPDATE_INSTALL_PERMISSION_MESSAGE;
+    return { status: "error", message: UPDATE_INSTALL_PERMISSION_MESSAGE };
   }
-  return GENERIC_UPDATE_INSTALL_ERROR_MESSAGE;
+  return { status: "error", message: GENERIC_UPDATE_INSTALL_ERROR_MESSAGE };
 }
 
 export async function checkForUpdate(opts?: {
@@ -253,7 +270,7 @@ export async function checkForUpdate(opts?: {
         if (compareVersions(latestReleaseVersion, currentVersion) <= 0) {
           return { status: "up_to_date" };
         }
-        return { status: "error", message: UPDATE_ARTIFACTS_PENDING_MESSAGE };
+        return buildPublishingPendingResult(latestReleaseVersion);
       }
 
       return { status: "error", message: UPDATE_MANIFEST_MISSING_MESSAGE };
@@ -295,7 +312,7 @@ export async function installUpdateAndRelaunch(
 
   if (installError) {
     console.warn("Failed to download/install update.", installError);
-    return { status: "error", message: mapInstallErrorMessage(extractErrorMessage(installError)) };
+    return mapInstallErrorResult(extractErrorMessage(installError), normalizeVersionTag(update.version));
   }
 
   try {

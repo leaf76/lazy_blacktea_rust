@@ -177,9 +177,11 @@ Checks:
 - Opening the update modal shows current/latest version and release notes (if available).
 - While checking/installing, related action buttons are disabled and no duplicate actions are triggered.
 - Success path: `Install and restart` eventually relaunches the app, or shows `Update installed. Please restart the app manually.` when relaunch fails.
-- Transient failure path: if the updater endpoint is temporarily unavailable, install retries once automatically; if it still fails, the message indicates artifacts are still publishing (no raw internal error text).
+- Publishing window path: if a newer GitHub release exists but updater artifacts are still publishing, the app shows an informational `Update is still publishing` state with retry guidance instead of a hard error.
+- Install retry path: if install hits a transient missing-artifact condition, it retries once automatically and then lands in the same publishing-pending state (no raw internal error text).
 - Permission failure path: when install cannot replace the app binary (for example, non-writable location), the message instructs moving the app to `Applications`.
 - Retry path: after an error, running `Install and restart` again is still possible and behaves consistently.
+- Release verification path: while release automation is still running, the GitHub release should remain a prerelease and should not become the latest stable release until `.dmg`, `.AppImage`, `.deb`, and signed `latest.json` are uploaded.
 
 ### Bugreport / UI Inspector (if used)
 - Bugreport generation progress updates and completes.

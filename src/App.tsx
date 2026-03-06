@@ -1610,6 +1610,7 @@ function App() {
     | "checking"
     | "up_to_date"
     | "update_available"
+    | "publishing_pending"
     | "installing"
     | "installed"
     | "installed_needs_restart"
@@ -1618,20 +1619,48 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateUiStatus>("idle");
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateAvailable, setUpdateAvailable] = useState<UpdaterUpdateLike | null>(null);
+  const [updatePublishingVersion, setUpdatePublishingVersion] = useState<string | null>(null);
   const [updateLastCheckedMs, setUpdateLastCheckedMs] = useState<number | null>(() => readUpdateLastCheckedMs());
   const [updateLastCheckSource, setUpdateLastCheckSource] = useState<"auto" | "manual" | null>(null);
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [taskCompletionNotices, setTaskCompletionNotices] = useState<TaskCompletionNotice[]>([]);
   const [taskCompletionPathsExpanded, setTaskCompletionPathsExpanded] = useState(false);
+  const updatePublishingMessage = updatePublishingVersion
+    ? `Latest: ${updatePublishingVersion}. Update artifacts are still publishing. Please try again shortly.`
+    : "A newer release is available, but update artifacts are still publishing. Please try again shortly.";
+  const showUpdateCheckAgainAction =
+    updateStatus === "publishing_pending" ||
+    (updateStatus === "checking" &&
+      !updateAvailable &&
+      updateLastCheckSource === "manual" &&
+      updatePublishingVersion !== null);
   const applyUpdateCheckResult = (source: "auto" | "manual", result: UpdateCheckResult) => {
     if (result.status === "update_available") {
       setUpdateAvailable(result.update);
+      setUpdatePublishingVersion(null);
+      setUpdateError(null);
       setUpdateStatus("update_available");
+      return;
+    }
+
+    if (result.status === "publishing_pending") {
+      setUpdateAvailable(null);
+      if (source === "manual") {
+        setUpdatePublishingVersion(result.latestVersion ?? null);
+        setUpdateStatus("publishing_pending");
+        setUpdateError(null);
+        return;
+      }
+
+      setUpdatePublishingVersion(null);
+      setUpdateStatus("idle");
+      setUpdateError(null);
       return;
     }
 
     if (result.status === "error") {
       setUpdateAvailable(null);
+      setUpdatePublishingVersion(null);
       if (source === "manual") {
         setUpdateStatus("error");
         setUpdateError(result.message);
@@ -1644,10 +1673,9 @@ function App() {
     }
 
     setUpdateAvailable(null);
+    setUpdatePublishingVersion(null);
     setUpdateStatus(source === "manual" ? "up_to_date" : "idle");
-    if (source === "manual") {
-      setUpdateError(null);
-    }
+    setUpdateError(null);
   };
   const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatRetainedBySerial, setLogcatRetainedBySerial] = useState<Record<string, LogcatLineEntry[]>>({});
@@ -1812,6 +1840,13 @@ function App() {
 
     void (async () => {
       const result = await installUpdateAndRelaunch(updateAvailable);
+      if (result.status === "publishing_pending") {
+        setUpdateAvailable(null);
+        setUpdatePublishingVersion(result.latestVersion ?? null);
+        setUpdateStatus("publishing_pending");
+        setUpdateError(null);
+        return;
+      }
       if (result.status === "error") {
         setUpdateStatus("error");
         setUpdateError(result.message);
@@ -17097,6 +17132,9 @@ function App() {
                                 <span className="muted">Latest: {updateAvailable.version}</span>
                               </div>
                             )}
+                            {updateStatus === "publishing_pending" && (
+                              <div className="inline-alert info">{updatePublishingMessage}</div>
+                            )}
                             {updateStatus === "installed_needs_restart" && (
                               <div className="inline-alert info">
                                 <strong>Update installed</strong>
@@ -18568,10 +18606,12 @@ function App() {
                 <code>{updateAvailable?.version ?? "--"}</code>
               </div>
 
-              <div className="inline-alert info">
-                <strong>Heads up</strong>
-                <span className="muted">Installing will restart the app and interrupt ongoing tasks.</span>
-              </div>
+              {updateAvailable && (
+                <div className="inline-alert info">
+                  <strong>Heads up</strong>
+                  <span className="muted">Installing will restart the app and interrupt ongoing tasks.</span>
+                </div>
+              )}
 
               {updateStatus === "installing" && (
                 <div className="inline-alert info">
@@ -18594,6 +18634,13 @@ function App() {
                 </div>
               )}
 
+              {updateStatus === "publishing_pending" && (
+                <div className="inline-alert info">
+                  <strong>Update is still publishing</strong>
+                  <span className="muted">{updatePublishingMessage}</span>
+                </div>
+              )}
+
               {updateStatus === "error" && updateError && <div className="inline-alert error">{updateError}</div>}
 
               {updateAvailable?.body ? (
@@ -18605,18 +18652,24 @@ function App() {
             </div>
 
             <div className="button-row">
-              <button
-                onClick={handleInstallUpdate}
-                disabled={
-                  !updateAvailable ||
-                  updateStatus === "installing" ||
-                  updateStatus === "installed" ||
-                  updateStatus === "installed_needs_restart" ||
-                  busy
-                }
-              >
-                Install and restart
-              </button>
+              {showUpdateCheckAgainAction ? (
+                <button onClick={handleManualUpdateCheck} disabled={busy || updateStatus === "checking"}>
+                  {updateStatus === "checking" ? "Checking..." : "Check again"}
+                </button>
+              ) : (
+                <button
+                  onClick={handleInstallUpdate}
+                  disabled={
+                    !updateAvailable ||
+                    updateStatus === "installing" ||
+                    updateStatus === "installed" ||
+                    updateStatus === "installed_needs_restart" ||
+                    busy
+                  }
+                >
+                  Install and restart
+                </button>
+              )}
               <button className="ghost" onClick={closeUpdateModal} disabled={updateStatus === "installing"}>
                 Later
               </button>

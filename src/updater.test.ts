@@ -114,7 +114,7 @@ describe("checkForUpdate", () => {
     expect(readUpdateLastCheckedMs(storage)).toBe(4_000);
   });
 
-  it("returns publishing message when release tag is newer but updater artifacts are missing", async () => {
+  it("returns publishing_pending when release tag is newer but updater artifacts are missing", async () => {
     const storage = createMemoryStorage();
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -127,12 +127,13 @@ describe("checkForUpdate", () => {
 
     const result = await checkForUpdate({ storage, nowMs: 5_000, currentVersion: "0.0.57" });
 
-    expect(result.status).toBe("error");
-    if (result.status !== "error") {
-      throw new Error(`Expected error, got ${result.status}`);
+    expect(result.status).toBe("publishing_pending");
+    if (result.status !== "publishing_pending") {
+      throw new Error(`Expected publishing_pending, got ${result.status}`);
     }
     expect(result.message).toMatch(/newer release is available/i);
     expect(result.message).not.toMatch(/successful status code/i);
+    expect(result.latestVersion).toBe("0.0.58");
     expect(readUpdateLastCheckedMs(storage)).toBe(5_000);
   });
 });
@@ -167,7 +168,7 @@ describe("installUpdateAndRelaunch", () => {
     expect(relaunch).toHaveBeenCalledTimes(1);
   });
 
-  it("returns publishing message when transient install failures persist", async () => {
+  it("returns publishing_pending when transient install failures persist", async () => {
     const sleep = vi.fn().mockResolvedValue(undefined);
     const update = {
       version: "0.0.54",
@@ -177,12 +178,13 @@ describe("installUpdateAndRelaunch", () => {
 
     const result = await installUpdateAndRelaunch(update, { retryDelayMs: 250, sleep });
 
-    expect(result.status).toBe("error");
-    if (result.status !== "error") {
-      throw new Error(`Expected error, got ${result.status}`);
+    expect(result.status).toBe("publishing_pending");
+    if (result.status !== "publishing_pending") {
+      throw new Error(`Expected publishing_pending, got ${result.status}`);
     }
     expect(result.message).toMatch(/still publishing/i);
     expect(result.message).not.toMatch(/successful status code/i);
+    expect(result.latestVersion).toBe("0.0.54");
     expect(update.downloadAndInstall).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledTimes(1);
     expect(relaunch).toHaveBeenCalledTimes(0);

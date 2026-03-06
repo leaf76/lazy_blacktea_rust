@@ -46,9 +46,17 @@ If a release page temporarily shows `assets: []` for a new tag:
 
    - `gh release view vX.Y.Z --json assets`
 
-4. If assets are still missing after a successful run, review the updated upload logs in:
+4. Confirm the release is still marked as a prerelease while assets are uploading:
+
+   - `gh release view vX.Y.Z --json isPrerelease,isLatest`
+
+5. If assets are still missing after a successful run, review the updated upload logs in:
 
    - `gh run view <run-id> --log`
+
+6. After the workflow completes, verify the release was promoted to latest stable only after installers are present:
+
+   - `gh release view vX.Y.Z --json isPrerelease,isLatest,assets`
 
 Recent workflow change added in this repo verifies artifact presence before upload and uploads with retries:
 
@@ -57,4 +65,4 @@ Recent workflow change added in this repo verifies artifact presence before uplo
 - `Upload Linux assets to GitHub Release` (with retry + `--clobber`)
 - `Upload latest.json to GitHub Release` (with retry + `--clobber`)
 
-It also fails early if build outputs are missing, so broken releases stop at a clear step instead of publishing an empty asset list.
+It also marks the release as a prerelease while assets publish and promotes it to latest stable only after required assets are present, including `latest.json` for signed updater builds. If promotion does not happen, inspect the `Verify release assets are ready` or `Promote release to latest stable` steps first.
