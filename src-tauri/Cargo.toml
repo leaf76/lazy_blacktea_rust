@@ -1,6 +1,6 @@
 [package]
 name = "lazy_blacktea_rust"
-version = "0.0.67"
+version = "0.0.68"
 description = "Lazy Blacktea (Rust + Tauri)"
 authors = ["cy76"]
 edition = "2021"
@@ -37,5 +37,7 @@ tempfile = "3"
 zip = "2"
 mime_guess = "2"
 base64 = "0.22"
+png = "0.18"
+quick-xml = "0.38"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled", "functions"] }

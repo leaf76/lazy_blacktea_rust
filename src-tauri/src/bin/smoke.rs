@@ -15,6 +15,7 @@ use lazy_blacktea_rust_lib::app::commands::{
 };
 use lazy_blacktea_rust_lib::app::config::load_config;
 use lazy_blacktea_rust_lib::app::state::AppState;
+use lazy_blacktea_rust_lib::app::ui_capture::{validate_png_bytes, validate_ui_dump_xml};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -445,17 +446,19 @@ fn main() {
         )
         .map_err(|err| ("ERR_SCREENSHOT", err.to_string()))?;
         let path = PathBuf::from(resp.data);
-        if !path.exists()
-            || fs::metadata(&path)
-                .map_err(|err| ("ERR_IO", err.to_string()))?
-                .len()
-                == 0
-        {
+        if !path.exists() {
             return Err((
                 "ERR_SCREENSHOT_EMPTY",
                 "Screenshot file missing or empty".to_string(),
             ));
         }
+        let bytes = fs::read(&path).map_err(|err| ("ERR_IO", err.to_string()))?;
+        validate_png_bytes(&bytes).map_err(|err| {
+            (
+                "ERR_SCREENSHOT_INVALID",
+                format!("Screenshot is invalid: {err}"),
+            )
+        })?;
         artifacts.insert("screenshot".to_string(), path.to_string_lossy().to_string());
         Ok((vec![path.to_string_lossy().to_string()], None, None))
     })
@@ -849,6 +852,14 @@ fn main() {
                 .map_err(|err| ("ERR_IO", format!("Failed to serialize ui export: {err}")))?;
             fs::write(&path, body)
                 .map_err(|err| ("ERR_IO", format!("Failed to write ui export: {err}")))?;
+            let xml = fs::read_to_string(&resp.data.xml_path)
+                .map_err(|err| ("ERR_IO", format!("Failed to read exported xml: {err}")))?;
+            validate_ui_dump_xml(&xml).map_err(|err| {
+                (
+                    "ERR_UI_XML_INVALID",
+                    format!("Exported xml is invalid: {err}"),
+                )
+            })?;
             artifacts.insert("ui_export".to_string(), path.to_string_lossy().to_string());
             Ok((vec![path.to_string_lossy().to_string()], None, None))
         })

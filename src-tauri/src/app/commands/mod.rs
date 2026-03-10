@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,7 +70,7 @@ use crate::app::state::{
     AppState, BugreportHandle, LogcatHandle, NetProfilerHandle, PerfMonitorHandle, RecordingHandle,
 };
 use crate::app::terminal::{TerminalSession, TERMINAL_EVENT_NAME};
-use crate::app::ui_capture::png_bytes_to_data_url;
+use crate::app::ui_capture::{normalize_ui_dump_xml, png_bytes_to_data_url, validate_png_bytes};
 use crate::app::ui_xml::render_device_ui_html;
 
 #[cfg(test)]
@@ -1416,6 +1416,424 @@ fn get_adb_program(trace_id: &str) -> Result<String, AppError> {
         return Err(AppError::validation(message, trace_id));
     }
     Ok(program)
+}
+
+fn extend_screenshot_capture_args(args: &mut Vec<String>, config: &AppConfig) {
+    if config.screenshot.display_id >= 0 {
+        args.push("-d".to_string());
+        args.push(config.screenshot.display_id.to_string());
+    }
+    if !config.screenshot.extra_args.trim().is_empty() {
+        args.extend(
+            config
+                .screenshot
+                .extra_args
+                .split_whitespace()
+                .map(|item| item.to_string()),
+        );
+    }
+}
+
+fn build_exec_out_screenshot_args(serial: &str, config: &AppConfig) -> Vec<String> {
+    let mut args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "exec-out".to_string(),
+        "screencap".to_string(),
+        "-p".to_string(),
+    ];
+    extend_screenshot_capture_args(&mut args, config);
+    args
+}
+
+fn build_pull_screenshot_args(serial: &str, config: &AppConfig, remote_path: &str) -> Vec<String> {
+    let mut args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "screencap".to_string(),
+        "-p".to_string(),
+    ];
+    extend_screenshot_capture_args(&mut args, config);
+    args.push(remote_path.to_string());
+    args
+}
+
+fn stderr_message_bytes(stderr: &[u8]) -> String {
+    let trimmed = String::from_utf8_lossy(stderr).trim().to_string();
+    if trimmed.is_empty() {
+        "unknown error".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn stderr_message_text(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        "unknown error".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn user_safe_retry_message(action: &str) -> String {
+    format!("Failed to {action}. Please try again.")
+}
+
+fn build_remote_screenshot_path(serial: &str, label: &str) -> String {
+    let safe_label = sanitize_filename_component(label);
+    let safe_serial = sanitize_filename_component(serial);
+    format!(
+        "/sdcard/{}_{}_{}.png",
+        safe_label,
+        safe_serial,
+        Uuid::new_v4()
+    )
+}
+
+fn write_png_file(path: &Path, bytes: &[u8], trace_id: &str) -> Result<(), AppError> {
+    fs::write(path, bytes)
+        .map_err(|err| AppError::system(format!("Failed to write screenshot: {err}"), trace_id))
+}
+
+fn read_validated_png_file(path: &Path, trace_id: &str) -> Result<Vec<u8>, AppError> {
+    let bytes = fs::read(path)
+        .map_err(|err| AppError::system(format!("Failed to read screenshot: {err}"), trace_id))?;
+    validate_png_bytes(&bytes).map_err(|message| {
+        AppError::dependency(format!("Screenshot validation failed: {message}"), trace_id)
+    })?;
+    Ok(bytes)
+}
+
+fn capture_screenshot_via_exec_out(
+    adb_program: &str,
+    serial: &str,
+    config: &AppConfig,
+    trace_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let args = build_exec_out_screenshot_args(serial, config);
+    let output = Command::new(adb_program)
+        .args(&args)
+        .output()
+        .map_err(|err| AppError::dependency(format!("Failed to run adb: {err}"), trace_id))?;
+
+    if !output.status.success() {
+        return Err(AppError::dependency(
+            format!(
+                "Exec-out screenshot failed: {}",
+                stderr_message_bytes(&output.stderr)
+            ),
+            trace_id,
+        ));
+    }
+
+    validate_png_bytes(&output.stdout).map_err(|message| {
+        AppError::dependency(
+            format!("Exec-out screenshot returned invalid PNG: {message}"),
+            trace_id,
+        )
+    })?;
+    Ok(output.stdout)
+}
+
+fn capture_screenshot_via_pull(
+    adb_program: &str,
+    serial: &str,
+    config: &AppConfig,
+    remote_path: &str,
+    local_path: &Path,
+    trace_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let result = (|| -> Result<Vec<u8>, AppError> {
+        let capture_args = build_pull_screenshot_args(serial, config, remote_path);
+        let capture_output = run_command_with_timeout(
+            adb_program,
+            &capture_args,
+            Duration::from_secs(10),
+            trace_id,
+        )?;
+        if capture_output.exit_code.unwrap_or(1) != 0 {
+            return Err(AppError::dependency(
+                format!(
+                    "Pulled screenshot capture failed: {}",
+                    stderr_message_text(&capture_output.stderr)
+                ),
+                trace_id,
+            ));
+        }
+
+        let pull_args = vec![
+            "-s".to_string(),
+            serial.to_string(),
+            "pull".to_string(),
+            remote_path.to_string(),
+            local_path.to_string_lossy().to_string(),
+        ];
+        let pull_output =
+            run_command_with_timeout(adb_program, &pull_args, Duration::from_secs(20), trace_id)?;
+        if pull_output.exit_code.unwrap_or(1) != 0 {
+            return Err(AppError::dependency(
+                format!(
+                    "Pulled screenshot fetch failed: {}",
+                    stderr_message_text(&pull_output.stderr)
+                ),
+                trace_id,
+            ));
+        }
+
+        read_validated_png_file(local_path, trace_id)
+    })();
+
+    let cleanup_args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "rm".to_string(),
+        "-f".to_string(),
+        remote_path.to_string(),
+    ];
+    if let Err(err) = run_command_with_timeout(
+        adb_program,
+        &cleanup_args,
+        Duration::from_secs(10),
+        trace_id,
+    ) {
+        warn!(
+            trace_id = %trace_id,
+            error = %err.error,
+            "failed to remove temporary screenshot"
+        );
+    }
+
+    result
+}
+
+fn capture_validated_screenshot_bytes(
+    adb_program: &str,
+    serial: &str,
+    config: &AppConfig,
+    local_pull_path: &Path,
+    label: &str,
+    trace_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let remote_path = build_remote_screenshot_path(serial, label);
+    match capture_screenshot_via_exec_out(adb_program, serial, config, trace_id) {
+        Ok(bytes) => Ok(bytes),
+        Err(primary_err) => {
+            warn!(
+                trace_id = %trace_id,
+                error = %primary_err.error,
+                "exec-out screenshot failed; falling back to pull"
+            );
+            match capture_screenshot_via_pull(
+                adb_program,
+                serial,
+                config,
+                &remote_path,
+                local_pull_path,
+                trace_id,
+            ) {
+                Ok(bytes) => Ok(bytes),
+                Err(fallback_err) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        primary_error = %primary_err.error,
+                        fallback_error = %fallback_err.error,
+                        "screenshot capture failed"
+                    );
+                    Err(AppError::dependency(
+                        user_safe_retry_message("capture screenshot"),
+                        trace_id,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn build_exec_out_ui_dump_args(serial: &str) -> Vec<String> {
+    vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "exec-out".to_string(),
+        "uiautomator".to_string(),
+        "dump".to_string(),
+        "/dev/tty".to_string(),
+    ]
+}
+
+fn build_pull_ui_dump_args(serial: &str, remote_path: &str) -> Vec<String> {
+    vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "uiautomator".to_string(),
+        "dump".to_string(),
+        remote_path.to_string(),
+    ]
+}
+
+fn build_remote_ui_dump_path(serial: &str, label: &str) -> String {
+    let safe_label = sanitize_filename_component(label);
+    let safe_serial = sanitize_filename_component(serial);
+    format!(
+        "/sdcard/{}_{}_{}.xml",
+        safe_label,
+        safe_serial,
+        Uuid::new_v4()
+    )
+}
+
+fn read_validated_ui_dump_file(path: &Path, trace_id: &str) -> Result<String, AppError> {
+    let bytes = fs::read(path)
+        .map_err(|err| AppError::system(format!("Failed to read UI dump: {err}"), trace_id))?;
+    normalize_ui_dump_xml(&bytes).map_err(|message| {
+        AppError::dependency(format!("UI dump validation failed: {message}"), trace_id)
+    })
+}
+
+fn capture_ui_dump_via_exec_out(
+    adb_program: &str,
+    serial: &str,
+    trace_id: &str,
+) -> Result<String, AppError> {
+    let args = build_exec_out_ui_dump_args(serial);
+    let output = Command::new(adb_program)
+        .args(&args)
+        .output()
+        .map_err(|err| {
+            AppError::dependency(format!("Failed to run uiautomator: {err}"), trace_id)
+        })?;
+
+    if !output.status.success() {
+        return Err(AppError::dependency(
+            format!(
+                "Exec-out UI dump failed: {}",
+                stderr_message_bytes(&output.stderr)
+            ),
+            trace_id,
+        ));
+    }
+
+    normalize_ui_dump_xml(&output.stdout).map_err(|message| {
+        AppError::dependency(
+            format!("Exec-out UI dump returned invalid XML: {message}"),
+            trace_id,
+        )
+    })
+}
+
+fn capture_ui_dump_via_pull(
+    adb_program: &str,
+    serial: &str,
+    remote_path: &str,
+    local_path: &Path,
+    trace_id: &str,
+) -> Result<String, AppError> {
+    let result = (|| -> Result<String, AppError> {
+        let capture_args = build_pull_ui_dump_args(serial, remote_path);
+        let capture_output = run_command_with_timeout(
+            adb_program,
+            &capture_args,
+            Duration::from_secs(10),
+            trace_id,
+        )?;
+        if capture_output.exit_code.unwrap_or(1) != 0 {
+            return Err(AppError::dependency(
+                format!(
+                    "Pulled UI dump capture failed: {}",
+                    stderr_message_text(&capture_output.stderr)
+                ),
+                trace_id,
+            ));
+        }
+
+        let pull_args = vec![
+            "-s".to_string(),
+            serial.to_string(),
+            "pull".to_string(),
+            remote_path.to_string(),
+            local_path.to_string_lossy().to_string(),
+        ];
+        let pull_output =
+            run_command_with_timeout(adb_program, &pull_args, Duration::from_secs(20), trace_id)?;
+        if pull_output.exit_code.unwrap_or(1) != 0 {
+            return Err(AppError::dependency(
+                format!(
+                    "Pulled UI dump fetch failed: {}",
+                    stderr_message_text(&pull_output.stderr)
+                ),
+                trace_id,
+            ));
+        }
+
+        read_validated_ui_dump_file(local_path, trace_id)
+    })();
+
+    let cleanup_args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "rm".to_string(),
+        "-f".to_string(),
+        remote_path.to_string(),
+    ];
+    if let Err(err) = run_command_with_timeout(
+        adb_program,
+        &cleanup_args,
+        Duration::from_secs(10),
+        trace_id,
+    ) {
+        warn!(
+            trace_id = %trace_id,
+            error = %err.error,
+            "failed to remove temporary ui dump"
+        );
+    }
+
+    result
+}
+
+fn capture_validated_ui_dump_xml(
+    adb_program: &str,
+    serial: &str,
+    local_pull_path: &Path,
+    label: &str,
+    trace_id: &str,
+) -> Result<String, AppError> {
+    let remote_path = build_remote_ui_dump_path(serial, label);
+    match capture_ui_dump_via_exec_out(adb_program, serial, trace_id) {
+        Ok(xml) => Ok(xml),
+        Err(primary_err) => {
+            warn!(
+                trace_id = %trace_id,
+                error = %primary_err.error,
+                "exec-out ui dump failed; falling back to pull"
+            );
+            match capture_ui_dump_via_pull(
+                adb_program,
+                serial,
+                &remote_path,
+                local_pull_path,
+                trace_id,
+            ) {
+                Ok(xml) => Ok(xml),
+                Err(fallback_err) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        primary_error = %primary_err.error,
+                        fallback_error = %fallback_err.error,
+                        "ui dump capture failed"
+                    );
+                    Err(AppError::dependency(
+                        user_safe_retry_message("capture UI hierarchy"),
+                        trace_id,
+                    ))
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command(async)]
@@ -2999,131 +3417,20 @@ pub fn capture_screenshot(
     })?;
     output_path.push(&filename);
     let output_path_string = output_path.to_string_lossy().to_string();
+    let bytes = capture_validated_screenshot_bytes(
+        &adb_program,
+        &serial,
+        &config,
+        &output_path,
+        "screenshot",
+        &trace_id,
+    )?;
+    write_png_file(&output_path, &bytes, &trace_id)?;
 
-    let mut args = vec![
-        "-s".to_string(),
-        serial.clone(),
-        "exec-out".to_string(),
-        "screencap".to_string(),
-        "-p".to_string(),
-    ];
-    if config.screenshot.display_id >= 0 {
-        args.push("-d".to_string());
-        args.push(config.screenshot.display_id.to_string());
-    }
-    if !config.screenshot.extra_args.trim().is_empty() {
-        args.extend(
-            config
-                .screenshot
-                .extra_args
-                .split_whitespace()
-                .map(|item| item.to_string()),
-        );
-    }
-
-    let output = Command::new(&adb_program)
-        .args(&args)
-        .output()
-        .map_err(|err| AppError::dependency(format!("Failed to run adb: {err}"), &trace_id))?;
-
-    if output.status.success() {
-        fs::write(&output_path, &output.stdout).map_err(|err| {
-            AppError::system(format!("Failed to write screenshot: {err}"), &trace_id)
-        })?;
-        return Ok(CommandResponse {
-            trace_id,
-            data: output_path_string,
-        });
-    }
-
-    let exec_error_raw = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let exec_error = if exec_error_raw.is_empty() {
-        "unknown error".to_string()
-    } else {
-        exec_error_raw
-    };
-    warn!(
-        trace_id = %trace_id,
-        error = %exec_error,
-        "exec-out screencap failed; falling back to pull"
-    );
-
-    let fallback_result = (|| -> Result<(), AppError> {
-        let remote_path = format!("/sdcard/{filename}");
-        let capture_args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "shell".to_string(),
-            "screencap".to_string(),
-            "-p".to_string(),
-            remote_path.clone(),
-        ];
-        let capture_output = run_command_with_timeout(
-            &adb_program,
-            &capture_args,
-            Duration::from_secs(10),
-            &trace_id,
-        )?;
-        if capture_output.exit_code.unwrap_or(1) != 0 {
-            return Err(AppError::dependency(
-                format!(
-                    "Fallback screencap failed: {}",
-                    capture_output.stderr.trim()
-                ),
-                &trace_id,
-            ));
-        }
-        let pull_args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "pull".to_string(),
-            remote_path.clone(),
-            output_path_string.clone(),
-        ];
-        let pull_output =
-            run_command_with_timeout(&adb_program, &pull_args, Duration::from_secs(20), &trace_id)?;
-        if pull_output.exit_code.unwrap_or(1) != 0 {
-            return Err(AppError::dependency(
-                format!("Fallback pull failed: {}", pull_output.stderr.trim()),
-                &trace_id,
-            ));
-        }
-        let cleanup_args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "shell".to_string(),
-            "rm".to_string(),
-            "-f".to_string(),
-            remote_path,
-        ];
-        if let Err(err) = run_command_with_timeout(
-            &adb_program,
-            &cleanup_args,
-            Duration::from_secs(10),
-            &trace_id,
-        ) {
-            warn!(
-                trace_id = %trace_id,
-                error = %err.error,
-                "failed to remove fallback screenshot"
-            );
-        }
-        Ok(())
-    })();
-
-    match fallback_result {
-        Ok(()) => Ok(CommandResponse {
-            trace_id,
-            data: output_path_string,
-        }),
-        Err(err) => Err(AppError::dependency(
-            format!(
-                "Screenshot failed (exec-out): {}. Fallback failed: {}",
-                exec_error, err.error
-            ),
-            &trace_id,
-        )),
-    }
+    Ok(CommandResponse {
+        trace_id,
+        data: output_path_string,
+    })
 }
 
 #[tauri::command(async)]
@@ -4727,74 +5034,37 @@ pub fn capture_ui_hierarchy(
 
     let adb_program = get_adb_program(&trace_id)?;
     let config = load_config(&trace_id)?;
-    let output = Command::new(&adb_program)
-        .args(["-s", &serial, "exec-out", "uiautomator", "dump", "/dev/tty"])
-        .output()
-        .map_err(|err| {
-            AppError::dependency(format!("Failed to run uiautomator: {err}"), &trace_id)
-        })?;
-
-    if !output.status.success() {
-        return Err(AppError::dependency(
-            format!(
-                "UI dump failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            &trace_id,
-        ));
-    }
-
-    let xml = String::from_utf8_lossy(&output.stdout).to_string();
+    let temp_dir = tempfile::tempdir()
+        .map_err(|err| AppError::system(format!("Failed to prepare temp dir: {err}"), &trace_id))?;
+    let xml_temp_path = temp_dir.path().join("ui_inspector.xml");
+    let xml = capture_validated_ui_dump_xml(
+        &adb_program,
+        &serial,
+        &xml_temp_path,
+        "ui_inspector",
+        &trace_id,
+    )?;
     let html = render_device_ui_html(&xml)
         .map_err(|err| AppError::system(format!("Failed to render HTML: {err}"), &trace_id))?;
-
-    let mut screenshot_args = vec![
-        "-s".to_string(),
-        serial.clone(),
-        "exec-out".to_string(),
-        "screencap".to_string(),
-        "-p".to_string(),
-    ];
-    if config.screenshot.display_id >= 0 {
-        screenshot_args.push("-d".to_string());
-        screenshot_args.push(config.screenshot.display_id.to_string());
-    }
-    if !config.screenshot.extra_args.trim().is_empty() {
-        screenshot_args.extend(
-            config
-                .screenshot
-                .extra_args
-                .split_whitespace()
-                .map(|item| item.to_string()),
-        );
-    }
-
-    let (screenshot_data_url, screenshot_error) = match Command::new(&adb_program)
-        .args(&screenshot_args)
-        .output()
-    {
-        Ok(screenshot_output) => {
-            if !screenshot_output.status.success() {
-                let message = format!(
-                    "Screenshot failed: {}",
-                    String::from_utf8_lossy(&screenshot_output.stderr)
-                );
-                warn!(trace_id = %trace_id, error = %message, "ui_inspector screenshot failed");
-                (None, Some(message))
-            } else {
-                match png_bytes_to_data_url(&screenshot_output.stdout) {
-                    Ok(url) => (Some(url), None),
-                    Err(message) => {
-                        warn!(trace_id = %trace_id, error = %message, "ui_inspector screenshot invalid");
-                        (None, Some(message))
-                    }
-                }
+    let screenshot_temp_path = temp_dir.path().join("ui_inspector.png");
+    let (screenshot_data_url, screenshot_error) = match capture_validated_screenshot_bytes(
+        &adb_program,
+        &serial,
+        &config,
+        &screenshot_temp_path,
+        "ui_inspector",
+        &trace_id,
+    ) {
+        Ok(bytes) => match png_bytes_to_data_url(&bytes) {
+            Ok(url) => (Some(url), None),
+            Err(message) => {
+                warn!(trace_id = %trace_id, error = %message, "ui_inspector screenshot invalid");
+                (None, Some("Please try again.".to_string()))
             }
-        }
+        },
         Err(err) => {
-            let message = format!("Failed to capture screenshot: {err}");
-            warn!(trace_id = %trace_id, error = %message, "ui_inspector screenshot error");
-            (None, Some(message))
+            warn!(trace_id = %trace_id, error = %err.error, "ui_inspector screenshot failed");
+            (None, Some("Please try again.".to_string()))
         }
     };
 
@@ -4847,75 +5117,24 @@ pub fn export_ui_hierarchy(
     let xml_path = bundle_dir.join("hierarchy.xml");
     let html_path = bundle_dir.join("hierarchy.html");
     let screenshot_path = bundle_dir.join("screenshot.png");
-
-    let output = Command::new(&adb_program)
-        .args(["-s", &serial, "exec-out", "uiautomator", "dump", "/dev/tty"])
-        .output()
-        .map_err(|err| {
-            AppError::dependency(format!("Failed to run uiautomator: {err}"), &trace_id)
-        })?;
-
-    if !output.status.success() {
-        return Err(AppError::dependency(
-            format!(
-                "UI dump failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            &trace_id,
-        ));
-    }
-
-    let xml = String::from_utf8_lossy(&output.stdout).to_string();
+    let xml =
+        capture_validated_ui_dump_xml(&adb_program, &serial, &xml_path, "ui_export", &trace_id)?;
     let html = render_device_ui_html(&xml)
         .map_err(|err| AppError::system(format!("Failed to render HTML: {err}"), &trace_id))?;
 
-    fs::write(&xml_path, xml)
+    fs::write(&xml_path, &xml)
         .map_err(|err| AppError::system(format!("Failed to write XML: {err}"), &trace_id))?;
     fs::write(&html_path, html)
         .map_err(|err| AppError::system(format!("Failed to write HTML: {err}"), &trace_id))?;
-
-    let mut screenshot_args = vec![
-        "-s".to_string(),
-        serial.clone(),
-        "exec-out".to_string(),
-        "screencap".to_string(),
-        "-p".to_string(),
-    ];
-    if config.screenshot.display_id >= 0 {
-        screenshot_args.push("-d".to_string());
-        screenshot_args.push(config.screenshot.display_id.to_string());
-    }
-    if !config.screenshot.extra_args.trim().is_empty() {
-        screenshot_args.extend(
-            config
-                .screenshot
-                .extra_args
-                .split_whitespace()
-                .map(|item| item.to_string()),
-        );
-    }
-
-    let screenshot_output = Command::new(&adb_program)
-        .args(&screenshot_args)
-        .output()
-        .map_err(|err| {
-            AppError::dependency(format!("Failed to capture screenshot: {err}"), &trace_id)
-        })?;
-    if !screenshot_output.status.success() {
-        return Err(AppError::dependency(
-            format!(
-                "Failed to capture screenshot: {}",
-                String::from_utf8_lossy(&screenshot_output.stderr)
-            ),
-            &trace_id,
-        ));
-    }
-    let mut screenshot_file = fs::File::create(&screenshot_path).map_err(|err| {
-        AppError::system(format!("Failed to create screenshot: {err}"), &trace_id)
-    })?;
-    screenshot_file
-        .write_all(&screenshot_output.stdout)
-        .map_err(|err| AppError::system(format!("Failed to write screenshot: {err}"), &trace_id))?;
+    let screenshot_bytes = capture_validated_screenshot_bytes(
+        &adb_program,
+        &serial,
+        &config,
+        &screenshot_path,
+        "ui_export",
+        &trace_id,
+    )?;
+    write_png_file(&screenshot_path, &screenshot_bytes, &trace_id)?;
 
     Ok(CommandResponse {
         trace_id,

@@ -1,6 +1,8 @@
 use super::*;
 use crate::app::models::BugreportExtractTemplateKind;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -10,7 +12,278 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .expect("env lock")
+        .unwrap_or_else(|err| err.into_inner())
+}
+
+fn valid_test_png_bytes() -> Vec<u8> {
+    STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
+        .expect("valid png")
+}
+
+fn valid_test_ui_xml() -> &'static str {
+    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<hierarchy rotation="0">
+  <node
+    index="0"
+    text=""
+    resource-id=""
+    class="android.widget.FrameLayout"
+    package="com.example.app"
+    content-desc=""
+    checkable="false"
+    checked="false"
+    clickable="false"
+    enabled="true"
+    focusable="false"
+    focused="false"
+    scrollable="false"
+    long-clickable="false"
+    password="false"
+    selected="false"
+    bounds="[0,0][100,100]" />
+</hierarchy>
+"#
+}
+
+fn truncated_test_ui_xml() -> String {
+    valid_test_ui_xml()
+        .trim_end()
+        .trim_end_matches("</hierarchy>")
+        .trim_end()
+        .to_string()
+}
+
+fn write_fake_adb_script(path: &std::path::Path) {
+    let body = if cfg!(windows) {
+        r#"@echo off
+setlocal enableextensions
+if "%~1"=="-s" (
+  shift
+  shift
+)
+if "%~1"=="exec-out" if "%~2"=="uiautomator" (
+  if "%FAKE_ADB_XML_MODE%"=="exec_truncated_pull_ok" (
+    type "%FAKE_ADB_UI_XML_TRUNCATED%"
+    exit /b 0
+  )
+  if "%FAKE_ADB_XML_MODE%"=="exec_fail_pull_ok" (
+    echo exec dump failed 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_XML_MODE%"=="all_fail" (
+    type "%FAKE_ADB_UI_XML_TRUNCATED%"
+    exit /b 0
+  )
+  type "%FAKE_ADB_UI_XML_VALID%"
+  exit /b 0
+)
+if "%~1"=="exec-out" if "%~2"=="screencap" (
+  if "%FAKE_ADB_MODE%"=="exec_ok_pull_fail" (
+    type "%FAKE_ADB_VALID_PNG%"
+    exit /b 0
+  )
+  if "%FAKE_ADB_MODE%"=="exec_fail_pull_ok" (
+    echo exec screencap failed 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_MODE%"=="all_fail" (
+    echo exec screencap failed 1>&2
+    exit /b 1
+  )
+  <nul set /p=not-a-png
+  exit /b 0
+)
+if "%~1"=="shell" if "%~2"=="screencap" (
+  for %%I in ("%~4") do set "REMOTE_NAME=%%~nxI"
+  if "%FAKE_ADB_MODE%"=="exec_corrupt_pull_ok" (
+    copy /Y "%FAKE_ADB_VALID_PNG%" "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" >nul
+    exit /b 0
+  )
+  if "%FAKE_ADB_MODE%"=="exec_fail_pull_ok" (
+    copy /Y "%FAKE_ADB_VALID_PNG%" "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" >nul
+    exit /b 0
+  )
+  echo capture failed 1>&2
+  exit /b 1
+)
+if "%~1"=="shell" if "%~2"=="uiautomator" (
+  for %%I in ("%~4") do set "REMOTE_NAME=%%~nxI"
+  if "%FAKE_ADB_XML_MODE%"=="exec_ok_pull_fail" (
+    echo dump should not pull 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_XML_MODE%"=="exec_fail_pull_ok" (
+    echo dump failed 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_XML_MODE%"=="all_fail" (
+    echo dump failed 1>&2
+    exit /b 1
+  )
+  copy /Y "%FAKE_ADB_UI_XML_VALID%" "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" >nul
+  exit /b 0
+)
+if "%~1"=="pull" (
+  for %%I in ("%~2") do set "REMOTE_NAME=%%~nxI"
+  copy /Y "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" "%~3" >nul
+  exit /b 0
+)
+if "%~1"=="shell" if "%~2"=="rm" (
+  for %%I in ("%~4") do del /Q "%FAKE_ADB_REMOTE_ROOT%\%%~nxI" >nul 2>nul
+  exit /b 0
+)
+echo unexpected args %* 1>&2
+exit /b 1
+"#
+    } else {
+        r#"#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "-s" ]; then
+  shift
+  shift
+fi
+
+remote_name() {
+  basename "$1"
+}
+
+if [ "${1:-}" = "exec-out" ] && [ "${2:-}" = "uiautomator" ]; then
+  case "${FAKE_ADB_XML_MODE:-valid}" in
+    exec_truncated_pull_ok|all_fail)
+      cat "$FAKE_ADB_UI_XML_TRUNCATED"
+      ;;
+    exec_fail_pull_ok)
+      echo "exec dump failed" >&2
+      exit 1
+      ;;
+    *)
+      cat "$FAKE_ADB_UI_XML_VALID"
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "exec-out" ] && [ "${2:-}" = "screencap" ]; then
+  case "${FAKE_ADB_MODE:-}" in
+    exec_ok_pull_fail)
+      cat "$FAKE_ADB_VALID_PNG"
+      exit 0
+      ;;
+    exec_fail_pull_ok|all_fail)
+      echo "exec screencap failed" >&2
+      exit 1
+      ;;
+    *)
+      printf 'not-a-png'
+      exit 0
+      ;;
+  esac
+fi
+
+if [ "${1:-}" = "shell" ] && [ "${2:-}" = "screencap" ]; then
+  case "${FAKE_ADB_MODE:-}" in
+    exec_corrupt_pull_ok|exec_fail_pull_ok)
+      cp "$FAKE_ADB_VALID_PNG" "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${4:-}")"
+      exit 0
+      ;;
+    *)
+      echo "capture failed" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [ "${1:-}" = "shell" ] && [ "${2:-}" = "uiautomator" ]; then
+  case "${FAKE_ADB_XML_MODE:-valid}" in
+    exec_ok_pull_fail)
+      echo "dump should not pull" >&2
+      exit 1
+      ;;
+    exec_fail_pull_ok|all_fail)
+      echo "dump failed" >&2
+      exit 1
+      ;;
+    *)
+      cp "$FAKE_ADB_UI_XML_VALID" "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${4:-}")"
+      exit 0
+      ;;
+  esac
+fi
+
+if [ "${1:-}" = "pull" ]; then
+  cp "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${2:-}")" "${3:-}"
+  exit 0
+fi
+
+if [ "${1:-}" = "shell" ] && [ "${2:-}" = "rm" ]; then
+  rm -f "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${4:-}")"
+  exit 0
+fi
+
+echo "unexpected args: $*" >&2
+exit 1
+"#
+    };
+
+    std::fs::write(path, body).expect("write fake adb");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn setup_fake_adb(
+    tmp: &tempfile::TempDir,
+    screenshot_mode: &str,
+    xml_mode: &str,
+    trace_id: &str,
+) -> PathBuf {
+    let remote_root = tmp.path().join("remote");
+    std::fs::create_dir_all(&remote_root).expect("create remote root");
+    let valid_png_path = tmp.path().join("valid.png");
+    std::fs::write(&valid_png_path, valid_test_png_bytes()).expect("write png");
+    let valid_xml_path = tmp.path().join("hierarchy.xml");
+    std::fs::write(&valid_xml_path, valid_test_ui_xml()).expect("write xml");
+    let truncated_xml_path = tmp.path().join("hierarchy_truncated.xml");
+    std::fs::write(&truncated_xml_path, truncated_test_ui_xml()).expect("write truncated xml");
+    let adb_path = tmp.path().join(if cfg!(windows) {
+        "fake-adb.cmd"
+    } else {
+        "fake-adb.sh"
+    });
+    write_fake_adb_script(&adb_path);
+
+    std::env::set_var("FAKE_ADB_MODE", screenshot_mode);
+    std::env::set_var("FAKE_ADB_XML_MODE", xml_mode);
+    std::env::set_var("FAKE_ADB_REMOTE_ROOT", &remote_root);
+    std::env::set_var("FAKE_ADB_VALID_PNG", &valid_png_path);
+    std::env::set_var("FAKE_ADB_UI_XML_VALID", &valid_xml_path);
+    std::env::set_var("FAKE_ADB_UI_XML_TRUNCATED", &truncated_xml_path);
+
+    let config_path = tmp.path().join("config.json");
+    std::env::set_var("LAZY_BLACKTEA_CONFIG_PATH", &config_path);
+
+    let mut config = AppConfig::default();
+    config.adb.command_path = adb_path.to_string_lossy().to_string();
+    save_config(&config, trace_id).expect("save config");
+
+    adb_path
+}
+
+fn clear_fake_adb_env() {
+    std::env::remove_var("FAKE_ADB_MODE");
+    std::env::remove_var("FAKE_ADB_XML_MODE");
+    std::env::remove_var("FAKE_ADB_REMOTE_ROOT");
+    std::env::remove_var("FAKE_ADB_VALID_PNG");
+    std::env::remove_var("FAKE_ADB_UI_XML_VALID");
+    std::env::remove_var("FAKE_ADB_UI_XML_TRUNCATED");
+    std::env::remove_var("LAZY_BLACKTEA_CONFIG_PATH");
 }
 
 fn spawn_long_running_piped_child() -> std::process::Child {
@@ -850,4 +1123,212 @@ fn load_device_detail_continues_when_non_getprop_steps_fail() {
             "meminfo"
         ]
     );
+}
+
+#[test]
+fn capture_screenshot_prefers_exec_out_when_it_is_valid() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let output_dir = tmp.path().join("out");
+    std::fs::create_dir_all(&output_dir).expect("create output");
+    setup_fake_adb(
+        &tmp,
+        "exec_ok_pull_fail",
+        "exec_ok_pull_fail",
+        "trace-screenshot-exec-primary",
+    );
+
+    let response = capture_screenshot(
+        "SERIAL-1".to_string(),
+        output_dir.to_string_lossy().to_string(),
+        Some("trace-screenshot-exec-primary".to_string()),
+    )
+    .expect("capture screenshot");
+
+    let bytes = std::fs::read(&response.data).expect("read screenshot");
+    crate::app::ui_capture::png_bytes_to_data_url(&bytes).expect("valid png");
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn capture_screenshot_falls_back_to_pull_when_exec_out_is_invalid() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let output_dir = tmp.path().join("out");
+    std::fs::create_dir_all(&output_dir).expect("create output");
+    setup_fake_adb(
+        &tmp,
+        "exec_corrupt_pull_ok",
+        "exec_ok_pull_fail",
+        "trace-screenshot-pull-fallback",
+    );
+
+    let response = capture_screenshot(
+        "SERIAL-2".to_string(),
+        output_dir.to_string_lossy().to_string(),
+        Some("trace-screenshot-pull-fallback".to_string()),
+    )
+    .expect("capture screenshot");
+
+    let bytes = std::fs::read(&response.data).expect("read screenshot");
+    crate::app::ui_capture::png_bytes_to_data_url(&bytes).expect("valid png");
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn export_ui_hierarchy_prefers_pull_path_for_screenshot_file() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let output_dir = tmp.path().join("export");
+    std::fs::create_dir_all(&output_dir).expect("create output");
+    setup_fake_adb(
+        &tmp,
+        "exec_corrupt_pull_ok",
+        "exec_ok_pull_fail",
+        "trace-export-screenshot-pull-fallback",
+    );
+
+    let response = export_ui_hierarchy(
+        "SERIAL-3".to_string(),
+        Some(output_dir.to_string_lossy().to_string()),
+        Some("trace-export-screenshot-pull-fallback".to_string()),
+    )
+    .expect("export ui hierarchy");
+
+    let screenshot = std::fs::read(&response.data.screenshot_path).expect("read screenshot");
+    crate::app::ui_capture::png_bytes_to_data_url(&screenshot).expect("valid png");
+    let xml = std::fs::read_to_string(&response.data.xml_path).expect("read xml");
+    crate::app::ui_capture::validate_ui_dump_xml(&xml).expect("valid xml");
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn capture_ui_hierarchy_prefers_exec_out_when_xml_is_valid() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    setup_fake_adb(
+        &tmp,
+        "exec_ok_pull_fail",
+        "exec_ok_pull_fail",
+        "trace-ui-capture-exec-primary",
+    );
+
+    let response = capture_ui_hierarchy(
+        "SERIAL-4".to_string(),
+        Some("trace-ui-capture-exec-primary".to_string()),
+    )
+    .expect("capture ui hierarchy");
+
+    crate::app::ui_capture::validate_ui_dump_xml(&response.data.xml).expect("valid xml");
+    assert!(response.data.xml.trim_end().ends_with("</hierarchy>"));
+    assert!(response.data.html.contains("android.widget.FrameLayout"));
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn capture_ui_hierarchy_falls_back_to_pull_when_exec_out_xml_is_invalid() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    setup_fake_adb(
+        &tmp,
+        "exec_ok_pull_fail",
+        "exec_truncated_pull_ok",
+        "trace-ui-capture-pull-fallback",
+    );
+
+    let response = capture_ui_hierarchy(
+        "SERIAL-5".to_string(),
+        Some("trace-ui-capture-pull-fallback".to_string()),
+    )
+    .expect("capture ui hierarchy");
+
+    crate::app::ui_capture::validate_ui_dump_xml(&response.data.xml).expect("valid xml");
+    assert!(response.data.xml.contains("<hierarchy"));
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn export_ui_hierarchy_prefers_pull_path_for_complete_xml() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let output_dir = tmp.path().join("export_xml");
+    std::fs::create_dir_all(&output_dir).expect("create output");
+    setup_fake_adb(
+        &tmp,
+        "exec_ok_pull_fail",
+        "exec_truncated_pull_ok",
+        "trace-ui-export-xml-pull-fallback",
+    );
+
+    let response = export_ui_hierarchy(
+        "SERIAL-6".to_string(),
+        Some(output_dir.to_string_lossy().to_string()),
+        Some("trace-ui-export-xml-pull-fallback".to_string()),
+    )
+    .expect("export ui hierarchy");
+
+    let xml = std::fs::read_to_string(&response.data.xml_path).expect("read xml");
+    crate::app::ui_capture::validate_ui_dump_xml(&xml).expect("valid xml");
+    assert!(xml.trim_end().ends_with("</hierarchy>"));
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn export_ui_hierarchy_errors_when_both_xml_paths_are_invalid() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let output_dir = tmp.path().join("export_xml_fail");
+    std::fs::create_dir_all(&output_dir).expect("create output");
+    setup_fake_adb(
+        &tmp,
+        "exec_corrupt_pull_ok",
+        "all_fail",
+        "trace-ui-export-xml-fail",
+    );
+
+    let err = export_ui_hierarchy(
+        "SERIAL-7".to_string(),
+        Some(output_dir.to_string_lossy().to_string()),
+        Some("trace-ui-export-xml-fail".to_string()),
+    )
+    .expect_err("expected xml failure");
+
+    assert_eq!(err.code, "ERR_DEPENDENCY");
+    assert_eq!(
+        err.error,
+        "Failed to capture UI hierarchy. Please try again."
+    );
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn capture_ui_hierarchy_returns_user_safe_screenshot_error() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    setup_fake_adb(
+        &tmp,
+        "all_fail",
+        "exec_ok_pull_fail",
+        "trace-ui-screenshot-safe-error",
+    );
+
+    let response = capture_ui_hierarchy(
+        "SERIAL-8".to_string(),
+        Some("trace-ui-screenshot-safe-error".to_string()),
+    )
+    .expect("capture ui hierarchy");
+
+    assert_eq!(
+        response.data.screenshot_error.as_deref(),
+        Some("Please try again.")
+    );
+
+    clear_fake_adb_env();
 }

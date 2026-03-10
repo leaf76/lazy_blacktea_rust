@@ -2136,12 +2136,14 @@ dependencies = [
 
 [[package]]
 name = "lazy_blacktea_rust"
-version = "0.0.67"
+version = "0.0.68"
 dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "mime_guess",
+ "png 0.18.0",
+ "quick-xml 0.38.4",
  "regex",
  "rusqlite",
  "serde",
