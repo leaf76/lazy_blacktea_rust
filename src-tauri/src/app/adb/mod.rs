@@ -7,5 +7,6 @@ pub mod parse;
 pub mod paths;
 pub mod runner;
 pub mod scrcpy;
+pub mod screen_record;
 pub mod track_devices;
 pub mod transfer;

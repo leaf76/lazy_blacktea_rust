@@ -55,6 +55,7 @@ import type {
   NetProfilerSnapshot,
   PerfEvent,
   PerfSnapshot,
+  ScreenRecordStatus,
   TerminalEvent,
   ScrcpyInfo,
 } from "./types";
@@ -77,6 +78,7 @@ import {
   forceStopApp,
   generateBugreport,
   getConfig,
+  getScreenRecordStatus,
   installApkBatch,
   launchApp,
   launchScrcpy,
@@ -206,7 +208,6 @@ import {
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
-  shouldEnableConnectivityForSelection,
   selectSerialsForGroup,
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
@@ -247,6 +248,7 @@ import {
   buildBugreportPopupWindowLabel,
   parseBugreportPopupContext,
 } from "./bugreportWindow";
+import { buildScreenRecordActionMeta } from "./screenRecord";
 import {
   checkForUpdate,
   installUpdateAndRelaunch,
@@ -267,6 +269,12 @@ import {
   type ActiveBugreportCustomViewSession,
   type BugreportCustomViewTemplate,
 } from "./bugreportCustomViews";
+import {
+  type BatchActionMeta,
+  buildConnectivityActionMeta,
+  buildFanOutActionMeta,
+  buildSingletonActionMeta,
+} from "./batchActions";
 import {
   DEVELOPER_OPTIONS,
   buildDeveloperOptionSettingsProbeCommand,
@@ -1972,7 +1980,10 @@ function App() {
   const [apkLaunchPackage, setApkLaunchPackage] = useState("");
   const [apkInstallSummary, setApkInstallSummary] = useState<string[]>([]);
   const [latestApkInstallTaskId, setLatestApkInstallTaskId] = useState<string | null>(null);
-  const [screenRecordRemote, setScreenRecordRemote] = useState<string | null>(null);
+  const [screenRecordStatusBySerial, setScreenRecordStatusBySerial] = useState<Record<string, ScreenRecordStatus>>({});
+  const [screenRecordStatusLoadingBySerial, setScreenRecordStatusLoadingBySerial] = useState<
+    Record<string, boolean>
+  >({});
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [appsFilter, setAppsFilter] = useState("");
   const [appsThirdPartyOnly, setAppsThirdPartyOnly] = useState(true);
@@ -2204,6 +2215,7 @@ function App() {
   const activeLogcatStatusLoading = activeSerial
     ? (logcatStatusLoadingBySerial[activeSerial] ?? false)
     : false;
+  const screenRecordStatusLoading = selectedSerials.some((serial) => screenRecordStatusLoadingBySerial[serial]);
   useEffect(() => {
     logcatRunningBySerialRef.current = logcatRunningBySerial;
   }, [logcatRunningBySerial]);
@@ -3538,6 +3550,10 @@ function App() {
   const requestRebootConfirm = () => {
     if (!selectedSerials.length) {
       pushToast("Select at least one device to reboot.", "error");
+      return;
+    }
+    if (rebootActionMeta.disabled) {
+      pushToast("No eligible devices selected to reboot.", "error");
       return;
     }
     setRebootConfirmMode("normal");
@@ -5745,10 +5761,19 @@ function App() {
       pushToast("Select at least one device.", "error");
       return;
     }
+    const targetSerials = rebootActionMeta.eligibleSerials;
+    const skippedCount = rebootActionMeta.skippedSerials.length;
+    if (!targetSerials.length) {
+      pushToast("No eligible devices selected.", "error");
+      return;
+    }
     setBusy(true);
     try {
-      await rebootDevices(selectedSerials, mode);
-      pushToast("Reboot command sent.", "info");
+      await rebootDevices(targetSerials, mode);
+      pushToast(
+        `Reboot command sent.${skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : ""}`,
+        "info",
+      );
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -5756,20 +5781,24 @@ function App() {
     }
   };
 
-  const handleToggleWifi = async (enable: boolean) => {
+  const handleToggleWifi = async (enableOrMeta: boolean | BatchActionMeta = wifiActionMeta) => {
     if (!selectedSerials.length) {
       pushToast("Select at least one device.", "error");
       return;
     }
-    const onlineSerialSet = new Set(
-      devices
-        .filter((device) => device.summary.state === "device")
-        .map((device) => device.summary.serial),
-    );
-    const targetSerials = selectedSerials.filter((serial) => onlineSerialSet.has(serial));
-    const skippedCount = selectedSerials.length - targetSerials.length;
+    const actionMeta =
+      typeof enableOrMeta === "boolean"
+        ? {
+            targetActive: enableOrMeta,
+            eligibleSerials: selectedSerials.filter((serial) => batchAvailabilityBySerial[serial] !== false),
+            skippedSerials: selectedSerials.filter((serial) => batchAvailabilityBySerial[serial] === false),
+          }
+        : enableOrMeta;
+    const enable = actionMeta.targetActive === true;
+    const targetSerials = actionMeta.eligibleSerials;
+    const skippedCount = actionMeta.skippedSerials.length;
     if (!targetSerials.length) {
-      pushToast("No online devices selected.", "error");
+      pushToast("No eligible devices selected.", "error");
       return;
     }
     setBusy(true);
@@ -5784,14 +5813,14 @@ function App() {
       if (failures.length) {
         pushToast(
           `WiFi ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).${
-            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+            skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : ""
           }`,
           "error",
         );
       } else {
         pushToast(
           `${enable ? "WiFi enabled." : "WiFi disabled."}${
-            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+            skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : ""
           }`,
           "info",
         );
@@ -5803,20 +5832,24 @@ function App() {
     }
   };
 
-  const handleToggleBluetooth = async (enable: boolean) => {
+  const handleToggleBluetooth = async (enableOrMeta: boolean | BatchActionMeta = bluetoothActionMeta) => {
     if (!selectedSerials.length) {
       pushToast("Select at least one device.", "error");
       return;
     }
-    const onlineSerialSet = new Set(
-      devices
-        .filter((device) => device.summary.state === "device")
-        .map((device) => device.summary.serial),
-    );
-    const targetSerials = selectedSerials.filter((serial) => onlineSerialSet.has(serial));
-    const skippedCount = selectedSerials.length - targetSerials.length;
+    const actionMeta =
+      typeof enableOrMeta === "boolean"
+        ? {
+            targetActive: enableOrMeta,
+            eligibleSerials: selectedSerials.filter((serial) => batchAvailabilityBySerial[serial] !== false),
+            skippedSerials: selectedSerials.filter((serial) => batchAvailabilityBySerial[serial] === false),
+          }
+        : enableOrMeta;
+    const enable = actionMeta.targetActive === true;
+    const targetSerials = actionMeta.eligibleSerials;
+    const skippedCount = actionMeta.skippedSerials.length;
     if (!targetSerials.length) {
-      pushToast("No online devices selected.", "error");
+      pushToast("No eligible devices selected.", "error");
       return;
     }
     setBusy(true);
@@ -5831,14 +5864,14 @@ function App() {
       if (failures.length) {
         pushToast(
           `Bluetooth ${enable ? "enable" : "disable"} failed for ${failures.length} device(s).${
-            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+            skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : ""
           }`,
           "error",
         );
       } else {
         pushToast(
           `${enable ? "Bluetooth enabled." : "Bluetooth disabled."}${
-            skippedCount > 0 ? ` Skipped ${skippedCount} offline device(s).` : ""
+            skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : ""
           }`,
           "info",
         );
@@ -7977,12 +8010,86 @@ function App() {
     [],
   );
 
+  const refreshScreenRecordStatuses = useCallback(
+    async (serials: string[], options: { silent?: boolean } = {}) => {
+      const targets = Array.from(new Set(serials)).filter(Boolean);
+      if (!targets.length) {
+        return;
+      }
+      setScreenRecordStatusLoadingBySerial((prev) => {
+        const next = { ...prev };
+        targets.forEach((serial) => {
+          next[serial] = true;
+        });
+        return next;
+      });
+      try {
+        const settled = await Promise.allSettled(targets.map((serial) => getScreenRecordStatus(serial)));
+        const nextStatus: Record<string, ScreenRecordStatus> = {};
+        let firstError: unknown = null;
+        settled.forEach((result, index) => {
+          const serial = targets[index];
+          if (!serial) {
+            return;
+          }
+          if (result.status === "fulfilled") {
+            nextStatus[serial] = result.value.data;
+          } else if (firstError == null) {
+            firstError = result.reason;
+          }
+        });
+        if (Object.keys(nextStatus).length > 0) {
+          setScreenRecordStatusBySerial((prev) => ({ ...prev, ...nextStatus }));
+        }
+        if (firstError != null && !options.silent) {
+          pushToastRef.current(formatError(firstError), "error");
+        }
+      } finally {
+        setScreenRecordStatusLoadingBySerial((prev) => {
+          const next = { ...prev };
+          targets.forEach((serial) => {
+            next[serial] = false;
+          });
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!isLogcatView || !activeSerial) {
       return;
     }
     void refreshLogcatStatus(activeSerial, { silent: true });
   }, [isLogcatView, activeSerial, refreshLogcatStatus]);
+
+  useEffect(() => {
+    if (!selectedSerials.length) {
+      return;
+    }
+    void refreshScreenRecordStatuses(selectedSerials, { silent: true });
+  }, [selectedSerials, refreshScreenRecordStatuses]);
+
+  const screenRecordPollingSignature = useMemo(
+    () =>
+      selectedSerials
+        .filter((serial) => screenRecordStatusBySerial[serial]?.running)
+        .sort()
+        .join("|"),
+    [selectedSerials, screenRecordStatusBySerial],
+  );
+
+  useEffect(() => {
+    if (!screenRecordPollingSignature) {
+      return;
+    }
+    const serials = screenRecordPollingSignature.split("|").filter(Boolean);
+    const timer = window.setInterval(() => {
+      void refreshScreenRecordStatuses(serials, { silent: true });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [screenRecordPollingSignature, refreshScreenRecordStatuses]);
 
   useEffect(() => {
     const listRunningPerfSerials = (value: Record<string, PerfMonitorState>): string[] =>
@@ -10258,6 +10365,10 @@ function App() {
       pushToast("Select at least one device.", "error");
       return;
     }
+    if (!screenshotActionMeta.eligibleSerials.length) {
+      pushToast("No eligible devices selected.", "error");
+      return;
+    }
     const outputDir = (config?.output_path ?? "").trim();
     if (!outputDir) {
       pushToast("Set an output folder in Settings to save screenshots.", "error");
@@ -10266,7 +10377,8 @@ function App() {
 
     setBusy(true);
     try {
-      const serials = Array.from(new Set(selectedSerials));
+      const serials = screenshotActionMeta.eligibleSerials;
+      const skippedCount = screenshotActionMeta.skippedSerials.length;
       const taskId = beginTask({
         kind: "screenshot",
         title: `Screenshot (${serials.length})`,
@@ -10301,7 +10413,9 @@ function App() {
       );
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
       pushToast(
-        hasError ? "Screenshot completed with errors. Check Task Center." : "Screenshot completed. Check Task Center.",
+        `${
+          hasError ? "Screenshot completed with errors. Check Task Center." : "Screenshot completed. Check Task Center."
+        }${skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : ""}`,
         hasError ? "error" : "info",
       );
     } catch (error) {
@@ -10312,86 +10426,149 @@ function App() {
   };
 
   const handleQuickScreenRecord = async () => {
-    const singleSerial = ensureSingleSelection("screen recording");
-    if (!singleSerial) {
+    if (!selectedSerials.length) {
+      pushToast("Select at least one device.", "error");
+      return;
+    }
+    if (!screenRecordActionMeta.eligibleSerials.length) {
+      pushToast("No eligible devices selected.", "error");
       return;
     }
 
     setBusy(true);
     try {
-      if (screenRecordRemote) {
-        const outputDir = (config?.output_path ?? "").trim() || undefined;
+      const outputDir = (config?.output_path ?? "").trim() || undefined;
+      const nextAction = screenRecordActionMeta;
+      const skippedCount = nextAction.skippedSerials.length;
+      let hasError = false;
+
+      const stopGroup = nextAction.taskGroups.find((group) => group.action === "stop");
+      if (stopGroup?.serials.length) {
         const taskId = beginTask({
           kind: "screen_record_stop",
-          title: `Screen Record Stop: ${singleSerial}`,
-          serials: [singleSerial],
+          title: `Screen Record Stop (${stopGroup.serials.length})`,
+          serials: stopGroup.serials,
         });
-        try {
-          const response = await stopScreenRecord(singleSerial, outputDir);
-          const savedPath = response.data?.trim();
-          setScreenRecordRemote(null);
-          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-          dispatchTasks({
-            type: "TASK_UPDATE_DEVICE",
-            id: taskId,
-            serial: singleSerial,
-            patch: {
-              status: "success",
-              output_path: savedPath || null,
-              message: savedPath ? `Saved to ${savedPath}` : "Stopped (no output folder configured).",
-            },
-          });
-          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
-          pushToast(savedPath ? `Recording saved to ${savedPath}` : "Screen recording stopped.", "info");
-        } catch (error) {
-          dispatchTasks({
-            type: "TASK_UPDATE_DEVICE",
-            id: taskId,
-            serial: singleSerial,
-            patch: { status: "error", message: formatError(error) },
-          });
-          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-          throw error;
-        }
-      } else {
+        let traceSet = false;
+        await Promise.all(
+          stopGroup.serials.map(async (serial) => {
+            try {
+              const response = await stopScreenRecord(serial, outputDir);
+              if (!traceSet && response.trace_id) {
+                traceSet = true;
+                dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+              }
+              const savedPath = response.data.output_path?.trim() ?? "";
+              const segmentCount = response.data.segment_count;
+              const message =
+                segmentCount > 1
+                  ? `Saved ${segmentCount} segments to ${savedPath || "the output folder"}.`
+                  : savedPath
+                    ? `Saved to ${savedPath}`
+                    : "Stopped.";
+              dispatchTasks({
+                type: "TASK_UPDATE_DEVICE",
+                id: taskId,
+                serial,
+                patch: {
+                  status: "success",
+                  output_path: savedPath || null,
+                  message,
+                },
+              });
+            } catch (error) {
+              hasError = true;
+              dispatchTasks({
+                type: "TASK_UPDATE_DEVICE",
+                id: taskId,
+                serial,
+                patch: { status: "error", message: formatError(error) },
+              });
+            }
+          }),
+        );
+        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
+      }
+
+      const startGroup = nextAction.taskGroups.find((group) => group.action === "start");
+      if (startGroup?.serials.length) {
         const taskId = beginTask({
           kind: "screen_record_start",
-          title: `Screen Record Start: ${singleSerial}`,
-          serials: [singleSerial],
+          title: `Screen Record Start (${startGroup.serials.length})`,
+          serials: startGroup.serials,
         });
-        try {
-          const response = await startScreenRecord(singleSerial);
-          setScreenRecordRemote(response.data);
-          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
-          dispatchTasks({
-            type: "TASK_UPDATE_DEVICE",
-            id: taskId,
-            serial: singleSerial,
-            patch: { status: "success", message: `Remote: ${response.data}` },
-          });
-          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
-          pushToast("Screen recording started.", "info");
-        } catch (error) {
-          dispatchTasks({
-            type: "TASK_UPDATE_DEVICE",
-            id: taskId,
-            serial: singleSerial,
-            patch: { status: "error", message: formatError(error) },
-          });
-          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-          throw error;
-        }
+        let traceSet = false;
+        await Promise.all(
+          startGroup.serials.map(async (serial) => {
+            try {
+              const response = await startScreenRecord(serial);
+              if (!traceSet && response.trace_id) {
+                traceSet = true;
+                dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+              }
+              dispatchTasks({
+                type: "TASK_UPDATE_DEVICE",
+                id: taskId,
+                serial,
+                patch: {
+                  status: "success",
+                  message: `Recording to ${response.data.display_path}`,
+                },
+              });
+            } catch (error) {
+              hasError = true;
+              dispatchTasks({
+                type: "TASK_UPDATE_DEVICE",
+                id: taskId,
+                serial,
+                patch: { status: "error", message: formatError(error) },
+              });
+            }
+          }),
+        );
+        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
       }
-    } catch (error) {
-      pushToast(formatError(error), "error");
+
+      await refreshScreenRecordStatuses(nextAction.eligibleSerials, { silent: true });
+      const skippedSuffix =
+        skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : "";
+      if (nextAction.action === "toggle") {
+        pushToast(
+          `${
+            hasError
+              ? "Recording toggle completed with errors. Check Task Center."
+              : "Recording toggled. Check Task Center."
+          }${skippedSuffix}`,
+          hasError ? "error" : "info",
+        );
+      } else if (nextAction.action === "stop") {
+        pushToast(
+          `${
+            hasError
+              ? "Stop recording completed with errors. Check Task Center."
+              : "Recording saved. Check Task Center."
+          }${skippedSuffix}`,
+          hasError ? "error" : "info",
+        );
+      } else {
+        pushToast(
+          `${
+            hasError
+              ? "Screen recording started with errors. Check Task Center."
+              : "Screen recording started."
+          }${skippedSuffix}`,
+          hasError ? "error" : "info",
+        );
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const handleQuickLogcatClear = () => {
-    const singleSerial = ensureSingleSelection("logcat clear");
+    const singleSerial = logcatClearActionMeta.eligibleSerials[0] ?? null;
     if (!singleSerial) {
+      pushToast("Select exactly one online device to clear the logcat buffer.", "error");
       return;
     }
     setLogcatClearBufferModal({ serial: singleSerial });
@@ -10911,35 +11088,119 @@ function App() {
     appsCanLoadMoreRef.current = canLoadMoreApps;
   }, [filteredApps.length, canLoadMoreApps]);
 
-  const wifiToggleEnable = shouldEnableConnectivityForSelection(
-    devices,
-    selectedSerials,
-    "wifi_is_on",
+  const batchAvailabilityBySerial = useMemo(
+    () =>
+      Object.fromEntries(
+        devices.map((device) => [device.summary.serial, device.summary.state === "device"]),
+      ),
+    [devices],
   );
-  const bluetoothToggleEnable = shouldEnableConnectivityForSelection(
-    devices,
-    selectedSerials,
-    "bt_is_on",
+  const wifiStateBySerial = useMemo(
+    () =>
+      Object.fromEntries(
+        devices.map((device) => [device.summary.serial, device.detail?.wifi_is_on === true]),
+      ),
+    [devices],
   );
-  const selectedOfflineCount = selectedSerials.reduce((total, serial) => {
-    const summary = devices.find((device) => device.summary.serial === serial)?.summary;
-    return total + (!summary || summary.state !== "device" ? 1 : 0);
-  }, 0);
-  const connectivitySkipNote =
-    selectedOfflineCount > 0
-      ? ` ${selectedOfflineCount} offline device${selectedOfflineCount > 1 ? "s" : ""} will be skipped.`
-      : "";
+  const bluetoothStateBySerial = useMemo(
+    () =>
+      Object.fromEntries(
+        devices.map((device) => [device.summary.serial, device.detail?.bt_is_on === true]),
+      ),
+    [devices],
+  );
   const topbarOverview = useMemo(
     () => buildTopbarOverview(devices, selectedSerials, activeSerial),
     [devices, selectedSerials, activeSerial],
   );
+  const screenshotActionMeta = useMemo(
+    () =>
+      buildFanOutActionMeta({
+        selectedSerials,
+        availabilityBySerial: batchAvailabilityBySerial,
+        title: "Screenshot",
+        singleDescription: "Capture a screenshot from the selected device.",
+        multiDescription: "Capture screenshots from eligible selected devices.",
+        taskKey: "screenshot",
+      }),
+    [batchAvailabilityBySerial, selectedSerials],
+  );
+  const rebootActionMeta = useMemo(
+    () =>
+      buildFanOutActionMeta({
+        selectedSerials,
+        availabilityBySerial: batchAvailabilityBySerial,
+        title: "Reboot",
+        singleDescription: "Restart the selected device.",
+        multiDescription: "Restart eligible selected devices.",
+        taskKey: "reboot",
+      }),
+    [batchAvailabilityBySerial, selectedSerials],
+  );
+  const wifiActionMeta = useMemo(
+    () =>
+      buildConnectivityActionMeta({
+        capabilityLabel: "Wi-Fi",
+        selectedSerials,
+        availabilityBySerial: batchAvailabilityBySerial,
+        activeBySerial: wifiStateBySerial,
+      }),
+    [batchAvailabilityBySerial, selectedSerials, wifiStateBySerial],
+  );
+  const bluetoothActionMeta = useMemo(
+    () =>
+      buildConnectivityActionMeta({
+        capabilityLabel: "Bluetooth",
+        selectedSerials,
+        availabilityBySerial: batchAvailabilityBySerial,
+        activeBySerial: bluetoothStateBySerial,
+      }),
+    [batchAvailabilityBySerial, bluetoothStateBySerial, selectedSerials],
+  );
+  const screenRecordActionMeta = useMemo(
+    () =>
+      buildScreenRecordActionMeta(
+        selectedSerials,
+        batchAvailabilityBySerial,
+        screenRecordStatusBySerial,
+      ),
+    [batchAvailabilityBySerial, selectedSerials, screenRecordStatusBySerial],
+  );
+  const logcatClearActionMeta = useMemo(
+    () =>
+      buildSingletonActionMeta({
+        selectedSerials,
+        availabilityBySerial: batchAvailabilityBySerial,
+        title: "Clear Logcat",
+        readyDescription: "Clear the logcat buffer for the selected device.",
+        blockedDescription: "Select exactly one online device to clear the logcat buffer.",
+        hint: "Single device",
+      }),
+    [batchAvailabilityBySerial, selectedSerials],
+  );
+  const selectedRunningScreenRecords = useMemo(
+    () =>
+      screenRecordActionMeta.runningSerials
+        .map((serial) => screenRecordStatusBySerial[serial] ?? null)
+        .filter((item): item is ScreenRecordStatus => item !== null),
+    [screenRecordActionMeta.runningSerials, screenRecordStatusBySerial],
+  );
+  const screenRecordSummaryText = useMemo(() => {
+    if (!selectedRunningScreenRecords.length) {
+      return null;
+    }
+    if (selectedRunningScreenRecords.length === 1) {
+      return `Recording in progress: ${selectedRunningScreenRecords[0].display_path}`;
+    }
+    return `Recording in progress on ${selectedRunningScreenRecords.length} selected devices.`;
+  }, [selectedRunningScreenRecords]);
 
   const handleQuickWifiToggle = () => {
-    void handleToggleWifi(wifiToggleEnable);
+    void handleToggleWifi(wifiActionMeta);
   };
 
   const handleQuickBluetoothToggle = () => {
-    void handleToggleBluetooth(bluetoothToggleEnable);
+    void handleToggleBluetooth(bluetoothActionMeta);
   };
 
   const dashboardActions: Array<{
@@ -10953,55 +11214,53 @@ function App() {
   }> = [
     {
       id: "screenshot",
-      title: "Screenshot",
-      description: "Capture screenshots from selected devices.",
-      hint: "Multi-device",
+      title: screenshotActionMeta.title,
+      description: screenshotActionMeta.description,
+      hint: screenshotActionMeta.hint,
       tone: "primary",
       onClick: handleQuickScreenshot,
-      disabled: busy || selectedSerials.length === 0,
+      disabled: busy || selectedSerials.length === 0 || screenshotActionMeta.disabled,
     },
     {
       id: "reboot",
-      title: "Reboot",
-      description: "Restart selected devices.",
-      hint: "Multi-device",
+      title: rebootActionMeta.title,
+      description: rebootActionMeta.description,
+      hint: rebootActionMeta.hint,
       onClick: requestRebootConfirm,
-      disabled: busy || selectedSerials.length === 0,
+      disabled: busy || selectedSerials.length === 0 || rebootActionMeta.disabled,
     },
     {
       id: "wifi-toggle",
-      title: wifiToggleEnable ? "Enable Wi-Fi" : "Disable Wi-Fi",
-      description: `Toggle Wi-Fi for selected devices.${connectivitySkipNote}`,
-      hint: "Multi-device",
+      title: wifiActionMeta.title,
+      description: wifiActionMeta.description,
+      hint: wifiActionMeta.hint,
       onClick: handleQuickWifiToggle,
-      disabled: busy || selectedSerials.length === 0,
+      disabled: busy || selectedSerials.length === 0 || wifiActionMeta.disabled,
     },
     {
       id: "bluetooth-toggle",
-      title: bluetoothToggleEnable ? "Enable Bluetooth" : "Disable Bluetooth",
-      description: `Toggle Bluetooth for selected devices.${connectivitySkipNote}`,
-      hint: "Multi-device",
+      title: bluetoothActionMeta.title,
+      description: bluetoothActionMeta.description,
+      hint: bluetoothActionMeta.hint,
       onClick: handleQuickBluetoothToggle,
-      disabled: busy || selectedSerials.length === 0,
+      disabled: busy || selectedSerials.length === 0 || bluetoothActionMeta.disabled,
     },
     {
       id: "record",
-      title: screenRecordRemote ? "Stop Recording" : "Start Recording",
-      description: screenRecordRemote
-        ? "Finish and save the ongoing screen recording."
-        : "Record the device screen for a short clip.",
-      hint: "Primary device",
+      title: screenRecordActionMeta.title,
+      description: screenRecordActionMeta.description,
+      hint: screenRecordActionMeta.hint,
       tone: "primary",
       onClick: handleQuickScreenRecord,
-      disabled: busy || !activeSerial,
+      disabled: busy || selectedSerials.length === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled,
     },
     {
       id: "logcat-clear",
-      title: "Clear Logcat",
-      description: "Clear the logcat buffer for the primary device.",
-      hint: "Primary device",
+      title: logcatClearActionMeta.title,
+      description: logcatClearActionMeta.description,
+      hint: logcatClearActionMeta.hint,
       onClick: handleQuickLogcatClear,
-      disabled: busy || !activeSerial,
+      disabled: busy || logcatClearActionMeta.disabled,
     },
     {
       id: "mirror",
@@ -13640,7 +13899,7 @@ function App() {
                     className="context-menu-item"
                     role="menuitem"
                     onClick={() => runTopActionsMenuCommand(() => void handleQuickScreenshot())}
-                    disabled={busy || selectedSerials.length === 0}
+                    disabled={busy || selectedSerials.length === 0 || screenshotActionMeta.disabled}
                   >
                     Screenshot
                   </button>
@@ -13649,7 +13908,7 @@ function App() {
                     className="context-menu-item"
                     role="menuitem"
                     onClick={() => runTopActionsMenuCommand(requestRebootConfirm)}
-                    disabled={busy || selectedSerials.length === 0}
+                    disabled={busy || selectedSerials.length === 0 || rebootActionMeta.disabled}
                   >
                     Reboot
                   </button>
@@ -14383,8 +14642,8 @@ function App() {
                         <h2>Terminal Sessions</h2>
                         <span>{selectedSummaryLabel}</span>
                       </div>
-                      {screenRecordRemote && (
-                        <p className="muted">Recording in progress: {screenRecordRemote}</p>
+                      {screenRecordSummaryText && (
+                        <p className="muted">{screenRecordSummaryText}</p>
                       )}
                       <div className="shell-terminal-toolbar">
                         <div className="shell-terminal-toolbar-left">
@@ -17510,8 +17769,7 @@ function App() {
                             Time limit (sec)
                             <input
                               type="number"
-                              min={1}
-                              max={180}
+                              min={0}
                               value={config.screen_record.time_limit_sec}
                               onChange={(event) =>
                                 setConfig((prev) =>
@@ -17520,10 +17778,7 @@ function App() {
                                         ...prev,
                                         screen_record: {
                                           ...prev.screen_record,
-                                          time_limit_sec: Math.min(
-                                            180,
-                                            Math.max(1, Number(event.target.value) || 1),
-                                          ),
+                                          time_limit_sec: Math.max(0, Number(event.target.value) || 0),
                                         },
                                       }
                                     : prev,
@@ -17531,7 +17786,10 @@ function App() {
                               }
                             />
                           </label>
-                          <div className="muted settings-hint">Max duration per recording, 1 to 180 seconds.</div>
+                          <div className="muted settings-hint">
+                            Use <code>0</code> to record until stopped. Values above <code>180</code> use the long
+                            recording strategy automatically.
+                          </div>
                           <label>
                             Display ID
                             <input

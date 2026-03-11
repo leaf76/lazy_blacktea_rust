@@ -116,9 +116,24 @@ describe("checkForUpdate", () => {
 
   it("returns publishing_pending when release tag is newer but updater artifacts are missing", async () => {
     const storage = createMemoryStorage();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ tag_name: "v0.0.58" }),
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/releases/latest") && !url.endsWith("/download/latest.json")) {
+        return {
+          ok: true,
+          json: async () => ({ tag_name: "v0.0.58", assets: [] }),
+        };
+      }
+      if (url.endsWith("/download/latest.json")) {
+        return {
+          ok: false,
+          status: 404,
+          json: async () => {
+            throw new Error("unexpected json");
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch url: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
     (check as unknown as { mockRejectedValue: (value: unknown) => void }).mockRejectedValue(
@@ -135,6 +150,59 @@ describe("checkForUpdate", () => {
     expect(result.message).not.toMatch(/successful status code/i);
     expect(result.latestVersion).toBe("0.0.58");
     expect(readUpdateLastCheckedMs(storage)).toBe(5_000);
+  });
+
+  it("returns error when release tag is newer but manifest points to missing assets", async () => {
+    const storage = createMemoryStorage();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/releases/latest") && !url.endsWith("/download/latest.json")) {
+        return {
+          ok: true,
+          json: async () => ({
+            tag_name: "v0.0.58",
+            assets: [
+              { name: "Lazy.Blacktea_0.0.58_amd64.AppImage" },
+              { name: "Lazy.Blacktea_0.0.58_amd64.deb" },
+            ],
+          }),
+        };
+      }
+      if (url.endsWith("/download/latest.json")) {
+        return {
+          ok: true,
+          json: async () => ({
+            version: "0.0.58",
+            platforms: {
+              "linux-x86_64-appimage": {
+                url: "https://github.com/leaf76/lazy_blacktea_rust/releases/download/v0.0.58/Lazy Blacktea_0.0.58_amd64.AppImage",
+                signature: "sig",
+              },
+              "linux-x86_64-deb": {
+                url: "https://github.com/leaf76/lazy_blacktea_rust/releases/download/v0.0.58/Lazy Blacktea_0.0.58_amd64.deb",
+                signature: "sig",
+              },
+            },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch url: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (X11; Linux x86_64)" });
+    (check as unknown as { mockRejectedValue: (value: unknown) => void }).mockRejectedValue(
+      new Error("update endpoint did not respond with a successful status code"),
+    );
+
+    const result = await checkForUpdate({ storage, nowMs: 6_000, currentVersion: "0.0.57" });
+
+    expect(result.status).toBe("error");
+    if (result.status !== "error") {
+      throw new Error(`Expected error, got ${result.status}`);
+    }
+    expect(result.message).toMatch(/Unable to check for updates/i);
+    expect(result.message).not.toMatch(/still publishing/i);
+    expect(readUpdateLastCheckedMs(storage)).toBe(6_000);
   });
 });
 

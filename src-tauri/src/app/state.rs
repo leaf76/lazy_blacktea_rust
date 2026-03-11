@@ -25,9 +25,29 @@ pub struct NetProfilerHandle {
     pub join: JoinHandle<()>,
 }
 
-pub struct RecordingHandle {
-    pub child: Child,
-    pub remote_path: String,
+pub struct SegmentedRecordingShared {
+    pub current_remote_path: Option<String>,
+    pub completed_remote_paths: Vec<String>,
+    pub completed: bool,
+    pub error: Option<String>,
+}
+
+pub enum RecordingHandle {
+    Adb {
+        child: Child,
+        remote_path: String,
+        default_output_dir: String,
+    },
+    AdbSegmented {
+        stop_flag: Arc<AtomicBool>,
+        shared: Arc<Mutex<SegmentedRecordingShared>>,
+        join: JoinHandle<()>,
+        default_output_dir: String,
+    },
+    Scrcpy {
+        child: Child,
+        output_path: String,
+    },
 }
 
 pub struct BugreportHandle {

@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::app::adb::screen_record::{
+    normalize_screen_record_time_limit_sec, DEFAULT_SCREEN_RECORD_TIME_LIMIT_SEC,
+};
 use crate::app::error::AppError;
 use tracing::warn;
 use uuid::Uuid;
@@ -236,9 +239,9 @@ impl Default for ScreenRecordSettings {
     fn default() -> Self {
         Self {
             // Use explicit defaults so Settings/Quick Actions don't look "unset".
-            // Values match typical Android `screenrecord` defaults (bits per second, max 180s).
+            // Values match typical Android `screenrecord` defaults for short recordings.
             bit_rate: "4000000".to_string(),
-            time_limit_sec: 180,
+            time_limit_sec: DEFAULT_SCREEN_RECORD_TIME_LIMIT_SEC,
             size: String::new(),
             extra_args: String::new(),
             use_hevc: false,
@@ -664,13 +667,8 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     if config.screen_record.bit_rate.trim().is_empty() {
         config.screen_record.bit_rate = ScreenRecordSettings::default().bit_rate;
     }
-    // Android screenrecord allows 1..=180; keep it within that range.
-    if config.screen_record.time_limit_sec < 1 {
-        config.screen_record.time_limit_sec = ScreenRecordSettings::default().time_limit_sec;
-    }
-    if config.screen_record.time_limit_sec > 180 {
-        config.screen_record.time_limit_sec = 180;
-    }
+    config.screen_record.time_limit_sec =
+        normalize_screen_record_time_limit_sec(config.screen_record.time_limit_sec);
     if config.dashboard.cards.is_empty() {
         config.dashboard = DashboardSettings::default();
     }
@@ -730,7 +728,7 @@ mod tests {
         config.screenshot.display_id = -99;
         config.screen_record.display_id = -99;
         config.screen_record.bit_rate = String::new();
-        config.screen_record.time_limit_sec = 0;
+        config.screen_record.time_limit_sec = -1;
 
         let validated = validate_config(config);
         assert_eq!(validated.scrcpy.bitrate, "8M");
@@ -739,6 +737,18 @@ mod tests {
         assert_eq!(validated.screen_record.display_id, -1);
         assert_eq!(validated.screen_record.bit_rate, "4000000");
         assert_eq!(validated.screen_record.time_limit_sec, 180);
+    }
+
+    #[test]
+    fn preserves_unbounded_and_long_screen_record_limits() {
+        let mut config = AppConfig::default();
+        config.screen_record.time_limit_sec = 0;
+        let unbounded = validate_config(config.clone());
+        assert_eq!(unbounded.screen_record.time_limit_sec, 0);
+
+        config.screen_record.time_limit_sec = 600;
+        let long = validate_config(config);
+        assert_eq!(long.screen_record.time_limit_sec, 600);
     }
 
     #[test]

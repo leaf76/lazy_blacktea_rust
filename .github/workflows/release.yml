@@ -469,7 +469,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release view "${TAG}" --repo "${REPO}" --json body,publishedAt > release-meta.json
+          gh api "/repos/${REPO}/releases/tags/${TAG}" > release-meta.json
           python3 - <<'PY'
           import json
           import os
@@ -480,10 +480,9 @@ jobs:
           with open("release-meta.json", "r", encoding="utf-8") as fh:
             release = json.load(fh)
           body = release.get("body", "") or ""
-          pub_date = release.get("publishedAt", "") or ""
+          pub_date = release.get("published_at", "") or release.get("publishedAt", "") or ""
           version = tag[1:] if tag.startswith("v") else tag
-
-          base = f"https://github.com/{repo}/releases/download/{tag}"
+          assets = release.get("assets") or []
 
           mac_path = pathlib.Path("updater-meta") / "updater-meta-macos" / "updater-meta-macos.json"
           linux_path = pathlib.Path("updater-meta") / "updater-meta-linux" / "updater-meta-linux.json"
@@ -503,11 +502,33 @@ jobs:
           if missing:
             raise SystemExit(f"Missing updater metadata: {', '.join(missing)}")
 
+          def pick_release_asset(suffix: str) -> dict:
+            matches = [
+              asset for asset in assets
+              if isinstance(asset, dict) and (asset.get("name", "") or "").endswith(suffix)
+            ]
+            if len(matches) != 1:
+              names = [asset.get("name", "") for asset in assets if isinstance(asset, dict)]
+              raise SystemExit(
+                f"Expected exactly one release asset with suffix {suffix}, found {len(matches)}. Assets: {names}"
+              )
+            download_url = matches[0].get("browser_download_url", "") or ""
+            if not download_url:
+              raise SystemExit(f"Release asset {matches[0].get('name', '')} is missing browser_download_url")
+            return {
+              "asset_name": matches[0].get("name", "") or "",
+              "url": download_url,
+            }
+
+          mac_release_asset = pick_release_asset(".app.tar.gz")
+          linux_appimage_release_asset = pick_release_asset(".AppImage")
+          linux_deb_release_asset = pick_release_asset(".deb")
+
           platforms = {
-            "darwin-aarch64-app": {"url": f"{base}/{mac_app['asset_name']}", "signature": mac_app["signature"]},
-            "darwin-x86_64-app": {"url": f"{base}/{mac_app['asset_name']}", "signature": mac_app["signature"]},
-            "linux-x86_64-appimage": {"url": f"{base}/{linux_appimage['asset_name']}", "signature": linux_appimage["signature"]},
-            "linux-x86_64-deb": {"url": f"{base}/{linux_deb['asset_name']}", "signature": linux_deb["signature"]},
+            "darwin-aarch64-app": {"url": mac_release_asset["url"], "signature": mac_app["signature"]},
+            "darwin-x86_64-app": {"url": mac_release_asset["url"], "signature": mac_app["signature"]},
+            "linux-x86_64-appimage": {"url": linux_appimage_release_asset["url"], "signature": linux_appimage["signature"]},
+            "linux-x86_64-deb": {"url": linux_deb_release_asset["url"], "signature": linux_deb["signature"]},
           }
 
           latest = {

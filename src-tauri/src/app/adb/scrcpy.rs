@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::app::config::ScrcpySettings;
+use crate::app::config::{ScrcpySettings, ScreenRecordSettings};
 
 pub struct ScrcpyAvailability {
     pub available: bool,
@@ -118,6 +118,31 @@ pub fn build_scrcpy_command(
                 .split_whitespace()
                 .map(|s| s.to_string()),
         );
+    }
+    args
+}
+
+pub fn build_scrcpy_record_command(
+    serial: &str,
+    settings: &ScrcpySettings,
+    record_settings: &ScreenRecordSettings,
+    major_version: i32,
+    output_path: &str,
+    time_limit_sec: i32,
+) -> Vec<String> {
+    let mut record_settings_scrcpy = settings.clone();
+    record_settings_scrcpy.enable_audio_playback = false;
+    let mut args = build_scrcpy_command(serial, &record_settings_scrcpy, major_version);
+    args.push("--no-window".to_string());
+    if record_settings.display_id >= 0 {
+        args.push("--display-id".to_string());
+        args.push(record_settings.display_id.to_string());
+    }
+    args.push("--record".to_string());
+    args.push(output_path.to_string());
+    if time_limit_sec > 0 {
+        args.push("--time-limit".to_string());
+        args.push(time_limit_sec.to_string());
     }
     args
 }
@@ -241,5 +266,33 @@ mod tests {
         let args = build_scrcpy_command("device", &settings, 3);
         assert!(has_flag_with_value(&args, "-b", "16M"));
         assert!(!has_flag(&args, "--bit-rate"));
+    }
+
+    #[test]
+    fn build_scrcpy_record_command_adds_headless_recording_flags() {
+        let settings = base_settings();
+        let record_settings = ScreenRecordSettings {
+            bit_rate: "4000000".to_string(),
+            time_limit_sec: 181,
+            size: String::new(),
+            extra_args: String::new(),
+            use_hevc: false,
+            bugreport: false,
+            verbose: false,
+            display_id: 1,
+        };
+        let args = build_scrcpy_record_command(
+            "device",
+            &settings,
+            &record_settings,
+            3,
+            "/tmp/out.mp4",
+            181,
+        );
+        assert!(has_flag(&args, "--no-window"));
+        assert!(has_flag_with_value(&args, "--record", "/tmp/out.mp4"));
+        assert!(has_flag_with_value(&args, "--time-limit", "181"));
+        assert!(has_flag_with_value(&args, "--display-id", "1"));
+        assert!(has_flag(&args, "--no-audio"));
     }
 }

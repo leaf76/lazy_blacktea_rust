@@ -26,6 +26,7 @@ export type UpdateInstallResult =
 const UPDATE_LAST_CHECKED_KEY = "lazy_blacktea_update_last_checked_ms_v1";
 const UPDATE_LAST_SEEN_VERSION_KEY = "lazy_blacktea_update_last_seen_version_v1";
 const GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/leaf76/lazy_blacktea_rust/releases/latest";
+const GITHUB_LATEST_MANIFEST_URL = "https://github.com/leaf76/lazy_blacktea_rust/releases/latest/download/latest.json";
 const UPDATE_ENDPOINT_STATUS_ERROR_PATTERN = /did not respond with a successful status code/i;
 const GENERIC_UPDATE_CHECK_ERROR_MESSAGE = "Unable to check for updates. Please try again.";
 const UPDATE_ARTIFACTS_PENDING_MESSAGE =
@@ -41,6 +42,11 @@ const UPDATE_INSTALL_PERMISSION_ERROR_PATTERN = /permission denied|operation not
 const DEFAULT_INSTALL_RETRY_DELAY_MS = 250;
 
 type SleepFn = (ms: number) => Promise<void>;
+type GithubLatestReleaseMetadata = {
+  version: string | null;
+  assetNames: string[];
+};
+type ManifestStatus = "missing" | "invalid" | "ready" | "unreachable";
 
 function defaultStorage(): StorageLike | null {
   try {
@@ -146,7 +152,7 @@ function compareVersions(aRaw: string, bRaw: string): number {
   return 0;
 }
 
-async function fetchLatestReleaseVersion(): Promise<string | null> {
+async function fetchLatestReleaseMetadata(): Promise<GithubLatestReleaseMetadata> {
   const response = await fetch(GITHUB_LATEST_RELEASE_API_URL, {
     method: "GET",
     headers: {
@@ -154,13 +160,25 @@ async function fetchLatestReleaseVersion(): Promise<string | null> {
     },
   });
   if (!response.ok) {
-    return null;
+    return { version: null, assetNames: [] };
   }
-  const payload = (await response.json()) as { tag_name?: unknown };
+  const payload = (await response.json()) as {
+    tag_name?: unknown;
+    assets?: Array<{ name?: unknown }>;
+  };
+  const assetNames = Array.isArray(payload.assets)
+    ? payload.assets
+        .map((asset) => (typeof asset?.name === "string" ? asset.name : null))
+        .filter((name): name is string => Boolean(name))
+    : [];
+
   if (typeof payload.tag_name !== "string") {
-    return null;
+    return { version: null, assetNames };
   }
-  return normalizeVersionTag(payload.tag_name);
+  return {
+    version: normalizeVersionTag(payload.tag_name),
+    assetNames,
+  };
 }
 
 function extractErrorMessage(error: unknown): string {
@@ -204,6 +222,85 @@ function buildPublishingPendingResult(latestVersion?: string | null) {
   };
 }
 
+function currentRuntimePlatformPrefix(): string | null {
+  if (typeof navigator === "undefined") {
+    return null;
+  }
+  const userAgent = navigator.userAgent.toLowerCase();
+  if (userAgent.includes("linux")) {
+    return "linux-";
+  }
+  if (userAgent.includes("mac os") || userAgent.includes("macintosh")) {
+    return "darwin-";
+  }
+  if (userAgent.includes("windows")) {
+    return "windows-";
+  }
+  return null;
+}
+
+function relevantManifestPlatformKeys(keys: string[]): string[] {
+  const platformPrefix = currentRuntimePlatformPrefix();
+  if (!platformPrefix) {
+    return keys;
+  }
+  const relevant = keys.filter((key) => key.startsWith(platformPrefix));
+  return relevant.length > 0 ? relevant : keys;
+}
+
+function extractAssetNameFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const tail = parsed.pathname.split("/").pop();
+    return tail ? decodeURIComponent(tail) : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function inspectLatestManifestStatus(releaseAssetNames: string[]): Promise<ManifestStatus> {
+  try {
+    const response = await fetch(GITHUB_LATEST_MANIFEST_URL, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+    });
+    if (!response.ok) {
+      return response.status === 404 ? "missing" : "unreachable";
+    }
+
+    const payload = (await response.json()) as {
+      platforms?: Record<string, { url?: unknown }>;
+    };
+    if (!payload.platforms || typeof payload.platforms !== "object") {
+      return "invalid";
+    }
+
+    const platformKeys = relevantManifestPlatformKeys(Object.keys(payload.platforms));
+    if (platformKeys.length === 0) {
+      return "invalid";
+    }
+
+    const releaseAssetSet = new Set(releaseAssetNames);
+    for (const key of platformKeys) {
+      const entry = payload.platforms[key];
+      if (!entry || typeof entry.url !== "string") {
+        return "invalid";
+      }
+      const assetName = extractAssetNameFromUrl(entry.url);
+      if (!assetName || !releaseAssetSet.has(assetName)) {
+        return "invalid";
+      }
+    }
+
+    return "ready";
+  } catch (error) {
+    console.warn("Failed to validate latest updater manifest.", error);
+    return "unreachable";
+  }
+}
+
 function mapInstallErrorResult(errorMessage: string, latestVersion?: string | null): UpdateInstallResult {
   if (UPDATE_INSTALL_ARTIFACT_ERROR_PATTERN.test(errorMessage)) {
     return buildPublishingPendingResult(latestVersion);
@@ -222,15 +319,16 @@ export async function checkForUpdate(opts?: {
   const storage = opts?.storage ?? null;
   const nowMs = opts?.nowMs ?? Date.now();
   const currentVersion = normalizeVersionTag(opts?.currentVersion);
-  let latestReleaseVersion: string | null | undefined;
+  let latestReleaseMetadata: GithubLatestReleaseMetadata | null | undefined;
 
   // Persist the attempt time so auto-checks are naturally throttled.
   writeUpdateLastCheckedMs(nowMs, storage);
 
   if (currentVersion) {
-    latestReleaseVersion = null;
+    latestReleaseMetadata = null;
     try {
-      latestReleaseVersion = await fetchLatestReleaseVersion();
+      latestReleaseMetadata = await fetchLatestReleaseMetadata();
+      const latestReleaseVersion = latestReleaseMetadata.version;
       if (latestReleaseVersion && compareVersions(latestReleaseVersion, currentVersion) <= 0) {
         return { status: "up_to_date" };
       }
@@ -257,18 +355,27 @@ export async function checkForUpdate(opts?: {
     console.warn("Failed to check for updates.", error);
     const errorMessage = extractErrorMessage(error);
     if (currentVersion && UPDATE_ENDPOINT_STATUS_ERROR_PATTERN.test(errorMessage)) {
-      if (latestReleaseVersion === undefined) {
-        latestReleaseVersion = null;
+      if (latestReleaseMetadata === undefined) {
+        latestReleaseMetadata = null;
         try {
-          latestReleaseVersion = await fetchLatestReleaseVersion();
+          latestReleaseMetadata = await fetchLatestReleaseMetadata();
         } catch (metadataError) {
           console.warn("Failed to read latest release metadata.", metadataError);
         }
       }
 
+      const latestReleaseVersion = latestReleaseMetadata?.version ?? null;
       if (latestReleaseVersion) {
         if (compareVersions(latestReleaseVersion, currentVersion) <= 0) {
           return { status: "up_to_date" };
+        }
+        const releaseAssetNames = latestReleaseMetadata?.assetNames ?? [];
+        if (releaseAssetNames.length > 0) {
+          const manifestStatus = await inspectLatestManifestStatus(releaseAssetNames);
+          if (manifestStatus === "missing") {
+            return buildPublishingPendingResult(latestReleaseVersion);
+          }
+          return { status: "error", message: GENERIC_UPDATE_CHECK_ERROR_MESSAGE };
         }
         return buildPublishingPendingResult(latestReleaseVersion);
       }

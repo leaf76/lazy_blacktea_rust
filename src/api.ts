@@ -24,6 +24,9 @@ import type {
   LegacyLogcatPreset,
   LogcatExportResult,
   LogcatStatus,
+  ScreenRecordStartResult,
+  ScreenRecordStatus,
+  ScreenRecordStopResult,
   ScrcpyInfo,
   TerminalSessionInfo,
   UiHierarchyCaptureResult,
@@ -272,7 +275,7 @@ export const captureScreenshot = async (serial: string, outputDir: string) => {
 
 export const startScreenRecord = async (serial: string) => {
   const traceId = createTraceId();
-  return tauriInvoke<CommandResponse<string>>("start_screen_record", {
+  return tauriInvoke<CommandResponse<ScreenRecordStartResult>>("start_screen_record", {
     serial,
     trace_id: traceId,
     traceId,
@@ -281,10 +284,19 @@ export const startScreenRecord = async (serial: string) => {
 
 export const stopScreenRecord = async (serial: string, outputDir?: string) => {
   const traceId = createTraceId();
-  return tauriInvoke<CommandResponse<string>>("stop_screen_record", {
+  return tauriInvoke<CommandResponse<ScreenRecordStopResult>>("stop_screen_record", {
     serial,
     output_dir: outputDir,
     outputDir,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const getScreenRecordStatus = async (serial: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<ScreenRecordStatus>>("get_screen_record_status", {
+    serial,
     trace_id: traceId,
     traceId,
   });

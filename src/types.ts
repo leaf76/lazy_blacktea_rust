@@ -88,6 +88,30 @@ export type LogcatStatus = {
   running: boolean;
 };
 
+export type ScreenRecordBackend = "adb" | "adb_segmented" | "scrcpy";
+
+export type ScreenRecordStatus = {
+  serial: string;
+  running: boolean;
+  backend: ScreenRecordBackend;
+  display_path: string;
+  segment_count: number;
+};
+
+export type ScreenRecordStartResult = {
+  serial: string;
+  backend: ScreenRecordBackend;
+  display_path: string;
+};
+
+export type ScreenRecordStopResult = {
+  serial: string;
+  backend: ScreenRecordBackend;
+  output_path: string;
+  output_paths: string[];
+  segment_count: number;
+};
+
 export type LegacyLogcatPreset = {
   name: string;
   include: string[];

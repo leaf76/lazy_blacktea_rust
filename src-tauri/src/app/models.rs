@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::app::adb::screen_record::ScreenRecordBackend;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceSummary {
     pub serial: String,
@@ -100,6 +102,32 @@ pub struct LogcatExportResult {
 pub struct LogcatStatus {
     pub serial: String,
     pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenRecordStatus {
+    pub serial: String,
+    pub running: bool,
+    pub backend: ScreenRecordBackend,
+    pub display_path: String,
+    pub segment_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenRecordStartResult {
+    pub serial: String,
+    pub backend: ScreenRecordBackend,
+    pub display_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenRecordStopResult {
+    pub serial: String,
+    pub backend: ScreenRecordBackend,
+    pub output_path: String,
+    #[serde(default)]
+    pub output_paths: Vec<String>,
+    pub segment_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

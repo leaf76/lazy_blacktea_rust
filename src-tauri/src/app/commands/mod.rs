@@ -37,7 +37,13 @@ use crate::app::adb::paths::{
     device_parent_dir, sanitize_filename_component, validate_device_path,
 };
 use crate::app::adb::runner::{run_adb, run_command_with_timeout};
-use crate::app::adb::scrcpy::{build_scrcpy_command, check_scrcpy_availability};
+use crate::app::adb::scrcpy::{
+    build_scrcpy_command, build_scrcpy_record_command, check_scrcpy_availability,
+};
+use crate::app::adb::screen_record::{
+    build_adb_screen_record_args, build_local_recording_path, build_remote_recording_path,
+    select_screen_record_backend, ScreenRecordBackend, MAX_ADB_SCREEN_RECORD_TIME_LIMIT_SEC,
+};
 use crate::app::adb::transfer::parse_progress_percent;
 use crate::app::bluetooth::service::start_bluetooth_monitor as start_bluetooth_monitor_service;
 use crate::app::bugreport_extract;
@@ -53,7 +59,8 @@ use crate::app::models::{
     BugreportExtractResult, BugreportLogAroundPage, BugreportLogFilters, BugreportLogPage,
     BugreportLogSearchResult, BugreportLogSummary, BugreportResult, CommandResponse, CommandResult,
     DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LegacyLogcatPreset,
-    LogcatExportResult, LogcatStatus, NetProfilerSnapshot, PerfSnapshot, ScrcpyInfo, TerminalEvent,
+    LogcatExportResult, LogcatStatus, NetProfilerSnapshot, PerfSnapshot, ScrcpyInfo,
+    ScreenRecordStartResult, ScreenRecordStatus, ScreenRecordStopResult, TerminalEvent,
     TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
 use crate::app::net_profiler::parse::{
@@ -68,6 +75,7 @@ use crate::app::perf::parse::{
 };
 use crate::app::state::{
     AppState, BugreportHandle, LogcatHandle, NetProfilerHandle, PerfMonitorHandle, RecordingHandle,
+    SegmentedRecordingShared,
 };
 use crate::app::terminal::{TerminalSession, TERMINAL_EVENT_NAME};
 use crate::app::ui_capture::{normalize_ui_dump_xml, png_bytes_to_data_url, validate_png_bytes};
@@ -3433,12 +3441,467 @@ pub fn capture_screenshot(
     })
 }
 
+fn resolve_screen_record_output_dir(
+    output_dir: Option<String>,
+    default_output_dir: &str,
+    trace_id: &str,
+) -> Result<String, AppError> {
+    let resolved = output_dir
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_output_dir.to_string());
+    ensure_non_empty(&resolved, "output_dir", trace_id)?;
+    fs::create_dir_all(&resolved)
+        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), trace_id))?;
+    Ok(resolved)
+}
+
+fn pull_screen_record_file(
+    adb_program: &str,
+    serial: &str,
+    remote_path: &str,
+    local_path: &Path,
+    trace_id: &str,
+) -> Result<(), AppError> {
+    let args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "pull".to_string(),
+        remote_path.to_string(),
+        local_path.to_string_lossy().to_string(),
+    ];
+    let output = run_adb(adb_program, &args, trace_id)?;
+    if output.exit_code.unwrap_or_default() != 0 {
+        return Err(AppError::dependency(
+            format!("Pull failed: {}", output.stderr),
+            trace_id,
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_child_exit(
+    child: &mut std::process::Child,
+    timeout: Duration,
+    label: &str,
+    trace_id: &str,
+) -> Result<(), AppError> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AppError::system(
+                        format!("Timeout waiting for {label}"),
+                        trace_id,
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => {
+                return Err(AppError::system(
+                    format!("Failed to stop {label}: {err}"),
+                    trace_id,
+                ))
+            }
+        }
+    }
+}
+
+fn send_remote_screenrecord_sigint(adb_program: &str, serial: &str) {
+    let _ = Command::new(adb_program)
+        .args(["-s", serial, "shell", "pkill", "-SIGINT", "screenrecord"])
+        .output();
+}
+
+#[cfg(unix)]
+fn interrupt_local_child(child: &mut std::process::Child) {
+    let _ = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status();
+}
+
+#[cfg(not(unix))]
+fn interrupt_local_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
+fn move_recording_file_to_output_dir(
+    source_path: &str,
+    output_dir: Option<String>,
+    trace_id: &str,
+) -> Result<String, AppError> {
+    let source = PathBuf::from(source_path);
+    let Some(file_name) = source.file_name().map(|value| value.to_owned()) else {
+        return Ok(source.to_string_lossy().to_string());
+    };
+    let Some(output_dir) = output_dir.filter(|value| !value.trim().is_empty()) else {
+        return Ok(source.to_string_lossy().to_string());
+    };
+    fs::create_dir_all(&output_dir)
+        .map_err(|err| AppError::system(format!("Failed to create output dir: {err}"), trace_id))?;
+    let target = PathBuf::from(output_dir).join(file_name);
+    if target == source {
+        return Ok(source.to_string_lossy().to_string());
+    }
+    match fs::rename(&source, &target) {
+        Ok(()) => Ok(target.to_string_lossy().to_string()),
+        Err(_) => {
+            fs::copy(&source, &target).map_err(|err| {
+                AppError::system(format!("Failed to move recording: {err}"), trace_id)
+            })?;
+            fs::remove_file(&source).map_err(|err| {
+                AppError::system(
+                    format!("Failed to remove original recording after copy: {err}"),
+                    trace_id,
+                )
+            })?;
+            Ok(target.to_string_lossy().to_string())
+        }
+    }
+}
+
+fn build_idle_screen_record_status(serial: String) -> ScreenRecordStatus {
+    ScreenRecordStatus {
+        serial,
+        running: false,
+        backend: ScreenRecordBackend::Adb,
+        display_path: String::new(),
+        segment_count: 0,
+    }
+}
+
+fn build_running_screen_record_status(
+    serial: &str,
+    handle: &RecordingHandle,
+    trace_id: &str,
+) -> Result<ScreenRecordStatus, AppError> {
+    match handle {
+        RecordingHandle::Adb { remote_path, .. } => Ok(ScreenRecordStatus {
+            serial: serial.to_string(),
+            running: true,
+            backend: ScreenRecordBackend::Adb,
+            display_path: remote_path.clone(),
+            segment_count: 1,
+        }),
+        RecordingHandle::Scrcpy { output_path, .. } => Ok(ScreenRecordStatus {
+            serial: serial.to_string(),
+            running: true,
+            backend: ScreenRecordBackend::Scrcpy,
+            display_path: output_path.clone(),
+            segment_count: 1,
+        }),
+        RecordingHandle::AdbSegmented { shared, .. } => {
+            let guard = shared
+                .lock()
+                .map_err(|_| AppError::system("Recording registry locked", trace_id))?;
+            Ok(ScreenRecordStatus {
+                serial: serial.to_string(),
+                running: !guard.completed,
+                backend: ScreenRecordBackend::AdbSegmented,
+                display_path: guard
+                    .current_remote_path
+                    .clone()
+                    .or_else(|| guard.completed_remote_paths.last().cloned())
+                    .unwrap_or_default(),
+                segment_count: guard.completed_remote_paths.len()
+                    + usize::from(guard.current_remote_path.is_some()),
+            })
+        }
+    }
+}
+
+fn recording_handle_is_finished(
+    handle: &mut RecordingHandle,
+    trace_id: &str,
+) -> Result<bool, AppError> {
+    match handle {
+        RecordingHandle::Adb { child, .. } | RecordingHandle::Scrcpy { child, .. } => {
+            match child.try_wait() {
+                Ok(Some(_)) => Ok(true),
+                Ok(None) => Ok(false),
+                Err(err) => Err(AppError::system(
+                    format!("Failed to inspect recording process: {err}"),
+                    trace_id,
+                )),
+            }
+        }
+        RecordingHandle::AdbSegmented { shared, .. } => shared
+            .lock()
+            .map(|guard| guard.completed)
+            .map_err(|_| AppError::system("Recording registry locked", trace_id)),
+    }
+}
+
+fn finalize_recording_handle(
+    serial: &str,
+    adb_program: &str,
+    handle: RecordingHandle,
+    output_dir: Option<String>,
+    trace_id: &str,
+) -> Result<ScreenRecordStopResult, AppError> {
+    match handle {
+        RecordingHandle::Adb {
+            remote_path,
+            default_output_dir,
+            ..
+        } => {
+            let output_dir =
+                resolve_screen_record_output_dir(output_dir, &default_output_dir, trace_id)?;
+            let filename = PathBuf::from(&remote_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("screenrecord_{}.mp4", serial));
+            let local_path = PathBuf::from(&output_dir).join(filename);
+            pull_screen_record_file(adb_program, serial, &remote_path, &local_path, trace_id)?;
+            Ok(ScreenRecordStopResult {
+                serial: serial.to_string(),
+                backend: ScreenRecordBackend::Adb,
+                output_path: local_path.to_string_lossy().to_string(),
+                output_paths: vec![local_path.to_string_lossy().to_string()],
+                segment_count: 1,
+            })
+        }
+        RecordingHandle::Scrcpy { output_path, .. } => {
+            let final_path = move_recording_file_to_output_dir(&output_path, output_dir, trace_id)?;
+            Ok(ScreenRecordStopResult {
+                serial: serial.to_string(),
+                backend: ScreenRecordBackend::Scrcpy,
+                output_path: final_path.clone(),
+                output_paths: vec![final_path],
+                segment_count: 1,
+            })
+        }
+        RecordingHandle::AdbSegmented {
+            shared,
+            default_output_dir,
+            join,
+            ..
+        } => {
+            let _ = join.join();
+            let shared = shared
+                .lock()
+                .map_err(|_| AppError::system("Recording registry locked", trace_id))?;
+            if let Some(error) = shared.error.as_ref() {
+                return Err(AppError::system(error.clone(), trace_id));
+            }
+            let output_dir =
+                resolve_screen_record_output_dir(output_dir, &default_output_dir, trace_id)?;
+            let mut output_paths = Vec::with_capacity(shared.completed_remote_paths.len());
+            for remote_path in &shared.completed_remote_paths {
+                let filename = PathBuf::from(remote_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("screenrecord_{}.mp4", serial));
+                let local_path = PathBuf::from(&output_dir).join(filename);
+                pull_screen_record_file(adb_program, serial, remote_path, &local_path, trace_id)?;
+                output_paths.push(local_path.to_string_lossy().to_string());
+            }
+            let output_path = if output_paths.len() <= 1 {
+                output_paths.first().cloned().unwrap_or_default()
+            } else {
+                output_dir
+            };
+            Ok(ScreenRecordStopResult {
+                serial: serial.to_string(),
+                backend: ScreenRecordBackend::AdbSegmented,
+                output_path,
+                output_paths,
+                segment_count: shared.completed_remote_paths.len(),
+            })
+        }
+    }
+}
+
+fn stop_recording_handle(
+    serial: &str,
+    adb_program: &str,
+    handle: RecordingHandle,
+    output_dir: Option<String>,
+    trace_id: &str,
+) -> Result<ScreenRecordStopResult, AppError> {
+    match handle {
+        RecordingHandle::Adb {
+            mut child,
+            remote_path,
+            default_output_dir,
+        } => {
+            send_remote_screenrecord_sigint(adb_program, serial);
+            wait_for_child_exit(&mut child, Duration::from_secs(5), "screenrecord", trace_id)?;
+            finalize_recording_handle(
+                serial,
+                adb_program,
+                RecordingHandle::Adb {
+                    child,
+                    remote_path,
+                    default_output_dir,
+                },
+                output_dir,
+                trace_id,
+            )
+        }
+        RecordingHandle::Scrcpy {
+            mut child,
+            output_path,
+        } => {
+            interrupt_local_child(&mut child);
+            wait_for_child_exit(&mut child, Duration::from_secs(5), "scrcpy", trace_id)?;
+            finalize_recording_handle(
+                serial,
+                adb_program,
+                RecordingHandle::Scrcpy { child, output_path },
+                output_dir,
+                trace_id,
+            )
+        }
+        RecordingHandle::AdbSegmented {
+            stop_flag,
+            shared,
+            join,
+            default_output_dir,
+        } => {
+            stop_flag.store(true, Ordering::Relaxed);
+            send_remote_screenrecord_sigint(adb_program, serial);
+            finalize_recording_handle(
+                serial,
+                adb_program,
+                RecordingHandle::AdbSegmented {
+                    stop_flag,
+                    shared,
+                    join,
+                    default_output_dir,
+                },
+                output_dir,
+                trace_id,
+            )
+        }
+    }
+}
+
+fn stop_result_to_status(result: &ScreenRecordStopResult) -> ScreenRecordStatus {
+    ScreenRecordStatus {
+        serial: result.serial.clone(),
+        running: false,
+        backend: result.backend,
+        display_path: if result.output_path.is_empty() {
+            result.output_paths.first().cloned().unwrap_or_default()
+        } else {
+            result.output_path.clone()
+        },
+        segment_count: result.segment_count,
+    }
+}
+
+fn spawn_segmented_recording_thread(
+    adb_program: String,
+    serial: String,
+    settings: crate::app::config::ScreenRecordSettings,
+    timestamp: String,
+    trace_id: String,
+    shared: Arc<std::sync::Mutex<SegmentedRecordingShared>>,
+    stop_flag: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut remaining = if settings.time_limit_sec > 0 {
+            Some(settings.time_limit_sec as u32)
+        } else {
+            None
+        };
+        let mut segment_index = 0usize;
+
+        loop {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let time_limit_sec = remaining
+                .map(|value| value.min(MAX_ADB_SCREEN_RECORD_TIME_LIMIT_SEC))
+                .unwrap_or(MAX_ADB_SCREEN_RECORD_TIME_LIMIT_SEC);
+            let remote_path = build_remote_recording_path(&serial, &timestamp, Some(segment_index));
+            if let Ok(mut guard) = shared.lock() {
+                guard.current_remote_path = Some(remote_path.clone());
+            }
+            let args = build_adb_screen_record_args(
+                &serial,
+                &settings,
+                &remote_path,
+                Some(time_limit_sec),
+            );
+            let mut child = match Command::new(&adb_program)
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(err) => {
+                    if let Ok(mut guard) = shared.lock() {
+                        guard.error = Some(format!("Failed to start screenrecord: {err}"));
+                        guard.completed = true;
+                        guard.current_remote_path = None;
+                    }
+                    return;
+                }
+            };
+
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if !status.success() && !stop_flag.load(Ordering::Relaxed) {
+                            if let Ok(mut guard) = shared.lock() {
+                                guard.error =
+                                    Some("Segmented screenrecord exited unexpectedly.".to_string());
+                            }
+                        }
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(err) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        if let Ok(mut guard) = shared.lock() {
+                            guard.error =
+                                Some(format!("Failed to inspect screenrecord process: {err}"));
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if let Ok(mut guard) = shared.lock() {
+                guard.current_remote_path = None;
+                guard.completed_remote_paths.push(remote_path);
+            }
+
+            if let Some(remaining_secs) = remaining.as_mut() {
+                if *remaining_secs <= time_limit_sec {
+                    break;
+                }
+                *remaining_secs -= time_limit_sec;
+            }
+            segment_index += 1;
+        }
+
+        if let Ok(mut guard) = shared.lock() {
+            guard.completed = true;
+            guard.current_remote_path = None;
+        }
+
+        info!(
+            trace_id = %trace_id,
+            serial = %serial,
+            "segmented screenrecord thread finished"
+        );
+    })
+}
+
 #[tauri::command(async)]
 pub fn start_screen_record(
     serial: String,
     state: State<'_, AppState>,
     trace_id: Option<String>,
-) -> Result<CommandResponse<String>, AppError> {
+) -> Result<CommandResponse<ScreenRecordStartResult>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
@@ -3452,72 +3915,173 @@ pub fn start_screen_record(
     }
 
     let config = load_config(&trace_id)?;
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let remote_path = format!("/sdcard/screenrecord_{}_{}.mp4", serial, timestamp);
-
-    let mut args = vec![
-        "-s".to_string(),
-        serial.clone(),
-        "shell".to_string(),
-        "screenrecord".to_string(),
-    ];
-    if !config.screen_record.bit_rate.trim().is_empty() {
-        args.push("--bit-rate".to_string());
-        args.push(config.screen_record.bit_rate.trim().to_string());
-    }
-    if config.screen_record.time_limit_sec > 0 {
-        args.push("--time-limit".to_string());
-        args.push(config.screen_record.time_limit_sec.to_string());
-    }
-    if !config.screen_record.size.trim().is_empty() {
-        args.push("--size".to_string());
-        args.push(config.screen_record.size.trim().to_string());
-    }
-    if config.screen_record.use_hevc {
-        args.push("--codec".to_string());
-        args.push("hevc".to_string());
-    }
-    if config.screen_record.bugreport {
-        args.push("--bugreport".to_string());
-    }
-    if config.screen_record.verbose {
-        args.push("--verbose".to_string());
-    }
-    if config.screen_record.display_id >= 0 {
-        args.push("--display-id".to_string());
-        args.push(config.screen_record.display_id.to_string());
-    }
-    if !config.screen_record.extra_args.trim().is_empty() {
-        args.extend(
-            config
-                .screen_record
-                .extra_args
-                .split_whitespace()
-                .map(|item| item.to_string()),
-        );
-    }
-    args.push(remote_path.clone());
-
-    let child = Command::new(&adb_program)
-        .args(&args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            AppError::dependency(format!("Failed to start screenrecord: {err}"), &trace_id)
-        })?;
-
-    guard.insert(
-        serial,
-        RecordingHandle {
-            child,
-            remote_path: remote_path.clone(),
-        },
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let backend = select_screen_record_backend(
+        config.screen_record.time_limit_sec,
+        check_scrcpy_availability().available,
     );
+    let default_output_dir = config.output_path.clone();
+
+    let (handle, display_path) = match backend {
+        ScreenRecordBackend::Adb => {
+            let remote_path = build_remote_recording_path(&serial, &timestamp, None);
+            let args =
+                build_adb_screen_record_args(&serial, &config.screen_record, &remote_path, None);
+            let child = Command::new(&adb_program)
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|err| {
+                    AppError::dependency(format!("Failed to start screenrecord: {err}"), &trace_id)
+                })?;
+            (
+                RecordingHandle::Adb {
+                    child,
+                    remote_path: remote_path.clone(),
+                    default_output_dir,
+                },
+                remote_path,
+            )
+        }
+        ScreenRecordBackend::Scrcpy => {
+            let availability = check_scrcpy_availability();
+            if !availability.available {
+                return Err(AppError::dependency("scrcpy is not available", &trace_id));
+            }
+            let output_dir = resolve_screen_record_output_dir(
+                Some(config.output_path.clone()),
+                &config.output_path,
+                &trace_id,
+            )?;
+            let output_path = build_local_recording_path(
+                Path::new(&output_dir),
+                &serial,
+                &timestamp,
+                None,
+                "mp4",
+            );
+            let mut args = build_scrcpy_record_command(
+                &serial,
+                &config.scrcpy,
+                &config.screen_record,
+                availability.major_version,
+                &output_path.to_string_lossy(),
+                config.screen_record.time_limit_sec,
+            );
+            if !availability.command_path.trim().is_empty() {
+                args[0] = availability.command_path;
+            }
+            let mut iter = args.into_iter();
+            let command_path = iter.next().unwrap_or_else(|| "scrcpy".to_string());
+            let child = Command::new(command_path)
+                .args(iter)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|err| {
+                    AppError::dependency(
+                        format!("Failed to start scrcpy recording: {err}"),
+                        &trace_id,
+                    )
+                })?;
+            let output_path = output_path.to_string_lossy().to_string();
+            (
+                RecordingHandle::Scrcpy {
+                    child,
+                    output_path: output_path.clone(),
+                },
+                output_path,
+            )
+        }
+        ScreenRecordBackend::AdbSegmented => {
+            let shared = Arc::new(std::sync::Mutex::new(SegmentedRecordingShared {
+                current_remote_path: None,
+                completed_remote_paths: Vec::new(),
+                completed: false,
+                error: None,
+            }));
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let join = spawn_segmented_recording_thread(
+                adb_program.clone(),
+                serial.clone(),
+                config.screen_record.clone(),
+                timestamp.clone(),
+                trace_id.clone(),
+                Arc::clone(&shared),
+                Arc::clone(&stop_flag),
+            );
+            let display_path = build_remote_recording_path(&serial, &timestamp, Some(0));
+            (
+                RecordingHandle::AdbSegmented {
+                    stop_flag,
+                    shared,
+                    join,
+                    default_output_dir,
+                },
+                display_path,
+            )
+        }
+    };
+
+    guard.insert(serial.clone(), handle);
 
     Ok(CommandResponse {
         trace_id,
-        data: remote_path,
+        data: ScreenRecordStartResult {
+            serial,
+            backend,
+            display_path,
+        },
+    })
+}
+
+#[tauri::command(async)]
+pub fn get_screen_record_status(
+    serial: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<ScreenRecordStatus>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&serial, "serial", &trace_id)?;
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let finished_handle = {
+        let mut guard = state
+            .recording_processes
+            .lock()
+            .map_err(|_| AppError::system("Recording registry locked", &trace_id))?;
+        let should_finalize = match guard.get_mut(&serial) {
+            Some(handle) => recording_handle_is_finished(handle, &trace_id)?,
+            None => false,
+        };
+        if should_finalize {
+            guard.remove(&serial)
+        } else {
+            None
+        }
+    };
+
+    if let Some(handle) = finished_handle {
+        let result = finalize_recording_handle(&serial, &adb_program, handle, None, &trace_id)?;
+        return Ok(CommandResponse {
+            trace_id,
+            data: stop_result_to_status(&result),
+        });
+    }
+
+    let guard = state
+        .recording_processes
+        .lock()
+        .map_err(|_| AppError::system("Recording registry locked", &trace_id))?;
+    let status = match guard.get(&serial) {
+        Some(handle) => build_running_screen_record_status(&serial, handle, &trace_id)?,
+        None => build_idle_screen_record_status(serial),
+    };
+
+    Ok(CommandResponse {
+        trace_id,
+        data: status,
     })
 }
 
@@ -3527,7 +4091,7 @@ pub fn stop_screen_record(
     output_dir: Option<String>,
     state: State<'_, AppState>,
     trace_id: Option<String>,
-) -> Result<CommandResponse<String>, AppError> {
+) -> Result<CommandResponse<ScreenRecordStopResult>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
@@ -3541,76 +4105,13 @@ pub fn stop_screen_record(
         Some(handle) => handle,
         None => return Err(AppError::validation("No recording in progress", &trace_id)),
     };
-    let mut child = handle.child;
+    drop(guard);
 
-    let _ = Command::new(&adb_program)
-        .args(["-s", &serial, "shell", "pkill", "-SIGINT", "screenrecord"])
-        .output();
-
-    let timeout = Duration::from_secs(5);
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(AppError::system(
-                        "Timeout waiting for screenrecord",
-                        &trace_id,
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(err) => {
-                return Err(AppError::system(
-                    format!("Failed to stop screenrecord: {err}"),
-                    &trace_id,
-                ));
-            }
-        }
-    }
-
-    let config = load_config(&trace_id)?;
-    let output_dir = output_dir
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| config.output_path.clone());
-    if output_dir.trim().is_empty() {
-        return Ok(CommandResponse {
-            trace_id,
-            data: String::new(),
-        });
-    }
-
-    fs::create_dir_all(&output_dir).map_err(|err| {
-        AppError::system(format!("Failed to create output dir: {err}"), &trace_id)
-    })?;
-
-    let filename = PathBuf::from(&handle.remote_path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("screenrecord_{}.mp4", serial));
-    let local_path = PathBuf::from(&output_dir).join(filename);
-
-    let args = vec![
-        "-s".to_string(),
-        serial.clone(),
-        "pull".to_string(),
-        handle.remote_path.clone(),
-        local_path.to_string_lossy().to_string(),
-    ];
-    let output = run_adb(&adb_program, &args, &trace_id)?;
-    if output.exit_code.unwrap_or_default() != 0 {
-        return Err(AppError::dependency(
-            format!("Pull failed: {}", output.stderr),
-            &trace_id,
-        ));
-    }
+    let result = stop_recording_handle(&serial, &adb_program, handle, output_dir, &trace_id)?;
 
     Ok(CommandResponse {
         trace_id,
-        data: local_path.to_string_lossy().to_string(),
+        data: result,
     })
 }
 
