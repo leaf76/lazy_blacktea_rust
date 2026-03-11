@@ -181,7 +181,7 @@ Checks:
 - Install retry path: if install hits a transient missing-artifact condition, it retries once automatically and then lands in the same publishing-pending state (no raw internal error text).
 - Permission failure path: when install cannot replace the app binary (for example, non-writable location), the message instructs moving the app to `Applications`.
 - Retry path: after an error, running `Install and restart` again is still possible and behaves consistently.
-- Release verification path: while release automation is still running, the GitHub release should remain a prerelease and should not become the latest stable release until `.dmg`, `.AppImage`, `.deb`, and signed `latest.json` are uploaded.
+- Release verification path: after pushing a `vX.Y.Z` tag, the GitHub release should be auto-created as a prerelease while automation runs, and it should not become the latest stable release until `.dmg`, `.AppImage`, `.deb`, and signed `latest.json` are uploaded.
 
 ### Bugreport / UI Inspector (if used)
 - Bugreport generation progress updates and completes.

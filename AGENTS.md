@@ -337,9 +337,9 @@ When the user asks to release a new version, use this exact sequence unless expl
    - `git push origin master`
    - `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
    - `git push origin vX.Y.Z`
-4. Create GitHub release as a prerelease (required to trigger installer build workflow without exposing incomplete updater assets as latest):
-   - `gh release create vX.Y.Z --title "vX.Y.Z" --generate-notes --prerelease`
-   - If you need custom notes, replace `--generate-notes` with `--notes-file <path>`.
+4. Let the tag-driven release workflow create/update the GitHub release automatically.
+   - No manual `gh release create ...` step is required for the standard flow.
+   - If you need custom notes, edit the generated GitHub release after the workflow creates it.
 5. Verify release assets include installers:
    - macOS: `.dmg`
    - Linux: `.AppImage` and `.deb`
@@ -349,7 +349,8 @@ When the user asks to release a new version, use this exact sequence unless expl
    - Recovery: rerun failed jobs via `gh run rerun <run_id> --failed`, then re-check assets.
 
 Notes:
-- `release.yml` is triggered by `release: published`, not by tag push alone.
+- `release.yml` is triggered by pushing a `v*` tag.
+- The workflow creates the GitHub release automatically if it does not already exist for that tag.
 - The workflow marks the release as `prerelease` while artifacts upload, then promotes it to latest stable only after installers and signed-updater `latest.json` are ready.
 - Keep retries bounded; do not loop indefinitely. Report final run URL and current asset list to the user.
 

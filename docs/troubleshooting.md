@@ -66,3 +66,5 @@ Recent workflow change added in this repo verifies artifact presence before uplo
 - `Upload latest.json to GitHub Release` (with retry + `--clobber`)
 
 It also marks the release as a prerelease while assets publish and promotes it to latest stable only after required assets are present, including `latest.json` for signed updater builds. If promotion does not happen, inspect the `Verify release assets are ready` or `Promote release to latest stable` steps first.
+
+Release creation is tag-driven: pushing `vX.Y.Z` starts `release.yml`, and the workflow creates or reuses the GitHub release for that tag before uploading assets.

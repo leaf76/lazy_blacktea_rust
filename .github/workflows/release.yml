@@ -1,8 +1,9 @@
 name: Release (macOS, Linux)
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -12,23 +13,33 @@ permissions:
   contents: write
 
 jobs:
-  mark-release-prerelease:
+  ensure-release:
     runs-on: ubuntu-24.04
     steps:
-      - name: Mark release as prerelease while assets publish
+      - name: Ensure release exists and stays prerelease while assets publish
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          RELEASE_ID: ${{ github.event.release.id }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
-            -F prerelease=true \
-            -F make_latest=false \
-            --silent
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            RELEASE_ID="$(gh release view "${TAG}" --repo "${REPO}" --json id --jq '.id')"
+            gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
+              -F prerelease=true \
+              -F make_latest=false \
+              --silent
+          else
+            gh release create "${TAG}" \
+              --repo "${REPO}" \
+              --title "${TAG}" \
+              --generate-notes \
+              --prerelease \
+              --verify-tag
+          fi
 
   build-and-upload:
-    needs: mark-release-prerelease
+    needs: ensure-release
     strategy:
       fail-fast: false
       matrix:
@@ -49,7 +60,7 @@ jobs:
       - name: Checkout tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.ref_name }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -374,7 +385,7 @@ jobs:
             files+=("$path")
           done < updater_upload_files.m0
           for attempt in 1 2 3; do
-            if gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber; then
+            if gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -397,7 +408,7 @@ jobs:
             files+=("$path")
           done < release_upload_files.m0
           for attempt in 1 2 3; do
-            if gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber; then
+            if gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -426,7 +437,7 @@ jobs:
             exit 1
           fi
           for attempt in 1 2 3; do
-            if gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber; then
+            if gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -453,12 +464,12 @@ jobs:
       - name: Build latest.json
         if: ${{ env.HAS_SIGNING_KEY == 'true' }}
         env:
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
-          RELEASE_BODY: ${{ github.event.release.body }}
-          PUB_DATE: ${{ github.event.release.published_at }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          gh release view "${TAG}" --repo "${REPO}" --json body,publishedAt > release-meta.json
           python3 - <<'PY'
           import json
           import os
@@ -466,8 +477,10 @@ jobs:
 
           repo = os.environ["REPO"]
           tag = os.environ["TAG"]
-          body = os.environ.get("RELEASE_BODY", "") or ""
-          pub_date = os.environ.get("PUB_DATE", "") or ""
+          with open("release-meta.json", "r", encoding="utf-8") as fh:
+            release = json.load(fh)
+          body = release.get("body", "") or ""
+          pub_date = release.get("publishedAt", "") or ""
           version = tag[1:] if tag.startswith("v") else tag
 
           base = f"https://github.com/{repo}/releases/download/{tag}"
@@ -515,7 +528,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if gh release upload "${{ github.event.release.tag_name }}" latest.json --clobber --repo "${{ github.repository }}"; then
+            if gh release upload "${{ github.ref_name }}" latest.json --clobber --repo "${{ github.repository }}"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -537,7 +550,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           gh release view "${TAG}" --repo "${REPO}" --json assets > release-assets.json
@@ -572,9 +585,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          RELEASE_ID: ${{ github.event.release.id }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          RELEASE_ID="$(gh release view "${TAG}" --repo "${REPO}" --json id --jq '.id')"
           gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
             -F prerelease=false \
             -F make_latest=true \
