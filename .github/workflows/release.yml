@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
-            RELEASE_ID="$(gh release view "${TAG}" --repo "${REPO}" --json id --jq '.id')"
+            RELEASE_ID="$(gh release view "${TAG}" --repo "${REPO}" --json databaseId --jq '.databaseId')"
             gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
               -F prerelease=true \
               -F make_latest=false \
@@ -588,7 +588,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          RELEASE_ID="$(gh release view "${TAG}" --repo "${REPO}" --json id --jq '.id')"
+          RELEASE_ID="$(gh release view "${TAG}" --repo "${REPO}" --json databaseId --jq '.databaseId')"
           gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
             -F prerelease=false \
             -F make_latest=true \
