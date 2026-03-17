@@ -67,6 +67,10 @@ if "%~1"=="exec-out" if "%~2"=="uiautomator" (
     type "%FAKE_ADB_UI_XML_TRUNCATED%"
     exit /b 0
   )
+  if "%FAKE_ADB_XML_MODE%"=="exec_fail_download_only" (
+    echo exec dump failed 1>&2
+    exit /b 1
+  )
   if "%FAKE_ADB_XML_MODE%"=="exec_fail_pull_ok" (
     echo exec dump failed 1>&2
     exit /b 1
@@ -113,6 +117,15 @@ if "%~1"=="shell" if "%~2"=="uiautomator" (
     echo dump should not pull 1>&2
     exit /b 1
   )
+  if "%FAKE_ADB_XML_MODE%"=="exec_fail_download_only" (
+    echo "%~4" | findstr /B /C:"/sdcard/Download/" >nul
+    if errorlevel 1 (
+      echo dump path blocked 1>&2
+      exit /b 1
+    )
+    copy /Y "%FAKE_ADB_UI_XML_VALID%" "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" >nul
+    exit /b 0
+  )
   if "%FAKE_ADB_XML_MODE%"=="exec_fail_pull_ok" (
     echo dump failed 1>&2
     exit /b 1
@@ -154,7 +167,7 @@ if [ "${1:-}" = "exec-out" ] && [ "${2:-}" = "uiautomator" ]; then
     exec_truncated_pull_ok|all_fail)
       cat "$FAKE_ADB_UI_XML_TRUNCATED"
       ;;
-    exec_fail_pull_ok)
+    exec_fail_download_only|exec_fail_pull_ok)
       echo "exec dump failed" >&2
       exit 1
       ;;
@@ -200,6 +213,18 @@ if [ "${1:-}" = "shell" ] && [ "${2:-}" = "uiautomator" ]; then
     exec_ok_pull_fail)
       echo "dump should not pull" >&2
       exit 1
+      ;;
+    exec_fail_download_only)
+      case "${4:-}" in
+        /sdcard/Download/*)
+          cp "$FAKE_ADB_UI_XML_VALID" "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${4:-}")"
+          exit 0
+          ;;
+        *)
+          echo "dump path blocked" >&2
+          exit 1
+          ;;
+      esac
       ;;
     exec_fail_pull_ok|all_fail)
       echo "dump failed" >&2
@@ -1243,6 +1268,29 @@ fn capture_ui_hierarchy_falls_back_to_pull_when_exec_out_xml_is_invalid() {
     let response = capture_ui_hierarchy(
         "SERIAL-5".to_string(),
         Some("trace-ui-capture-pull-fallback".to_string()),
+    )
+    .expect("capture ui hierarchy");
+
+    crate::app::ui_capture::validate_ui_dump_xml(&response.data.xml).expect("valid xml");
+    assert!(response.data.xml.contains("<hierarchy"));
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn capture_ui_hierarchy_uses_download_path_for_pull_fallback() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    setup_fake_adb(
+        &tmp,
+        "exec_ok_pull_fail",
+        "exec_fail_download_only",
+        "trace-ui-capture-download-fallback",
+    );
+
+    let response = capture_ui_hierarchy(
+        "SERIAL-5A".to_string(),
+        Some("trace-ui-capture-download-fallback".to_string()),
     )
     .expect("capture ui hierarchy");
 

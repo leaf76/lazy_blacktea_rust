@@ -94,6 +94,27 @@ describe("buildIssuePrefillPayload", () => {
 
     expect(payload.logs.length).toBeLessThanOrEqual(4000);
   });
+
+  it("supports error records that use source names as task kind", () => {
+    const payload = buildIssuePrefillPayload({
+      taskTitle: "UI Inspector Capture",
+      taskKind: "ui_inspector.capture",
+      serial: "",
+      traceId: "trace-error-1",
+      message: "Capture failed",
+      code: "ERR_DEPENDENCY",
+      exitCode: null,
+      outputPath: null,
+      diagnosticsPath: null,
+      diagnosticsError: null,
+      appVersion: "0.0.69",
+      osPlatform: "MacIntel",
+      adbVersion: "Android Debug Bridge version 1.0.41",
+    });
+
+    expect(payload.actual).toContain("ui_inspector.capture");
+    expect(payload.logs).toContain("trace_id: trace-error-1");
+  });
 });
 
 describe("buildGithubBugIssueUrl", () => {

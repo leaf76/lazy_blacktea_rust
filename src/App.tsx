@@ -190,6 +190,18 @@ import {
   type TaskStatus,
 } from "./tasks";
 import {
+  APP_ERROR_RECORDED_EVENT,
+  ERROR_RECORDS_STORAGE_KEY,
+  createInitialErrorState,
+  errorRecordsReducer,
+  inflateStoredErrorState,
+  normalizeStructuredError,
+  parseStoredErrorState,
+  recordExternalAppError,
+  sanitizeErrorStateForStorage,
+  type ErrorRecord,
+} from "./errorRecords";
+import {
   buildDesktopNotificationForTask,
   buildTaskCompletionNotice,
   detectNewlyCompletedTasks,
@@ -1937,6 +1949,9 @@ function App() {
   const [uiAutoSyncIntervalMs, setUiAutoSyncIntervalMs] = useState(1000);
   const [uiAutoSyncError, setUiAutoSyncError] = useState("");
   const [uiAutoSyncLastAt, setUiAutoSyncLastAt] = useState<number | null>(null);
+  const uiAutoSyncTaskIdRef = useRef<string | null>(null);
+  const uiAutoSyncHadSuccessRef = useRef(false);
+  const uiAutoSyncLastErrorRef = useRef<string | null>(null);
 
   useEffect(() => {
     localStorage.setItem("lazy_blacktea_ui_inspector_zoom_v2", String(uiZoom));
@@ -2074,11 +2089,20 @@ function App() {
   const [rebootConfirmOpen, setRebootConfirmOpen] = useState(false);
   const [rebootConfirmMode, setRebootConfirmMode] = useState<RebootMode>("normal");
   const [taskState, dispatchTasks] = useReducer(tasksReducer, undefined, () => createInitialTaskState(50));
+  const [errorState, dispatchErrors] = useReducer(
+    errorRecordsReducer,
+    undefined,
+    () => createInitialErrorState(),
+  );
   const [githubReportPendingByKey, setGithubReportPendingByKey] = useState<Record<string, boolean>>({});
   const taskStateRef = useRef(taskState);
+  const errorStateRef = useRef(errorState);
   useEffect(() => {
     taskStateRef.current = taskState;
   }, [taskState]);
+  useEffect(() => {
+    errorStateRef.current = errorState;
+  }, [errorState]);
   const [logcatMatchIndex, setLogcatMatchIndex] = useState(0);
   const logcatOutputRef = useRef<HTMLDivElement>(null);
   const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
@@ -2160,6 +2184,7 @@ function App() {
   const bugreportPopupContext = useMemo(() => parseBugreportPopupContext(location.search), [location.search]);
   const isBugreportPopupSession = bugreportPopupContext.isPopup && !isLogcatPopupWindow;
   const bugreportPopupSourcePath = bugreportPopupContext.sourcePath;
+  const currentRoute = `${location.pathname}${location.search}`;
   const isBugreportLogViewer = location.pathname === "/bugreport-logviewer";
   const isDetachedPopupWindow = isLogcatPopupWindow || isBugreportPopupSession;
   const isLogcatView = location.pathname === "/logcat";
@@ -2167,6 +2192,48 @@ function App() {
   const isNetworkView = location.pathname === "/network";
   const isUiInspectorView = location.pathname === "/ui-inspector";
   const isDeveloperOptionsView = location.pathname === "/developer-options";
+  useEffect(() => {
+    const handleRecordedError = (event: Event) => {
+      const detail = (event as CustomEvent<ErrorRecord>).detail;
+      if (!detail?.id) {
+        return;
+      }
+      dispatchErrors({ type: "ERROR_ADD", record: detail });
+    };
+
+    window.addEventListener(APP_ERROR_RECORDED_EVENT, handleRecordedError as EventListener);
+    return () => {
+      window.removeEventListener(APP_ERROR_RECORDED_EVENT, handleRecordedError as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleWindowError = (event: ErrorEvent) => {
+      recordExternalAppError({
+        title: "Unhandled Window Error",
+        source: "frontend.onerror",
+        error: event.error ?? event.message,
+        route: currentRoute,
+      });
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      recordExternalAppError({
+        title: "Unhandled Promise Rejection",
+        source: "frontend.unhandledrejection",
+        error: event.reason,
+        route: currentRoute,
+      });
+    };
+
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, [currentRoute]);
+
   useEffect(() => {
     if (!isBugreportLogViewer) {
       setBugreportLogAdvancedOpen(false);
@@ -2895,6 +2962,32 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const load = () => {
+      try {
+        const raw = localStorage.getItem(ERROR_RECORDS_STORAGE_KEY);
+        if (!raw) {
+          return;
+        }
+        if (raw.length > 800_000) {
+          console.warn("Task Center error storage is too large; skipping load.");
+          localStorage.removeItem(ERROR_RECORDS_STORAGE_KEY);
+          return;
+        }
+        const parsed = parseStoredErrorState(raw);
+        if (!parsed) {
+          return;
+        }
+        const inflated = inflateStoredErrorState(parsed);
+        dispatchErrors({ type: "ERROR_SET_ALL", items: inflated.items, max_items: inflated.max_items });
+      } catch (error) {
+        console.warn("Failed to load Task Center error state from storage.", error);
+      }
+    };
+    const handle = window.setTimeout(load, 0);
+    return () => window.clearTimeout(handle);
+  }, []);
+
+  useEffect(() => {
     const key = APK_INSTALLER_STORAGE_KEY;
     const load = () => {
       try {
@@ -2957,6 +3050,43 @@ function App() {
       }
     };
     // Ensure we don't lose running task state if the app is reloaded/closed before the debounce fires.
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, []);
+
+  const errorPersistTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (errorPersistTimerRef.current != null) {
+      window.clearTimeout(errorPersistTimerRef.current);
+    }
+    errorPersistTimerRef.current = window.setTimeout(() => {
+      try {
+        const stored = sanitizeErrorStateForStorage(errorState);
+        localStorage.setItem(ERROR_RECORDS_STORAGE_KEY, JSON.stringify(stored));
+      } catch (error) {
+        console.warn("Failed to persist Task Center error state to storage.", error);
+      }
+    }, 1200);
+    return () => {
+      if (errorPersistTimerRef.current != null) {
+        window.clearTimeout(errorPersistTimerRef.current);
+      }
+    };
+  }, [errorState]);
+
+  useEffect(() => {
+    const flush = () => {
+      try {
+        const stored = sanitizeErrorStateForStorage(errorStateRef.current);
+        localStorage.setItem(ERROR_RECORDS_STORAGE_KEY, JSON.stringify(stored));
+      } catch (error) {
+        console.warn("Failed to persist Task Center error state to storage.", error);
+      }
+    };
     window.addEventListener("beforeunload", flush);
     window.addEventListener("pagehide", flush);
     return () => {
@@ -3270,25 +3400,68 @@ function App() {
     const intervalMs = Math.max(250, uiAutoSyncIntervalMs);
     const token = uiAutoSyncTokenRef.current + 1;
     uiAutoSyncTokenRef.current = token;
+    const taskId = beginUiAutoSyncTask(serial);
     let stopped = false;
 
     const runOnce = async () => {
       try {
-        const response = await captureUiHierarchy(serial);
+        const response = await captureUiHierarchy(serial, { recordError: false });
         if (stopped || uiAutoSyncTokenRef.current !== token) {
           return;
+        }
+        const syncedAt = Date.now();
+        if (response.trace_id) {
+          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
         }
         setUiHtml(response.data.html);
         setUiXml(response.data.xml);
         setUiScreenshotDataUrl(response.data.screenshot_data_url ?? "");
         setUiScreenshotError(response.data.screenshot_error ?? "");
+        setUiAutoSyncLastAt(syncedAt);
+        uiAutoSyncHadSuccessRef.current = true;
+
+        const screenshotIssue = response.data.screenshot_error?.trim() ?? "";
+        if (screenshotIssue) {
+          const message = `Last error: Screenshot unavailable: ${screenshotIssue}`;
+          setUiAutoSyncError(`Screenshot unavailable: ${screenshotIssue}`);
+          uiAutoSyncLastErrorRef.current = message;
+          dispatchTasks({
+            type: "TASK_UPDATE_DEVICE",
+            id: taskId,
+            serial,
+            patch: { status: "running", message },
+          });
+          return;
+        }
+
         setUiAutoSyncError("");
-        setUiAutoSyncLastAt(Date.now());
+        uiAutoSyncLastErrorRef.current = null;
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: {
+            status: "running",
+            message: `Last sync ${new Date(syncedAt).toLocaleTimeString()}`,
+          },
+        });
       } catch (error) {
         if (stopped || uiAutoSyncTokenRef.current !== token) {
           return;
         }
+        const structured = normalizeStructuredError(error);
+        const message = `Last error: ${formatError(error)}`;
+        if (structured.trace_id) {
+          dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: structured.trace_id });
+        }
         setUiAutoSyncError(formatError(error));
+        uiAutoSyncLastErrorRef.current = message;
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: { status: "running", message },
+        });
       }
     };
 
@@ -3305,6 +3478,7 @@ function App() {
     return () => {
       stopped = true;
       uiAutoSyncTokenRef.current = token + 1;
+      finishUiAutoSyncTask(serial);
     };
   }, [activeSerial, isUiInspectorView, uiAutoSyncEnabled, uiAutoSyncIntervalMs]);
 
@@ -3623,6 +3797,7 @@ function App() {
   }, [pushToast]);
 
   const buildGithubReportKey = (taskId: string, serial: string) => `${taskId}:${serial}`;
+  const buildGithubErrorReportKey = (errorId: string) => `error:${errorId}`;
 
   const parseErrorCode = (value: string | null | undefined) => {
     if (!value) {
@@ -3632,24 +3807,49 @@ function App() {
     return match ? match[1] : null;
   };
 
+  const recordAppError = (input: {
+    title: string;
+    source: string;
+    error?: unknown;
+    message?: string | null;
+    code?: string | null;
+    trace_id?: string | null;
+    serial?: string | null;
+  }) =>
+    recordExternalAppError({
+      ...input,
+      route: currentRoute,
+    });
+
   const openIssueUrl = async (url: string) => {
     try {
       await openPath(url);
       return true;
     } catch (error) {
+      recordAppError({
+        title: "Open GitHub Issue",
+        source: "github.open_issue",
+        error,
+      });
       console.warn("Failed to open GitHub issue URL via opener plugin.", error);
     }
     const popup = window.open(url, "_blank", "noopener,noreferrer");
     return Boolean(popup);
   };
 
-  const handleReportTaskIssue = async (task: TaskItem, serial: string) => {
-    const entry = task.devices[serial];
-    if (!entry || entry.status !== "error") {
-      return;
-    }
-
-    const key = buildGithubReportKey(task.id, serial);
+  const openGithubIssueWithPrefill = async (
+    key: string,
+    input: {
+      taskTitle: string;
+      taskKind: string;
+      serial: string;
+      traceId?: string | null;
+      message?: string | null;
+      code?: string | null;
+      exitCode?: number | null;
+      outputPath?: string | null;
+    },
+  ) => {
     if (githubReportPendingByKey[key]) {
       return;
     }
@@ -3667,14 +3867,7 @@ function App() {
 
     const adbVersion = adbInfoRef.current?.version_output?.trim() || adbInfoRef.current?.error?.trim() || null;
     const issueUrl = buildGithubBugIssueUrl({
-      taskTitle: task.title,
-      taskKind: task.kind,
-      serial,
-      traceId: task.trace_id ?? null,
-      message: entry.message ?? entry.stderr ?? null,
-      code: parseErrorCode(entry.message) ?? parseErrorCode(entry.stderr),
-      exitCode: entry.exit_code ?? null,
-      outputPath: entry.output_path ?? null,
+      ...input,
       diagnosticsPath,
       diagnosticsError,
       appVersion: appVersionLabel,
@@ -3706,6 +3899,37 @@ function App() {
         return next;
       });
     }
+  };
+
+  const handleReportTaskIssue = async (task: TaskItem, serial: string) => {
+    const entry = task.devices[serial];
+    if (!entry || entry.status !== "error") {
+      return;
+    }
+
+    await openGithubIssueWithPrefill(buildGithubReportKey(task.id, serial), {
+      taskTitle: task.title,
+      taskKind: task.kind,
+      serial,
+      traceId: task.trace_id ?? null,
+      message: entry.message ?? entry.stderr ?? null,
+      code: parseErrorCode(entry.message) ?? parseErrorCode(entry.stderr),
+      exitCode: entry.exit_code ?? null,
+      outputPath: entry.output_path ?? null,
+    });
+  };
+
+  const handleReportErrorRecord = async (record: ErrorRecord) => {
+    await openGithubIssueWithPrefill(buildGithubErrorReportKey(record.id), {
+      taskTitle: record.title,
+      taskKind: record.source,
+      serial: record.serial ?? "",
+      traceId: record.trace_id ?? null,
+      message: record.message,
+      code: record.code ?? parseErrorCode(record.message),
+      exitCode: null,
+      outputPath: null,
+    });
   };
 
   const hasRunningTasksRef = useRef(false);
@@ -3841,6 +4065,53 @@ function App() {
     return id;
   };
 
+  const beginUiAutoSyncTask = (serial: string) => {
+    const existingTaskId = uiAutoSyncTaskIdRef.current;
+    if (existingTaskId) {
+      return existingTaskId;
+    }
+    const taskId = beginTask({
+      kind: "ui_inspector_auto_sync",
+      title: "UI Auto Sync",
+      serials: [serial],
+    });
+    uiAutoSyncTaskIdRef.current = taskId;
+    uiAutoSyncHadSuccessRef.current = false;
+    uiAutoSyncLastErrorRef.current = null;
+    dispatchTasks({
+      type: "TASK_UPDATE_DEVICE",
+      id: taskId,
+      serial,
+      patch: { status: "running", message: "Auto sync running..." },
+    });
+    return taskId;
+  };
+
+  const finishUiAutoSyncTask = (serial: string) => {
+    const taskId = uiAutoSyncTaskIdRef.current;
+    if (!taskId) {
+      return;
+    }
+    const finalStatus =
+      uiAutoSyncHadSuccessRef.current && !uiAutoSyncLastErrorRef.current ? "success" : "error";
+    dispatchTasks({
+      type: "TASK_UPDATE_DEVICE",
+      id: taskId,
+      serial,
+      patch: {
+        status: finalStatus,
+        message:
+          finalStatus === "success"
+            ? "Auto sync stopped."
+            : uiAutoSyncLastErrorRef.current ?? "Auto sync stopped with errors.",
+      },
+    });
+    dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: finalStatus });
+    uiAutoSyncTaskIdRef.current = null;
+    uiAutoSyncHadSuccessRef.current = false;
+    uiAutoSyncLastErrorRef.current = null;
+  };
+
   const maybeNotifyTaskCompletion = async (task: TaskItem) => {
     const settings = config?.notifications;
     if (!settings?.enabled || !settings.desktop_enabled) {
@@ -3947,7 +4218,7 @@ function App() {
   const refreshDeviceDetails = async (options: { notifyOnError?: boolean } = {}) => {
     const refreshId = ++detailRefreshSeqRef.current;
     try {
-      const response = await listDevices(true);
+      const response = await listDevices(true, { recordError: false });
       if (refreshId !== detailRefreshSeqRef.current) {
         return;
       }
@@ -4011,7 +4282,7 @@ function App() {
 
     deviceTrackingFallbackInFlightRef.current = true;
     try {
-      const response = await listDevices(false);
+      const response = await listDevices(false, { recordError: false });
       setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
       setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, response.data));
       if (configRef.current?.device.auto_refresh_enabled) {
@@ -6652,7 +6923,12 @@ function App() {
     }
     setDeveloperOptionsApplyingKey(optionKey);
     try {
-      const response = await runShell(targetSerials, quoteShellCommandForAdbSh(built.data.command), true);
+      const response = await runShell(
+        targetSerials,
+        quoteShellCommandForAdbSh(built.data.command),
+        true,
+        { recordError: false },
+      );
       dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       const resultBySerial = new Map(response.data.map((result) => [result.serial, result]));
       let successCount = 0;
@@ -7170,6 +7446,7 @@ function App() {
             apkAllowTest,
             apkExtraArgs,
             traceId,
+            { recordError: false },
           );
           dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
           const results = Object.values(response.data.results || {});
@@ -7282,7 +7559,7 @@ function App() {
       const results = await Promise.all(
         serials.map(async (serial) => {
           try {
-            const response = await generateBugreport(serial, outputDir);
+            const response = await generateBugreport(serial, outputDir, { recordError: false });
             setBugreportResult(response.data);
             return { serial, ok: true };
           } catch (error) {
@@ -7995,7 +8272,7 @@ function App() {
     async (serial: string, options: { silent?: boolean } = {}) => {
       setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: true }));
       try {
-        const response = await getLogcatStatus(serial);
+        const response = await getLogcatStatus(serial, { recordError: !options.silent });
         setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: response.data.running }));
         return response.data.running;
       } catch (error) {
@@ -8024,7 +8301,9 @@ function App() {
         return next;
       });
       try {
-        const settled = await Promise.allSettled(targets.map((serial) => getScreenRecordStatus(serial)));
+        const settled = await Promise.allSettled(
+          targets.map((serial) => getScreenRecordStatus(serial, { recordError: !options.silent })),
+        );
         const nextStatus: Record<string, ScreenRecordStatus> = {};
         let firstError: unknown = null;
         settled.forEach((result, index) => {
@@ -9346,7 +9625,9 @@ function App() {
         dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
         fileTransferTaskByTraceIdRef.current[traceId] = taskId;
         try {
-          const response = await pullDeviceFile(serial, entry.path, outputDir, traceId);
+          const response = await pullDeviceFile(serial, entry.path, outputDir, traceId, {
+            recordError: false,
+          });
           dispatchTasks({
             type: "TASK_UPDATE_DEVICE",
             id: taskId,
@@ -9398,7 +9679,7 @@ function App() {
     });
     setBusy(true);
     try {
-      const response = await mkdirDeviceDir(serial, targetDir);
+      const response = await mkdirDeviceDir(serial, targetDir, undefined, { recordError: false });
       dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
@@ -9447,7 +9728,7 @@ function App() {
     });
     setBusy(true);
     try {
-      const response = await renameDevicePath(serial, fromPath, toPath);
+      const response = await renameDevicePath(serial, fromPath, toPath, undefined, { recordError: false });
       dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
@@ -9496,7 +9777,9 @@ function App() {
     });
     setBusy(true);
     try {
-      const response = await deleteDevicePath(serial, filesModal.entry.path, filesModal.recursive);
+      const response = await deleteDevicePath(serial, filesModal.entry.path, filesModal.recursive, undefined, {
+        recordError: false,
+      });
       dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
@@ -9549,7 +9832,9 @@ function App() {
           serials: [serial],
         });
         try {
-          const response = await deleteDevicePath(serial, entry.path, filesModal.recursive);
+          const response = await deleteDevicePath(serial, entry.path, filesModal.recursive, undefined, {
+            recordError: false,
+          });
           dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
           dispatchTasks({
             type: "TASK_UPDATE_DEVICE",
@@ -9607,7 +9892,9 @@ function App() {
     fileTransferTaskByTraceIdRef.current[traceId] = taskId;
     setBusy(true);
     try {
-      const response = await pushDeviceFile(serial, selected, remotePath, traceId);
+      const response = await pushDeviceFile(serial, selected, remotePath, traceId, {
+        recordError: false,
+      });
       dispatchTasks({
         type: "TASK_UPDATE_DEVICE",
         id: taskId,
@@ -9703,7 +9990,9 @@ function App() {
               dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
               fileTransferTaskByTraceIdRef.current[traceId] = taskId;
               try {
-                const response = await pushDeviceFile(filesCtx.serial, path, remotePath, traceId);
+                const response = await pushDeviceFile(filesCtx.serial, path, remotePath, traceId, {
+                  recordError: false,
+                });
                 dispatchTasks({
                   type: "TASK_UPDATE_DEVICE",
                   id: taskId,
@@ -9789,7 +10078,9 @@ function App() {
 		    fileTransferTaskByTraceIdRef.current[traceId] = taskId;
 		    setBusy(true);
 		    try {
-		      const response = await pullDeviceFile(serial, entry.path, outputDir, traceId);
+		      const response = await pullDeviceFile(serial, entry.path, outputDir, traceId, {
+		        recordError: false,
+		      });
 		      dispatchTasks({
 		        type: "TASK_UPDATE_DEVICE",
 		        id: taskId,
@@ -9862,7 +10153,9 @@ function App() {
         fileTransferTaskByTraceIdRef.current[traceId] = taskId;
         setBusy(true);
         try {
-          const response = await pullDeviceFile(serial, entry.path, outputDir, traceId);
+          const response = await pullDeviceFile(serial, entry.path, outputDir, traceId, {
+            recordError: false,
+          });
           dispatchTasks({
             type: "TASK_UPDATE_DEVICE",
             id: taskId,
@@ -9908,9 +10201,15 @@ function App() {
     if (!serial) {
       return;
     }
+    const taskId = beginTask({
+      kind: "ui_inspector_capture",
+      title: "UI Inspector Capture",
+      serials: [serial],
+    });
     setBusy(true);
     try {
-      const response = await captureUiHierarchy(serial);
+      const response = await captureUiHierarchy(serial, { recordError: false });
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
       setUiHtml(response.data.html);
       setUiXml(response.data.xml);
       setUiScreenshotDataUrl(response.data.screenshot_data_url ?? "");
@@ -9918,8 +10217,39 @@ function App() {
       setUiInspectorTab("hierarchy");
       setUiInspectorSearch("");
       setUiExportResult("");
-      pushToast("UI hierarchy captured.", "info");
+      const screenshotIssue = response.data.screenshot_error?.trim() ?? "";
+      if (screenshotIssue) {
+        const message = `Screenshot unavailable: ${screenshotIssue}`;
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: { status: "error", message },
+        });
+        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+        pushToast("UI hierarchy captured with errors. Check Task Center.", "error");
+      } else {
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial,
+          patch: { status: "success", message: "UI hierarchy captured." },
+        });
+        dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+        pushToast("UI hierarchy captured. Check Task Center.", "info");
+      }
     } catch (error) {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: { status: "error", message: formatError(error) },
+      });
+      const structured = normalizeStructuredError(error);
+      if (structured.trace_id) {
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: structured.trace_id });
+      }
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
@@ -9942,12 +10272,43 @@ function App() {
     if (!serial) {
       return;
     }
+    const taskId = beginTask({
+      kind: "ui_inspector_export",
+      title: "UI Inspector Export",
+      serials: [serial],
+    });
     setBusy(true);
     try {
-      const response = await exportUiHierarchy(serial, config?.file_gen_output_path || config?.output_path);
-      setUiExportResult(response.data.bundle_dir || response.data.html_path);
-      pushToast("UI inspector export completed.", "info");
+      const response = await exportUiHierarchy(serial, config?.file_gen_output_path || config?.output_path, {
+        recordError: false,
+      });
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+      const outputPath = response.data.bundle_dir || response.data.html_path;
+      setUiExportResult(outputPath);
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: {
+          status: "success",
+          output_path: outputPath,
+          message: `Exported to ${outputPath}`,
+        },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+      pushToast("UI inspector export completed. Check Task Center.", "info");
     } catch (error) {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: { status: "error", message: formatError(error) },
+      });
+      const structured = normalizeStructuredError(error);
+      if (structured.trace_id) {
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: structured.trace_id });
+      }
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
@@ -9964,6 +10325,11 @@ function App() {
       await writeText(content);
       pushToast(`XML ${uiXmlViewMode === "pretty" ? "pretty" : "raw"} view copied.`, "info");
     } catch (error) {
+      recordAppError({
+        title: "Copy UI XML",
+        source: "ui_inspector.copy_xml",
+        error,
+      });
       pushToast(`Copy failed: ${formatError(error)}`, "error");
     }
   };
@@ -10389,7 +10755,7 @@ function App() {
       await Promise.all(
         serials.map(async (serial) => {
           try {
-            const response = await captureScreenshot(serial, outputDir);
+            const response = await captureScreenshot(serial, outputDir, { recordError: false });
             if (!traceSet && response.trace_id) {
               traceSet = true;
               dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
@@ -10453,7 +10819,7 @@ function App() {
         await Promise.all(
           stopGroup.serials.map(async (serial) => {
             try {
-              const response = await stopScreenRecord(serial, outputDir);
+              const response = await stopScreenRecord(serial, outputDir, { recordError: false });
               if (!traceSet && response.trace_id) {
                 traceSet = true;
                 dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
@@ -10501,7 +10867,7 @@ function App() {
         await Promise.all(
           startGroup.serials.map(async (serial) => {
             try {
-              const response = await startScreenRecord(serial);
+              const response = await startScreenRecord(serial, { recordError: false });
               if (!traceSet && response.trace_id) {
                 traceSet = true;
                 dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
@@ -13985,6 +14351,13 @@ function App() {
                       >
                         Clear completed
                       </button>
+                      <button
+                        className="ghost"
+                        onClick={() => dispatchErrors({ type: "ERROR_CLEAR" })}
+                        disabled={errorState.items.length === 0}
+                      >
+                        Clear errors
+                      </button>
                     </div>
                   </div>
 
@@ -14110,6 +14483,51 @@ function App() {
                       })}
                     </div>
                   )}
+
+                  <section className="panel card task-card">
+                    <div className="card-header">
+                      <div>
+                        <h2>Errors</h2>
+                        <p className="muted">Recent non-task failures and uncaught exceptions.</p>
+                      </div>
+                      <span className={`status-pill ${errorState.items.length > 0 ? "error" : "ok"}`}>
+                        {errorState.items.length}
+                      </span>
+                    </div>
+                    {errorState.items.length === 0 ? (
+                      <p className="muted">No errors captured.</p>
+                    ) : (
+                      <div className="task-devices">
+                        {errorState.items.map((record) => {
+                          const reportKey = buildGithubErrorReportKey(record.id);
+                          const reportPending = Boolean(githubReportPendingByKey[reportKey]);
+                          return (
+                            <div key={record.id} className="task-device-row">
+                              <div className="task-device-main">
+                                <strong>{record.title}</strong>
+                                <span className="status-pill error">error</span>
+                                <span className="muted">{new Date(record.created_at).toLocaleString()}</span>
+                                <span className="muted">{record.source}</span>
+                                {record.trace_id && <span className="muted">{record.trace_id}</span>}
+                                {record.serial && <span className="muted">{record.serial}</span>}
+                                {record.route && <span className="muted">{record.route}</span>}
+                                <span className="muted">{record.message}</span>
+                              </div>
+                              <div className="task-device-meta">
+                                <button
+                                  className="ghost"
+                                  onClick={() => void handleReportErrorRecord(record)}
+                                  disabled={reportPending}
+                                >
+                                  {reportPending ? "Reporting..." : "Report to GitHub"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
                 </div>
               }
             />

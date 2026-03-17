@@ -32,17 +32,133 @@ import type {
   UiHierarchyCaptureResult,
   UiHierarchyExportResult,
 } from "./types";
+import { recordExternalAppError } from "./errorRecords";
 import { isTauriRuntime } from "./tauriEnv";
 
 const createTraceId = () => crypto.randomUUID();
 
-const tauriInvoke = <T>(command: string, args?: InvokeArgs) => {
+type InvokeErrorOptions = {
+  recordError?: boolean;
+  errorTitle?: string;
+  errorSource?: string;
+  serial?: string | null;
+  route?: string | null;
+};
+
+const COMMAND_ERROR_META: Record<string, { title: string; source: string }> = {
+  get_config: { title: "Load Settings", source: "settings.load" },
+  save_app_config: { title: "Save Settings", source: "settings.save" },
+  reset_config: { title: "Reset Settings", source: "settings.reset" },
+  check_adb: { title: "ADB Check", source: "adb.check" },
+  list_devices: { title: "Refresh Devices", source: "devices.list" },
+  adb_pair: { title: "Wireless Pair", source: "wireless.pair" },
+  adb_connect: { title: "Wireless Connect", source: "wireless.connect" },
+  run_shell: { title: "Run Shell Command", source: "shell.run" },
+  start_terminal_session: { title: "Open Terminal Session", source: "terminal.start" },
+  write_terminal_session: { title: "Write Terminal Session", source: "terminal.write" },
+  stop_terminal_session: { title: "Close Terminal Session", source: "terminal.stop" },
+  persist_terminal_state: { title: "Persist Terminal State", source: "terminal.persist" },
+  reboot_devices: { title: "Reboot Devices", source: "devices.reboot" },
+  set_wifi_state: { title: "Set Wi-Fi State", source: "devices.wifi" },
+  set_bluetooth_state: { title: "Set Bluetooth State", source: "devices.bluetooth" },
+  install_apk_batch: { title: "Install APK", source: "apk.install" },
+  capture_screenshot: { title: "Capture Screenshot", source: "screenshot.capture" },
+  start_screen_record: { title: "Start Screen Record", source: "screen_record.start" },
+  stop_screen_record: { title: "Stop Screen Record", source: "screen_record.stop" },
+  get_screen_record_status: { title: "Screen Record Status", source: "screen_record.status" },
+  list_device_files: { title: "List Device Files", source: "files.list" },
+  pull_device_file: { title: "Pull Device File", source: "files.pull" },
+  push_device_file: { title: "Push Device File", source: "files.push" },
+  mkdir_device_dir: { title: "Create Device Folder", source: "files.mkdir" },
+  rename_device_path: { title: "Rename Device Path", source: "files.rename" },
+  delete_device_path: { title: "Delete Device Path", source: "files.delete" },
+  preview_local_file: { title: "Preview Local File", source: "files.preview" },
+  capture_ui_hierarchy: { title: "UI Inspector Capture", source: "ui_inspector.capture" },
+  export_ui_hierarchy: { title: "UI Inspector Export", source: "ui_inspector.export" },
+  start_perf_monitor: { title: "Start Performance Monitor", source: "perf.start" },
+  stop_perf_monitor: { title: "Stop Performance Monitor", source: "perf.stop" },
+  start_net_profiler: { title: "Start Network Profiler", source: "net_profiler.start" },
+  stop_net_profiler: { title: "Stop Network Profiler", source: "net_profiler.stop" },
+  set_net_profiler_pinned_uids: { title: "Pin Network Profiler UIDs", source: "net_profiler.pin" },
+  start_logcat: { title: "Start Logcat", source: "logcat.start" },
+  stop_logcat: { title: "Stop Logcat", source: "logcat.stop" },
+  get_logcat_status: { title: "Logcat Status", source: "logcat.status" },
+  load_legacy_logcat_presets: { title: "Load Logcat Presets", source: "logcat.presets.load" },
+  clear_logcat: { title: "Clear Logcat", source: "logcat.clear" },
+  export_logcat: { title: "Export Logcat", source: "logcat.export" },
+  list_apps: { title: "List Apps", source: "apps.list" },
+  get_app_basic_info: { title: "Load App Details", source: "apps.detail" },
+  get_app_icon: { title: "Load App Icon", source: "apps.icon" },
+  uninstall_app: { title: "Uninstall App", source: "apps.uninstall" },
+  force_stop_app: { title: "Force Stop App", source: "apps.force_stop" },
+  clear_app_data: { title: "Clear App Data", source: "apps.clear_data" },
+  set_app_enabled: { title: "Set App Enabled State", source: "apps.set_enabled" },
+  open_app_info: { title: "Open App Info", source: "apps.open_info" },
+  launch_app: { title: "Launch App", source: "apps.launch" },
+  check_scrcpy: { title: "Check scrcpy", source: "scrcpy.check" },
+  launch_scrcpy: { title: "Launch scrcpy", source: "scrcpy.launch" },
+  start_bluetooth_monitor: { title: "Start Bluetooth Monitor", source: "bluetooth_monitor.start" },
+  stop_bluetooth_monitor: { title: "Stop Bluetooth Monitor", source: "bluetooth_monitor.stop" },
+  generate_bugreport: { title: "Generate Bugreport", source: "bugreport.generate" },
+  cancel_bugreport: { title: "Cancel Bugreport", source: "bugreport.cancel" },
+  prepare_bugreport_logcat: { title: "Prepare Bugreport Logcat", source: "bugreport.logcat.prepare" },
+  prepare_bugreport_extract_index: { title: "Prepare Bugreport Extract Index", source: "bugreport.extract.prepare" },
+  query_bugreport_extract: { title: "Query Bugreport Extract", source: "bugreport.extract.query" },
+  query_bugreport_logcat: { title: "Query Bugreport Logcat", source: "bugreport.logcat.query" },
+  search_bugreport_logcat: { title: "Search Bugreport Logcat", source: "bugreport.logcat.search" },
+  query_bugreport_logcat_around: { title: "Query Bugreport Context", source: "bugreport.logcat.around" },
+  export_diagnostics_bundle: { title: "Export Diagnostics Bundle", source: "diagnostics.export" },
+};
+
+const resolveRoute = () => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const hash = window.location.hash.trim();
+  if (hash.startsWith("#")) {
+    const route = hash.slice(1).trim();
+    return route || "/";
+  }
+  return window.location.pathname.trim() || "/";
+};
+
+const resolveSerialFromArgs = (args?: InvokeArgs) => {
+  if (!args || typeof args !== "object") {
+    return null;
+  }
+  const record = args as Record<string, unknown>;
+  if (typeof record.serial === "string" && record.serial.trim()) {
+    return record.serial.trim();
+  }
+  if (Array.isArray(record.serials) && record.serials.length === 1 && typeof record.serials[0] === "string") {
+    const value = record.serials[0].trim();
+    return value || null;
+  }
+  return null;
+};
+
+const tauriInvoke = <T>(command: string, args?: InvokeArgs, options: InvokeErrorOptions = {}) => {
   if (!isTauriRuntime()) {
     return Promise.reject(
       new Error('Tauri runtime not available. Run this app using "npm run tauri dev".'),
     );
   }
-  return invoke<T>(command, args);
+  return invoke<T>(command, args).catch((error) => {
+    if (options.recordError !== false) {
+      const meta = COMMAND_ERROR_META[command] ?? {
+        title: command,
+        source: command.replace(/_/g, "."),
+      };
+      recordExternalAppError({
+        title: options.errorTitle ?? meta.title,
+        source: options.errorSource ?? meta.source,
+        error,
+        serial: options.serial ?? resolveSerialFromArgs(args),
+        route: options.route ?? resolveRoute(),
+      });
+    }
+    throw error;
+  });
 };
 
 export const getConfig = async () => {
@@ -97,13 +213,13 @@ export const resetConfig = async () => {
   });
 };
 
-export const listDevices = async (detailed = true) => {
+export const listDevices = async (detailed = true, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<DeviceInfo[]>>("list_devices", {
     detailed,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
 export const startDeviceTracking = async () => {
@@ -146,6 +262,7 @@ export const runShell = async (
   serials: string[],
   command: string,
   parallel?: boolean,
+  options?: InvokeErrorOptions,
 ) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<CommandResult[]>>("run_shell", {
@@ -154,7 +271,7 @@ export const runShell = async (
     parallel,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
 export const startTerminalSession = async (serial: string) => {
@@ -243,6 +360,7 @@ export const installApkBatch = async (
   allowTestPackages: boolean,
   extraArgs?: string,
   traceIdOverride?: string,
+  options?: InvokeErrorOptions,
 ) => {
   const traceId = traceIdOverride ?? createTraceId();
   return tauriInvoke<CommandResponse<ApkBatchInstallResult>>("install_apk_batch", {
@@ -259,10 +377,10 @@ export const installApkBatch = async (
     extraArgs,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
-export const captureScreenshot = async (serial: string, outputDir: string) => {
+export const captureScreenshot = async (serial: string, outputDir: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<string>>("capture_screenshot", {
     serial,
@@ -270,19 +388,19 @@ export const captureScreenshot = async (serial: string, outputDir: string) => {
     outputDir,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
-export const startScreenRecord = async (serial: string) => {
+export const startScreenRecord = async (serial: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<ScreenRecordStartResult>>("start_screen_record", {
     serial,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
-export const stopScreenRecord = async (serial: string, outputDir?: string) => {
+export const stopScreenRecord = async (serial: string, outputDir?: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<ScreenRecordStopResult>>("stop_screen_record", {
     serial,
@@ -290,16 +408,16 @@ export const stopScreenRecord = async (serial: string, outputDir?: string) => {
     outputDir,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
-export const getScreenRecordStatus = async (serial: string) => {
+export const getScreenRecordStatus = async (serial: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<ScreenRecordStatus>>("get_screen_record_status", {
     serial,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
 export const listDeviceFiles = async (serial: string, path: string) => {
@@ -317,6 +435,7 @@ export const pullDeviceFile = async (
   devicePath: string,
   outputDir: string,
   traceId?: string,
+  options?: InvokeErrorOptions,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
   return tauriInvoke<CommandResponse<string>>("pull_device_file", {
@@ -327,7 +446,7 @@ export const pullDeviceFile = async (
     outputDir,
     trace_id: resolvedTraceId,
     traceId: resolvedTraceId,
-  });
+  }, options);
 };
 
 export const pushDeviceFile = async (
@@ -335,6 +454,7 @@ export const pushDeviceFile = async (
   localPath: string,
   devicePath: string,
   traceId?: string,
+  options?: InvokeErrorOptions,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
   return tauriInvoke<CommandResponse<string>>("push_device_file", {
@@ -345,10 +465,15 @@ export const pushDeviceFile = async (
     devicePath,
     trace_id: resolvedTraceId,
     traceId: resolvedTraceId,
-  });
+  }, options);
 };
 
-export const mkdirDeviceDir = async (serial: string, devicePath: string, traceId?: string) => {
+export const mkdirDeviceDir = async (
+  serial: string,
+  devicePath: string,
+  traceId?: string,
+  options?: InvokeErrorOptions,
+) => {
   const resolvedTraceId = traceId ?? createTraceId();
   return tauriInvoke<CommandResponse<string>>("mkdir_device_dir", {
     serial,
@@ -356,7 +481,7 @@ export const mkdirDeviceDir = async (serial: string, devicePath: string, traceId
     devicePath,
     trace_id: resolvedTraceId,
     traceId: resolvedTraceId,
-  });
+  }, options);
 };
 
 export const renameDevicePath = async (
@@ -364,6 +489,7 @@ export const renameDevicePath = async (
   fromPath: string,
   toPath: string,
   traceId?: string,
+  options?: InvokeErrorOptions,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
   return tauriInvoke<CommandResponse<string>>("rename_device_path", {
@@ -374,7 +500,7 @@ export const renameDevicePath = async (
     toPath,
     trace_id: resolvedTraceId,
     traceId: resolvedTraceId,
-  });
+  }, options);
 };
 
 export const deleteDevicePath = async (
@@ -382,6 +508,7 @@ export const deleteDevicePath = async (
   devicePath: string,
   recursive: boolean,
   traceId?: string,
+  options?: InvokeErrorOptions,
 ) => {
   const resolvedTraceId = traceId ?? createTraceId();
   return tauriInvoke<CommandResponse<string>>("delete_device_path", {
@@ -391,7 +518,7 @@ export const deleteDevicePath = async (
     recursive,
     trace_id: resolvedTraceId,
     traceId: resolvedTraceId,
-  });
+  }, options);
 };
 
 export const previewLocalFile = async (localPath: string) => {
@@ -404,16 +531,16 @@ export const previewLocalFile = async (localPath: string) => {
   });
 };
 
-export const captureUiHierarchy = async (serial: string) => {
+export const captureUiHierarchy = async (serial: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<UiHierarchyCaptureResult>>("capture_ui_hierarchy", {
     serial,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
-export const exportUiHierarchy = async (serial: string, outputDir?: string) => {
+export const exportUiHierarchy = async (serial: string, outputDir?: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<UiHierarchyExportResult>>("export_ui_hierarchy", {
     serial,
@@ -421,7 +548,7 @@ export const exportUiHierarchy = async (serial: string, outputDir?: string) => {
     outputDir,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
 export const startPerfMonitor = async (serial: string, intervalMs?: number) => {
@@ -503,13 +630,13 @@ export const stopLogcat = async (serial: string) => {
   });
 };
 
-export const getLogcatStatus = async (serial: string) => {
+export const getLogcatStatus = async (serial: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<LogcatStatus>>("get_logcat_status", {
     serial,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
 export const loadLegacyLogcatPresets = async () => {
@@ -701,7 +828,7 @@ export const stopBluetoothMonitor = async (serial: string) => {
   });
 };
 
-export const generateBugreport = async (serial: string, outputDir: string) => {
+export const generateBugreport = async (serial: string, outputDir: string, options?: InvokeErrorOptions) => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<BugreportResult>>("generate_bugreport", {
     serial,
@@ -709,7 +836,7 @@ export const generateBugreport = async (serial: string, outputDir: string) => {
     outputDir,
     trace_id: traceId,
     traceId,
-  });
+  }, options);
 };
 
 export const cancelBugreport = async (serial: string) => {

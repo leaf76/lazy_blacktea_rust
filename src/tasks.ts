@@ -9,7 +9,10 @@ export type TaskKind =
   | "file_push"
   | "file_mkdir"
   | "file_rename"
-  | "file_delete";
+  | "file_delete"
+  | "ui_inspector_capture"
+  | "ui_inspector_export"
+  | "ui_inspector_auto_sync";
 
 export type TaskStatus = "running" | "success" | "error" | "cancelled" | "interrupted";
 

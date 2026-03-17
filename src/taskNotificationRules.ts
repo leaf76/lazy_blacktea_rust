@@ -1,5 +1,7 @@
 import { summarizeTask, type TaskItem, type TaskStatus } from "./tasks";
 
+const SUPPRESSED_COMPLETION_TASK_KINDS = new Set<TaskItem["kind"]>(["ui_inspector_auto_sync"]);
+
 export type DesktopTaskNotification = {
   taskId: string;
   status: Exclude<TaskStatus, "running">;
@@ -72,6 +74,9 @@ const collectOutputPaths = (task: TaskItem): Array<{ serial: string; path: strin
 };
 
 export const buildDesktopNotificationForTask = (task: TaskItem): DesktopTaskNotification | null => {
+  if (SUPPRESSED_COMPLETION_TASK_KINDS.has(task.kind)) {
+    return null;
+  }
   const payload = buildTaskCompletionNotice(task);
   if (!payload) {
     return null;
@@ -86,6 +91,9 @@ export const buildDesktopNotificationForTask = (task: TaskItem): DesktopTaskNoti
 
 export const buildTaskCompletionNotice = (task: TaskItem): TaskCompletionNotice | null => {
   if (!isTerminalTaskStatus(task.status)) {
+    return null;
+  }
+  if (SUPPRESSED_COMPLETION_TASK_KINDS.has(task.kind)) {
     return null;
   }
 

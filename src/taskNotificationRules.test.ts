@@ -58,6 +58,20 @@ describe("buildDesktopNotificationForTask", () => {
     expect(notif).not.toBeNull();
     expect(notif!.body).toContain("Interrupted");
   });
+
+  it("suppresses desktop notifications for ui inspector auto sync tasks", () => {
+    const task = createTask({
+      id: "auto-1",
+      kind: "ui_inspector_auto_sync",
+      title: "UI Auto Sync",
+      serials: ["A"],
+    });
+    const done = tasksReducer(
+      { items: [task], max_items: 50 },
+      { type: "TASK_SET_STATUS", id: "auto-1", status: "success" },
+    ).items[0];
+    expect(buildDesktopNotificationForTask(done)).toBeNull();
+  });
 });
 
 describe("buildTaskCompletionNotice", () => {
@@ -114,5 +128,19 @@ describe("buildTaskCompletionNotice", () => {
     const payload = buildTaskCompletionNotice(completed);
     expect(payload).not.toBeNull();
     expect(payload!.outputPaths).toEqual([]);
+  });
+
+  it("suppresses completion notices for ui inspector auto sync tasks", () => {
+    const task = createTask({
+      id: "auto-2",
+      kind: "ui_inspector_auto_sync",
+      title: "UI Auto Sync",
+      serials: ["A"],
+    });
+    const done = tasksReducer(
+      { items: [task], max_items: 50 },
+      { type: "TASK_SET_STATUS", id: "auto-2", status: "error", finished_at: 1700000000002 },
+    ).items[0];
+    expect(buildTaskCompletionNotice(done)).toBeNull();
   });
 });

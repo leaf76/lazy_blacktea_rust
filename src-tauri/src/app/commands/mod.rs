@@ -1686,7 +1686,7 @@ fn build_remote_ui_dump_path(serial: &str, label: &str) -> String {
     let safe_label = sanitize_filename_component(label);
     let safe_serial = sanitize_filename_component(serial);
     format!(
-        "/sdcard/{}_{}_{}.xml",
+        "/sdcard/Download/lazy_blacktea_{}_{}_{}.xml",
         safe_label,
         safe_serial,
         Uuid::new_v4()
