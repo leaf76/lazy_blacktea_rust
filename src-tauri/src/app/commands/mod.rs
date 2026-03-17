@@ -1489,6 +1489,34 @@ fn user_safe_retry_message(action: &str) -> String {
     format!("Failed to {action}. Please try again.")
 }
 
+const UI_DUMP_AUTO_RECOVERY_DELAY_MS: u64 = 750;
+
+#[derive(Clone)]
+struct UiDumpCaptureFailure {
+    primary: AppError,
+    fallback: AppError,
+}
+
+#[derive(Default)]
+struct UiDumpAutoRecoveryAttempt {
+    attempted_methods: Vec<&'static str>,
+    successful_method: Option<&'static str>,
+}
+
+impl UiDumpAutoRecoveryAttempt {
+    fn attempted(&self) -> bool {
+        !self.attempted_methods.is_empty()
+    }
+
+    fn method_summary(&self) -> String {
+        if self.attempted_methods.is_empty() {
+            "pkill/killall".to_string()
+        } else {
+            self.attempted_methods.join("/")
+        }
+    }
+}
+
 fn sanitize_ui_dump_error_excerpt(value: &str) -> String {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = compact.trim();
@@ -1505,6 +1533,9 @@ fn sanitize_ui_dump_error_excerpt(value: &str) -> String {
 }
 
 fn summarize_primary_ui_dump_error(error: &str) -> String {
+    if error.contains("Command timed out") {
+        return "exec-out UI dump timed out".to_string();
+    }
     if let Some((_, detail)) = error.split_once("Exec-out UI dump failed:") {
         let detail = sanitize_ui_dump_error_excerpt(detail);
         return if detail == "unknown error" {
@@ -1516,10 +1547,21 @@ fn summarize_primary_ui_dump_error(error: &str) -> String {
     if error.contains("Exec-out UI dump returned invalid XML") {
         return "exec-out UI dump returned invalid XML".to_string();
     }
+    if let Some((_, detail)) = error.split_once("Failed to run uiautomator:") {
+        let detail = sanitize_ui_dump_error_excerpt(detail);
+        return if detail == "unknown error" {
+            "failed to start exec-out UI dump".to_string()
+        } else {
+            format!("failed to start exec-out UI dump: {detail}")
+        };
+    }
     "exec-out UI dump failed".to_string()
 }
 
 fn summarize_fallback_ui_dump_error(error: &str) -> String {
+    if error.contains("Command timed out") {
+        return "download fallback UI dump timed out".to_string();
+    }
     if let Some((_, detail)) = error.split_once("Pulled UI dump capture failed:") {
         let detail = sanitize_ui_dump_error_excerpt(detail);
         let normalized = detail.to_lowercase();
@@ -1550,12 +1592,200 @@ fn summarize_fallback_ui_dump_error(error: &str) -> String {
     "download fallback failed".to_string()
 }
 
-fn build_ui_dump_failure_message(primary_error: &AppError, fallback_error: &AppError) -> String {
-    format!(
-        "Failed to capture UI hierarchy. {}. {}. Check Task Center for details.",
+fn is_retryable_ui_dump_primary_error(error: &AppError) -> bool {
+    if error.error.contains("Command timed out") {
+        return true;
+    }
+
+    if error.code != "ERR_DEPENDENCY" {
+        return false;
+    }
+
+    error.error.starts_with("Exec-out UI dump failed:")
+        || error
+            .error
+            .starts_with("Exec-out UI dump returned invalid XML:")
+        || error.error.starts_with("Failed to run uiautomator:")
+}
+
+fn is_retryable_ui_dump_fallback_error(error: &AppError) -> bool {
+    if error.error.contains("Command timed out") {
+        return true;
+    }
+
+    if error.code != "ERR_DEPENDENCY" {
+        return false;
+    }
+
+    if error.error.starts_with("Pulled UI dump capture failed:") {
+        let detail = error
+            .error
+            .split_once("Pulled UI dump capture failed:")
+            .map(|(_, detail)| sanitize_ui_dump_error_excerpt(detail))
+            .unwrap_or_else(|| "unknown error".to_string());
+        let normalized = detail.to_lowercase();
+        return !normalized.contains("permission denied")
+            && !normalized.contains("dump path blocked");
+    }
+
+    if error.error.starts_with("Pulled UI dump fetch failed:") {
+        let detail = error
+            .error
+            .split_once("Pulled UI dump fetch failed:")
+            .map(|(_, detail)| sanitize_ui_dump_error_excerpt(detail))
+            .unwrap_or_else(|| "unknown error".to_string());
+        return !detail.to_lowercase().contains("no such file or directory");
+    }
+
+    error.error.starts_with("UI dump validation failed:")
+}
+
+fn should_attempt_ui_dump_auto_recovery(failure: &UiDumpCaptureFailure) -> bool {
+    is_retryable_ui_dump_primary_error(&failure.primary)
+        && is_retryable_ui_dump_fallback_error(&failure.fallback)
+}
+
+fn build_ui_dump_failure_message(
+    primary_error: &AppError,
+    fallback_error: &AppError,
+    recovery: Option<&UiDumpAutoRecoveryAttempt>,
+    retry_failure: Option<&UiDumpCaptureFailure>,
+) -> String {
+    let mut message = format!(
+        "Failed to capture UI hierarchy. {}. {}.",
         summarize_primary_ui_dump_error(&primary_error.error),
         summarize_fallback_ui_dump_error(&fallback_error.error),
-    )
+    );
+
+    if let Some(recovery) = recovery {
+        if recovery.attempted() {
+            message.push_str(&format!(
+                " auto-recovery attempted via {}.",
+                recovery.method_summary()
+            ));
+        }
+    }
+
+    if let Some(retry_failure) = retry_failure {
+        message.push_str(&format!(
+            " retry after auto-recovery failed: {}. {}.",
+            summarize_primary_ui_dump_error(&retry_failure.primary.error),
+            summarize_fallback_ui_dump_error(&retry_failure.fallback.error),
+        ));
+    }
+
+    message.push_str(" Check Task Center for details.");
+    message
+}
+
+fn build_ui_dump_recovery_command_args(
+    serial: &str,
+    program: &'static str,
+    extra_arg: &'static str,
+) -> Vec<String> {
+    vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        program.to_string(),
+        extra_arg.to_string(),
+        "uiautomator".to_string(),
+    ]
+}
+
+fn attempt_ui_dump_auto_recovery(
+    adb_program: &str,
+    serial: &str,
+    trace_id: &str,
+) -> UiDumpAutoRecoveryAttempt {
+    let mut attempt = UiDumpAutoRecoveryAttempt::default();
+
+    for (method, args) in [
+        (
+            "pkill",
+            build_ui_dump_recovery_command_args(serial, "pkill", "-f"),
+        ),
+        (
+            "killall",
+            build_ui_dump_recovery_command_args(serial, "killall", ""),
+        ),
+    ] {
+        let args = if method == "killall" {
+            vec![
+                "-s".to_string(),
+                serial.to_string(),
+                "shell".to_string(),
+                "killall".to_string(),
+                "uiautomator".to_string(),
+            ]
+        } else {
+            args
+        };
+        attempt.attempted_methods.push(method);
+        match run_command_with_timeout(adb_program, &args, Duration::from_secs(5), trace_id) {
+            Ok(output) if output.exit_code.unwrap_or(1) == 0 => {
+                attempt.successful_method = Some(method);
+                break;
+            }
+            Ok(output) => {
+                warn!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    recovery_method = method,
+                    exit_code = ?output.exit_code,
+                    stderr = %sanitize_ui_dump_error_excerpt(&output.stderr),
+                    "ui dump auto-recovery command did not succeed"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    recovery_method = method,
+                    error = %err.error,
+                    "ui dump auto-recovery command failed"
+                );
+            }
+        }
+    }
+
+    if attempt.attempted() {
+        std::thread::sleep(Duration::from_millis(UI_DUMP_AUTO_RECOVERY_DELAY_MS));
+    }
+
+    attempt
+}
+
+fn capture_ui_dump_once(
+    adb_program: &str,
+    serial: &str,
+    remote_path: &str,
+    local_pull_path: &Path,
+    trace_id: &str,
+) -> Result<String, Box<UiDumpCaptureFailure>> {
+    match capture_ui_dump_via_exec_out(adb_program, serial, trace_id) {
+        Ok(xml) => Ok(xml),
+        Err(primary_err) => {
+            warn!(
+                trace_id = %trace_id,
+                error = %primary_err.error,
+                "exec-out ui dump failed; falling back to pull"
+            );
+            match capture_ui_dump_via_pull(
+                adb_program,
+                serial,
+                remote_path,
+                local_pull_path,
+                trace_id,
+            ) {
+                Ok(xml) => Ok(xml),
+                Err(fallback_err) => Err(Box::new(UiDumpCaptureFailure {
+                    primary: primary_err,
+                    fallback: fallback_err,
+                })),
+            }
+        }
+    }
 }
 
 fn build_remote_screenshot_path(serial: &str, label: &str) -> String {
@@ -1880,37 +2110,69 @@ fn capture_validated_ui_dump_xml(
     trace_id: &str,
 ) -> Result<String, AppError> {
     let remote_path = build_remote_ui_dump_path(serial, label);
-    match capture_ui_dump_via_exec_out(adb_program, serial, trace_id) {
-        Ok(xml) => Ok(xml),
-        Err(primary_err) => {
-            warn!(
-                trace_id = %trace_id,
-                error = %primary_err.error,
-                "exec-out ui dump failed; falling back to pull"
-            );
-            match capture_ui_dump_via_pull(
-                adb_program,
-                serial,
-                &remote_path,
-                local_pull_path,
-                trace_id,
-            ) {
-                Ok(xml) => Ok(xml),
-                Err(fallback_err) => {
-                    warn!(
-                        trace_id = %trace_id,
-                        primary_error = %primary_err.error,
-                        fallback_error = %fallback_err.error,
-                        "ui dump capture failed"
-                    );
-                    Err(AppError::dependency(
-                        build_ui_dump_failure_message(&primary_err, &fallback_err),
-                        trace_id,
-                    ))
-                }
-            }
-        }
+    let initial_failure =
+        match capture_ui_dump_once(adb_program, serial, &remote_path, local_pull_path, trace_id) {
+            Ok(xml) => return Ok(xml),
+            Err(failure) => *failure,
+        };
+
+    if !should_attempt_ui_dump_auto_recovery(&initial_failure) {
+        warn!(
+            trace_id = %trace_id,
+            primary_error = %initial_failure.primary.error,
+            fallback_error = %initial_failure.fallback.error,
+            "ui dump capture failed without retryable recovery signature"
+        );
+        return Err(AppError::dependency(
+            build_ui_dump_failure_message(
+                &initial_failure.primary,
+                &initial_failure.fallback,
+                None,
+                None,
+            ),
+            trace_id,
+        ));
     }
+
+    let recovery = attempt_ui_dump_auto_recovery(adb_program, serial, trace_id);
+    let retry_failure =
+        match capture_ui_dump_once(adb_program, serial, &remote_path, local_pull_path, trace_id) {
+            Ok(xml) => {
+                info!(
+                    trace_id = %trace_id,
+                    serial = %serial,
+                    recovery_attempted = true,
+                    recovery_method = %recovery.method_summary(),
+                    recovery_result = %recovery.successful_method.unwrap_or("retry_only"),
+                    "ui dump auto-recovery succeeded"
+                );
+                return Ok(xml);
+            }
+            Err(failure) => *failure,
+        };
+
+    warn!(
+        trace_id = %trace_id,
+        serial = %serial,
+        primary_error = %initial_failure.primary.error,
+        fallback_error = %initial_failure.fallback.error,
+        recovery_attempted = true,
+        recovery_method = %recovery.method_summary(),
+        recovery_result = %recovery.successful_method.unwrap_or("failed"),
+        retry_primary_error = %retry_failure.primary.error,
+        retry_fallback_error = %retry_failure.fallback.error,
+        "ui dump capture failed after auto-recovery"
+    );
+
+    Err(AppError::dependency(
+        build_ui_dump_failure_message(
+            &initial_failure.primary,
+            &initial_failure.fallback,
+            Some(&recovery),
+            Some(&retry_failure),
+        ),
+        trace_id,
+    ))
 }
 
 #[tauri::command(async)]

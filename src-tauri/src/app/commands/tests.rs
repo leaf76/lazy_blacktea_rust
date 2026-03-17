@@ -62,7 +62,33 @@ if "%~1"=="-s" (
   shift
   shift
 )
+set "RECOVERY_STATE=%FAKE_ADB_UI_RECOVERY_STATE%"
+set "RECOVERY_LOG=%FAKE_ADB_UI_RECOVERY_LOG%"
+set "RECOVERY_MODE=%FAKE_ADB_UI_RECOVERY_MODE%"
+if defined RECOVERY_STATE if exist "%RECOVERY_STATE%" (
+  set /p "RECOVERY_METHOD="<"%RECOVERY_STATE%"
+)
 if "%~1"=="exec-out" if "%~2"=="uiautomator" (
+  if "%FAKE_ADB_XML_MODE%"=="recover_after_pkill" (
+    if "%RECOVERY_METHOD%"=="pkill" (
+      type "%FAKE_ADB_UI_XML_VALID%"
+      exit /b 0
+    )
+    echo exec dump failed 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_XML_MODE%"=="recover_after_killall" (
+    if "%RECOVERY_METHOD%"=="killall" (
+      type "%FAKE_ADB_UI_XML_VALID%"
+      exit /b 0
+    )
+    echo exec dump failed 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_XML_MODE%"=="recover_still_fails" (
+    echo exec dump failed 1>&2
+    exit /b 1
+  )
   if "%FAKE_ADB_XML_MODE%"=="exec_truncated_pull_ok" (
     type "%FAKE_ADB_UI_XML_TRUNCATED%"
     exit /b 0
@@ -113,6 +139,26 @@ if "%~1"=="shell" if "%~2"=="screencap" (
 )
 if "%~1"=="shell" if "%~2"=="uiautomator" (
   for %%I in ("%~4") do set "REMOTE_NAME=%%~nxI"
+  if "%FAKE_ADB_XML_MODE%"=="recover_after_pkill" (
+    if "%RECOVERY_METHOD%"=="pkill" (
+      copy /Y "%FAKE_ADB_UI_XML_VALID%" "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" >nul
+      exit /b 0
+    )
+    echo dump failed 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_XML_MODE%"=="recover_after_killall" (
+    if "%RECOVERY_METHOD%"=="killall" (
+      copy /Y "%FAKE_ADB_UI_XML_VALID%" "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" >nul
+      exit /b 0
+    )
+    echo dump failed 1>&2
+    exit /b 1
+  )
+  if "%FAKE_ADB_XML_MODE%"=="recover_still_fails" (
+    echo dump failed 1>&2
+    exit /b 1
+  )
   if "%FAKE_ADB_XML_MODE%"=="exec_ok_pull_fail" (
     echo dump should not pull 1>&2
     exit /b 1
@@ -137,6 +183,32 @@ if "%~1"=="shell" if "%~2"=="uiautomator" (
   copy /Y "%FAKE_ADB_UI_XML_VALID%" "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" >nul
   exit /b 0
 )
+if "%~1"=="shell" if "%~2"=="pkill" (
+  if defined RECOVERY_LOG echo pkill>>"%RECOVERY_LOG%"
+  if "%RECOVERY_MODE%"=="pkill_success" (
+    >"%RECOVERY_STATE%" echo pkill
+    exit /b 0
+  )
+  if "%RECOVERY_MODE%"=="pkill_missing_killall_success" (
+    echo pkill not found 1>&2
+    exit /b 127
+  )
+  if "%RECOVERY_MODE%"=="pkill_success_still_fails" (
+    >"%RECOVERY_STATE%" echo pkill
+    exit /b 0
+  )
+  echo pkill not available 1>&2
+  exit /b 1
+)
+if "%~1"=="shell" if "%~2"=="killall" (
+  if defined RECOVERY_LOG echo killall>>"%RECOVERY_LOG%"
+  if "%RECOVERY_MODE%"=="pkill_missing_killall_success" (
+    >"%RECOVERY_STATE%" echo killall
+    exit /b 0
+  )
+  echo killall not available 1>&2
+  exit /b 1
+)
 if "%~1"=="pull" (
   for %%I in ("%~2") do set "REMOTE_NAME=%%~nxI"
   copy /Y "%FAKE_ADB_REMOTE_ROOT%\%REMOTE_NAME%" "%~3" >nul
@@ -158,12 +230,37 @@ if [ "${1:-}" = "-s" ]; then
   shift
 fi
 
+recovery_method=""
+if [ -n "${FAKE_ADB_UI_RECOVERY_STATE:-}" ] && [ -f "${FAKE_ADB_UI_RECOVERY_STATE:-}" ]; then
+  recovery_method="$(cat "$FAKE_ADB_UI_RECOVERY_STATE")"
+fi
+
 remote_name() {
   basename "$1"
 }
 
 if [ "${1:-}" = "exec-out" ] && [ "${2:-}" = "uiautomator" ]; then
   case "${FAKE_ADB_XML_MODE:-valid}" in
+    recover_after_pkill)
+      if [ "$recovery_method" = "pkill" ]; then
+        cat "$FAKE_ADB_UI_XML_VALID"
+        exit 0
+      fi
+      echo "exec dump failed" >&2
+      exit 1
+      ;;
+    recover_after_killall)
+      if [ "$recovery_method" = "killall" ]; then
+        cat "$FAKE_ADB_UI_XML_VALID"
+        exit 0
+      fi
+      echo "exec dump failed" >&2
+      exit 1
+      ;;
+    recover_still_fails)
+      echo "exec dump failed" >&2
+      exit 1
+      ;;
     exec_truncated_pull_ok|all_fail)
       cat "$FAKE_ADB_UI_XML_TRUNCATED"
       ;;
@@ -210,6 +307,26 @@ fi
 
 if [ "${1:-}" = "shell" ] && [ "${2:-}" = "uiautomator" ]; then
   case "${FAKE_ADB_XML_MODE:-valid}" in
+    recover_after_pkill)
+      if [ "$recovery_method" = "pkill" ]; then
+        cp "$FAKE_ADB_UI_XML_VALID" "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${4:-}")"
+        exit 0
+      fi
+      echo "dump failed" >&2
+      exit 1
+      ;;
+    recover_after_killall)
+      if [ "$recovery_method" = "killall" ]; then
+        cp "$FAKE_ADB_UI_XML_VALID" "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${4:-}")"
+        exit 0
+      fi
+      echo "dump failed" >&2
+      exit 1
+      ;;
+    recover_still_fails)
+      echo "dump failed" >&2
+      exit 1
+      ;;
     exec_ok_pull_fail)
       echo "dump should not pull" >&2
       exit 1
@@ -233,6 +350,42 @@ if [ "${1:-}" = "shell" ] && [ "${2:-}" = "uiautomator" ]; then
     *)
       cp "$FAKE_ADB_UI_XML_VALID" "$FAKE_ADB_REMOTE_ROOT/$(remote_name "${4:-}")"
       exit 0
+      ;;
+  esac
+fi
+
+if [ "${1:-}" = "shell" ] && [ "${2:-}" = "pkill" ]; then
+  if [ -n "${FAKE_ADB_UI_RECOVERY_LOG:-}" ]; then
+    printf 'pkill\n' >>"$FAKE_ADB_UI_RECOVERY_LOG"
+  fi
+  case "${FAKE_ADB_UI_RECOVERY_MODE:-}" in
+    pkill_success|pkill_success_still_fails)
+      printf 'pkill' >"$FAKE_ADB_UI_RECOVERY_STATE"
+      exit 0
+      ;;
+    pkill_missing_killall_success)
+      echo "pkill not found" >&2
+      exit 127
+      ;;
+    *)
+      echo "pkill not available" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [ "${1:-}" = "shell" ] && [ "${2:-}" = "killall" ]; then
+  if [ -n "${FAKE_ADB_UI_RECOVERY_LOG:-}" ]; then
+    printf 'killall\n' >>"$FAKE_ADB_UI_RECOVERY_LOG"
+  fi
+  case "${FAKE_ADB_UI_RECOVERY_MODE:-}" in
+    pkill_missing_killall_success)
+      printf 'killall' >"$FAKE_ADB_UI_RECOVERY_STATE"
+      exit 0
+      ;;
+    *)
+      echo "killall not available" >&2
+      exit 1
       ;;
   esac
 fi
@@ -263,10 +416,11 @@ exit 1
     }
 }
 
-fn setup_fake_adb(
+fn setup_fake_adb_with_ui_recovery(
     tmp: &tempfile::TempDir,
     screenshot_mode: &str,
     xml_mode: &str,
+    recovery_mode: &str,
     trace_id: &str,
 ) -> PathBuf {
     let remote_root = tmp.path().join("remote");
@@ -283,9 +437,14 @@ fn setup_fake_adb(
         "fake-adb.sh"
     });
     write_fake_adb_script(&adb_path);
+    let recovery_state_path = tmp.path().join("ui_recovery_state.txt");
+    let recovery_log_path = tmp.path().join("ui_recovery_log.txt");
 
     std::env::set_var("FAKE_ADB_MODE", screenshot_mode);
     std::env::set_var("FAKE_ADB_XML_MODE", xml_mode);
+    std::env::set_var("FAKE_ADB_UI_RECOVERY_MODE", recovery_mode);
+    std::env::set_var("FAKE_ADB_UI_RECOVERY_STATE", &recovery_state_path);
+    std::env::set_var("FAKE_ADB_UI_RECOVERY_LOG", &recovery_log_path);
     std::env::set_var("FAKE_ADB_REMOTE_ROOT", &remote_root);
     std::env::set_var("FAKE_ADB_VALID_PNG", &valid_png_path);
     std::env::set_var("FAKE_ADB_UI_XML_VALID", &valid_xml_path);
@@ -301,9 +460,21 @@ fn setup_fake_adb(
     adb_path
 }
 
+fn setup_fake_adb(
+    tmp: &tempfile::TempDir,
+    screenshot_mode: &str,
+    xml_mode: &str,
+    trace_id: &str,
+) -> PathBuf {
+    setup_fake_adb_with_ui_recovery(tmp, screenshot_mode, xml_mode, "disabled", trace_id)
+}
+
 fn clear_fake_adb_env() {
     std::env::remove_var("FAKE_ADB_MODE");
     std::env::remove_var("FAKE_ADB_XML_MODE");
+    std::env::remove_var("FAKE_ADB_UI_RECOVERY_MODE");
+    std::env::remove_var("FAKE_ADB_UI_RECOVERY_STATE");
+    std::env::remove_var("FAKE_ADB_UI_RECOVERY_LOG");
     std::env::remove_var("FAKE_ADB_REMOTE_ROOT");
     std::env::remove_var("FAKE_ADB_VALID_PNG");
     std::env::remove_var("FAKE_ADB_UI_XML_VALID");
@@ -1328,6 +1499,61 @@ fn export_ui_hierarchy_prefers_pull_path_for_complete_xml() {
 }
 
 #[test]
+fn capture_ui_hierarchy_recovers_after_pkill_when_ui_dump_is_stuck() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    setup_fake_adb_with_ui_recovery(
+        &tmp,
+        "exec_ok_pull_fail",
+        "recover_after_pkill",
+        "pkill_success",
+        "trace-ui-recover-pkill",
+    );
+
+    let response = capture_ui_hierarchy(
+        "SERIAL-RECOVER-1".to_string(),
+        Some("trace-ui-recover-pkill".to_string()),
+    )
+    .expect("capture ui hierarchy");
+
+    assert!(response.data.xml.contains("<hierarchy"));
+    let recovery_log_path = tmp.path().join("ui_recovery_log.txt");
+    let recovery_log = std::fs::read_to_string(recovery_log_path).expect("recovery log");
+    assert_eq!(recovery_log.lines().collect::<Vec<_>>(), vec!["pkill"]);
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn capture_ui_hierarchy_recovers_after_killall_when_pkill_is_unavailable() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    setup_fake_adb_with_ui_recovery(
+        &tmp,
+        "exec_ok_pull_fail",
+        "recover_after_killall",
+        "pkill_missing_killall_success",
+        "trace-ui-recover-killall",
+    );
+
+    let response = capture_ui_hierarchy(
+        "SERIAL-RECOVER-2".to_string(),
+        Some("trace-ui-recover-killall".to_string()),
+    )
+    .expect("capture ui hierarchy");
+
+    assert!(response.data.xml.contains("<hierarchy"));
+    let recovery_log_path = tmp.path().join("ui_recovery_log.txt");
+    let recovery_log = std::fs::read_to_string(recovery_log_path).expect("recovery log");
+    assert_eq!(
+        recovery_log.lines().collect::<Vec<_>>(),
+        vec!["pkill", "killall"]
+    );
+
+    clear_fake_adb_env();
+}
+
+#[test]
 fn export_ui_hierarchy_errors_when_both_xml_paths_are_invalid() {
     let _guard = env_lock();
     let tmp = tempfile::TempDir::new().expect("tmp");
@@ -1350,8 +1576,39 @@ fn export_ui_hierarchy_errors_when_both_xml_paths_are_invalid() {
     assert_eq!(err.code, "ERR_DEPENDENCY");
     assert_eq!(
         err.error,
-        "Failed to capture UI hierarchy. exec-out UI dump returned invalid XML. download fallback capture failed: dump failed. Check Task Center for details."
+        "Failed to capture UI hierarchy. exec-out UI dump returned invalid XML. download fallback capture failed: dump failed. auto-recovery attempted via pkill/killall. retry after auto-recovery failed: exec-out UI dump returned invalid XML. download fallback capture failed: dump failed. Check Task Center for details."
     );
+
+    clear_fake_adb_env();
+}
+
+#[test]
+fn export_ui_hierarchy_reports_auto_recovery_attempt_when_retry_still_fails() {
+    let _guard = env_lock();
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let output_dir = tmp.path().join("export_recovery_fail");
+    std::fs::create_dir_all(&output_dir).expect("create output");
+    setup_fake_adb_with_ui_recovery(
+        &tmp,
+        "exec_ok_pull_fail",
+        "recover_still_fails",
+        "pkill_success_still_fails",
+        "trace-ui-recovery-fail",
+    );
+
+    let err = export_ui_hierarchy(
+        "SERIAL-RECOVER-3".to_string(),
+        Some(output_dir.to_string_lossy().to_string()),
+        Some("trace-ui-recovery-fail".to_string()),
+    )
+    .expect_err("expected recovery retry failure");
+
+    assert_eq!(err.code, "ERR_DEPENDENCY");
+    assert!(err.error.contains("auto-recovery attempted via pkill"));
+    assert!(err.error.contains("retry after auto-recovery failed"));
+    let recovery_log_path = tmp.path().join("ui_recovery_log.txt");
+    let recovery_log = std::fs::read_to_string(recovery_log_path).expect("recovery log");
+    assert_eq!(recovery_log.lines().collect::<Vec<_>>(), vec!["pkill"]);
 
     clear_fake_adb_env();
 }
@@ -1363,12 +1620,26 @@ fn build_ui_dump_failure_message_surfaces_safe_download_permission_detail() {
     let fallback =
         AppError::dependency("Pulled UI dump capture failed: Permission denied", trace_id);
 
-    let message = build_ui_dump_failure_message(&primary, &fallback);
+    let message = build_ui_dump_failure_message(&primary, &fallback, None, None);
 
     assert_eq!(
         message,
         "Failed to capture UI hierarchy. exec-out UI dump failed: exec dump failed. download fallback could not write the temporary UI dump. Check Task Center for details."
     );
+}
+
+#[test]
+fn should_attempt_ui_dump_auto_recovery_skips_non_retryable_fallback_errors() {
+    let trace_id = "trace-ui-detail-2";
+    let failure = UiDumpCaptureFailure {
+        primary: AppError::dependency("Exec-out UI dump failed: exec dump failed", trace_id),
+        fallback: AppError::dependency(
+            "Pulled UI dump capture failed: Permission denied",
+            trace_id,
+        ),
+    };
+
+    assert!(!should_attempt_ui_dump_auto_recovery(&failure));
 }
 
 #[test]
