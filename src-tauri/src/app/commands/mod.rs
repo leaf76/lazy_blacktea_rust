@@ -1489,6 +1489,75 @@ fn user_safe_retry_message(action: &str) -> String {
     format!("Failed to {action}. Please try again.")
 }
 
+fn sanitize_ui_dump_error_excerpt(value: &str) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = compact.trim();
+    let shortened = if trimmed.len() > 120 {
+        format!("{}…", &trimmed[..119])
+    } else {
+        trimmed.to_string()
+    };
+    if shortened.is_empty() || shortened == "unknown error" {
+        "unknown error".to_string()
+    } else {
+        shortened
+    }
+}
+
+fn summarize_primary_ui_dump_error(error: &str) -> String {
+    if let Some((_, detail)) = error.split_once("Exec-out UI dump failed:") {
+        let detail = sanitize_ui_dump_error_excerpt(detail);
+        return if detail == "unknown error" {
+            "exec-out UI dump failed".to_string()
+        } else {
+            format!("exec-out UI dump failed: {detail}")
+        };
+    }
+    if error.contains("Exec-out UI dump returned invalid XML") {
+        return "exec-out UI dump returned invalid XML".to_string();
+    }
+    "exec-out UI dump failed".to_string()
+}
+
+fn summarize_fallback_ui_dump_error(error: &str) -> String {
+    if let Some((_, detail)) = error.split_once("Pulled UI dump capture failed:") {
+        let detail = sanitize_ui_dump_error_excerpt(detail);
+        let normalized = detail.to_lowercase();
+        if normalized.contains("permission denied") || normalized.contains("dump path blocked") {
+            return "download fallback could not write the temporary UI dump".to_string();
+        }
+        return if detail == "unknown error" {
+            "download fallback could not create the temporary UI dump".to_string()
+        } else {
+            format!("download fallback capture failed: {detail}")
+        };
+    }
+    if let Some((_, detail)) = error.split_once("Pulled UI dump fetch failed:") {
+        let detail = sanitize_ui_dump_error_excerpt(detail);
+        let normalized = detail.to_lowercase();
+        if normalized.contains("no such file or directory") {
+            return "download fallback did not produce a readable UI dump file".to_string();
+        }
+        return if detail == "unknown error" {
+            "download fallback could not pull the temporary UI dump".to_string()
+        } else {
+            format!("download fallback pull failed: {detail}")
+        };
+    }
+    if error.contains("UI dump validation failed:") {
+        return "download fallback produced invalid UI XML".to_string();
+    }
+    "download fallback failed".to_string()
+}
+
+fn build_ui_dump_failure_message(primary_error: &AppError, fallback_error: &AppError) -> String {
+    format!(
+        "Failed to capture UI hierarchy. {}. {}. Check Task Center for details.",
+        summarize_primary_ui_dump_error(&primary_error.error),
+        summarize_fallback_ui_dump_error(&fallback_error.error),
+    )
+}
+
 fn build_remote_screenshot_path(serial: &str, label: &str) -> String {
     let safe_label = sanitize_filename_component(label);
     let safe_serial = sanitize_filename_component(serial);
@@ -1835,7 +1904,7 @@ fn capture_validated_ui_dump_xml(
                         "ui dump capture failed"
                     );
                     Err(AppError::dependency(
-                        user_safe_retry_message("capture UI hierarchy"),
+                        build_ui_dump_failure_message(&primary_err, &fallback_err),
                         trace_id,
                     ))
                 }

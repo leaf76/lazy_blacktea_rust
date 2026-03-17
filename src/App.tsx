@@ -23,7 +23,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { isTauriRuntime } from "./tauriEnv";
 import {
   getDesktopNotificationPermission,
@@ -250,6 +250,7 @@ import {
   sanitizeStoredState,
 } from "./apkInstallerState";
 import { buildGithubBugIssueUrl } from "./githubIssueReport";
+import { openGithubIssueUrl } from "./githubIssueOpener";
 import {
   buildLogcatPopupHash,
   buildLogcatPopupWindowLabel,
@@ -3822,19 +3823,23 @@ function App() {
     });
 
   const openIssueUrl = async (url: string) => {
-    try {
-      await openPath(url);
-      return true;
-    } catch (error) {
-      recordAppError({
-        title: "Open GitHub Issue",
-        source: "github.open_issue",
-        error,
-      });
-      console.warn("Failed to open GitHub issue URL via opener plugin.", error);
-    }
-    const popup = window.open(url, "_blank", "noopener,noreferrer");
-    return Boolean(popup);
+    const result = await openGithubIssueUrl(url, {
+      openUrl,
+      openWindow: (targetUrl) => window.open(targetUrl, "_blank", "noopener,noreferrer"),
+      copyText: writeText,
+      warn: (message, error) => {
+        console.warn(message, error);
+      },
+      recordFailure: (error) => {
+        recordAppError({
+          title: "Open GitHub Issue",
+          source: "github.open_issue",
+          error,
+          message: "Failed to open GitHub issue in browser.",
+        });
+      },
+    });
+    return result;
   };
 
   const openGithubIssueWithPrefill = async (
@@ -3876,18 +3881,23 @@ function App() {
     });
 
     try {
-      const opened = await openIssueUrl(issueUrl);
-      if (!opened) {
-        pushToast("Unable to open GitHub issue form. Please open it manually.", "error");
+      const openResult = await openIssueUrl(issueUrl);
+      if (openResult.status === "failed") {
+        pushToast("Unable to open or copy the GitHub issue URL. Please report it manually.", "error");
         return;
       }
 
+      const baseMessage =
+        openResult.status === "copied"
+          ? "GitHub issue URL copied to clipboard. Open it manually."
+          : "GitHub issue form opened.";
+
       if (diagnosticsPath) {
-        pushToast(`GitHub issue form opened. Attach diagnostics bundle: ${diagnosticsPath}`, "info");
+        pushToast(`${baseMessage} Attach diagnostics bundle: ${diagnosticsPath}`, "info");
       } else if (diagnosticsError) {
-        pushToast(`GitHub issue form opened. Diagnostics export failed: ${diagnosticsError}`, "info");
+        pushToast(`${baseMessage} Diagnostics bundle unavailable.`, "info");
       } else {
-        pushToast("GitHub issue form opened.", "info");
+        pushToast(baseMessage, "info");
       }
     } finally {
       setGithubReportPendingByKey((prev) => {
@@ -10250,7 +10260,7 @@ function App() {
         dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: structured.trace_id });
       }
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-      pushToast(formatError(error), "error");
+      pushToast("Failed to capture UI hierarchy. Check Task Center for details.", "error");
     } finally {
       setBusy(false);
     }
@@ -10309,7 +10319,7 @@ function App() {
         dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: structured.trace_id });
       }
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
-      pushToast(formatError(error), "error");
+      pushToast("Failed to export UI inspector bundle. Check Task Center for details.", "error");
     } finally {
       setBusy(false);
     }

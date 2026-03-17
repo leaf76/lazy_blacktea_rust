@@ -56,6 +56,33 @@ Include file I/O and UI dump:
 scripts/smoke_adb.sh --with-files --with-uiauto
 ```
 
+### Samsung UI Inspector RCA Probe
+
+When a Samsung device fails `UI Inspector Capture`, collect a probe bundle before changing backend logic:
+
+1. Copy the `trace_id` from the failed Task Center row.
+2. Run the probe script against the affected device:
+
+```bash
+scripts/ui_inspector_probe.sh --serial "RFCW40P6PSB"
+```
+
+If `ANDROID_SERIAL` is already set, `--serial` is optional. To store the probe under a specific directory:
+
+```bash
+scripts/ui_inspector_probe.sh --serial "RFCW40P6PSB" --out "./ui-probe"
+```
+
+The script writes:
+- raw `stdout` / `stderr` / `exitcode` files for every probe command
+- pulled XML artifacts from `/sdcard/Download` and, if needed, `/data/local/tmp`
+- `probe_info.txt`
+- a sibling `.zip` bundle ready to attach to a bug report
+
+When reporting the issue, attach:
+- the generated probe `.zip`
+- the original `trace_id`
+
 Install an APK (destructive):
 
 ```bash

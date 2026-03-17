@@ -1350,10 +1350,25 @@ fn export_ui_hierarchy_errors_when_both_xml_paths_are_invalid() {
     assert_eq!(err.code, "ERR_DEPENDENCY");
     assert_eq!(
         err.error,
-        "Failed to capture UI hierarchy. Please try again."
+        "Failed to capture UI hierarchy. exec-out UI dump returned invalid XML. download fallback capture failed: dump failed. Check Task Center for details."
     );
 
     clear_fake_adb_env();
+}
+
+#[test]
+fn build_ui_dump_failure_message_surfaces_safe_download_permission_detail() {
+    let trace_id = "trace-ui-detail-1";
+    let primary = AppError::dependency("Exec-out UI dump failed: exec dump failed", trace_id);
+    let fallback =
+        AppError::dependency("Pulled UI dump capture failed: Permission denied", trace_id);
+
+    let message = build_ui_dump_failure_message(&primary, &fallback);
+
+    assert_eq!(
+        message,
+        "Failed to capture UI hierarchy. exec-out UI dump failed: exec dump failed. download fallback could not write the temporary UI dump. Check Task Center for details."
+    );
 }
 
 #[test]
