@@ -18,6 +18,7 @@ const DEFAULT_INTERVAL_S: f64 = 5.0;
 const MIN_INTERVAL_S: f64 = 2.0;
 const MAX_INTERVAL_S: f64 = 10.0;
 const IDLE_THRESHOLD_S: f64 = 30.0;
+const SNAPSHOT_TIMEOUT_S: u64 = 10;
 
 pub struct BluetoothMonitorHandle {
     stop_flag: Arc<AtomicBool>,
@@ -73,15 +74,13 @@ pub fn start_bluetooth_monitor(
                 "-s".to_string(),
                 serial_snapshot.clone(),
                 "shell".to_string(),
-                "sh".to_string(),
-                "-c".to_string(),
-                "dumpsys bluetooth_manager && echo '---SEPARATOR---' && dumpsys bluetooth_adapter"
-                    .to_string(),
+                "dumpsys".to_string(),
+                "bluetooth_manager".to_string(),
             ];
             let output = run_command_with_timeout(
                 &adb_program_snapshot,
                 &snapshot_cmd,
-                Duration::from_secs(5),
+                Duration::from_secs(SNAPSHOT_TIMEOUT_S),
                 &trace_snapshot,
             );
             match output {

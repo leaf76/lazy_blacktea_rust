@@ -3,15 +3,21 @@ import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { isTauriRuntime } from "./tauriEnv";
 import type {
+  BluetoothDiscoveredDeviceRow,
   BluetoothEventEvent,
+  BluetoothMonitorEventEntry,
   BluetoothParsedEvent,
   BluetoothParsedSnapshot,
+  BluetoothPairedDeviceRow,
   BluetoothSnapshotEvent,
   BluetoothStateEvent,
   BluetoothStateSummary,
 } from "./types";
 import {
   BLUETOOTH_MONITOR_RECENT_DATA_MS,
+  buildBluetoothDiscoveredDeviceRows,
+  buildBluetoothPairedDeviceRows,
+  hasBluetoothMonitorSessionData,
   readBluetoothNumberMetric,
   resolveBluetoothActiveStates,
   resolveBluetoothAdapterEnabled,
@@ -29,11 +35,6 @@ import {
   toUnixSeconds,
   type BluetoothEventCategory,
 } from "./bluetoothMonitorUtils";
-
-type BluetoothEventWithReceivedAt = {
-  event: BluetoothParsedEvent;
-  receivedAtMs: number;
-};
 
 type MonitorCommandOptions = {
   announce?: boolean;
@@ -66,6 +67,7 @@ type Props = {
 };
 
 const EVENT_LIMIT = 200;
+const SESSION_EVENT_LIMIT = 500;
 
 const sessionToneByState = {
   stopped: "idle",
@@ -92,6 +94,17 @@ const eventCategoryOptions: Array<[BluetoothEventCategory, string]> = [
 
 const buildEventKey = (event: BluetoothParsedEvent, index: number) => `${event.timestamp}:${event.raw_line}:${index}`;
 
+const formatScannerClientLabel = (client: string) => {
+  const trimmed = client.trim();
+  if (!trimmed) {
+    return "Unknown scanner";
+  }
+  if (trimmed.startsWith("uid/")) {
+    return `UID ${trimmed.slice(4)}`;
+  }
+  return trimmed;
+};
+
 export const BluetoothMonitorPage = ({
   serial,
   serialLabel,
@@ -105,9 +118,8 @@ export const BluetoothMonitorPage = ({
   const tauriAvailable = isTauriRuntime();
   const serialRef = useRef<string | null>(serial);
   const ownedSerialRef = useRef<string | null>(null);
-  const autoActionTokenRef = useRef(0);
   const timelineRef = useRef<HTMLDivElement | null>(null);
-  const pendingEventsRef = useRef<BluetoothEventWithReceivedAt[]>([]);
+  const pendingEventsRef = useRef<BluetoothMonitorEventEntry[]>([]);
   const timelinePausedRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [pendingMonitoringDesired, setPendingMonitoringDesired] = useState<boolean | null>(null);
@@ -115,7 +127,8 @@ export const BluetoothMonitorPage = ({
   const [snapshotReceivedAtMs, setSnapshotReceivedAtMs] = useState<number | null>(null);
   const [stateSummary, setStateSummary] = useState<BluetoothStateSummary | null>(null);
   const [stateReceivedAtMs, setStateReceivedAtMs] = useState<number | null>(null);
-  const [events, setEvents] = useState<BluetoothEventWithReceivedAt[]>([]);
+  const [events, setEvents] = useState<BluetoothMonitorEventEntry[]>([]);
+  const [sessionEvents, setSessionEvents] = useState<BluetoothMonitorEventEntry[]>([]);
   const [lastEventReceivedAtMs, setLastEventReceivedAtMs] = useState<number | null>(null);
   const [timelinePaused, setTimelinePaused] = useState(false);
   const [timelineNewCount, setTimelineNewCount] = useState(0);
@@ -131,6 +144,8 @@ export const BluetoothMonitorPage = ({
   const [commandError, setCommandError] = useState<string | null>(null);
   const [bondSearch, setBondSearch] = useState("");
   const [bondShowAll, setBondShowAll] = useState(false);
+  const [timelineCollapsed, setTimelineCollapsed] = useState(true);
+  const [snapshotCollapsed, setSnapshotCollapsed] = useState(true);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -149,6 +164,7 @@ export const BluetoothMonitorPage = ({
     setStateSummary(null);
     setStateReceivedAtMs(null);
     setEvents([]);
+    setSessionEvents([]);
     setLastEventReceivedAtMs(null);
     setTimelinePaused(false);
     setTimelineNewCount(0);
@@ -156,6 +172,8 @@ export const BluetoothMonitorPage = ({
     setCommandError(null);
     setBondSearch("");
     setBondShowAll(false);
+    setTimelineCollapsed(true);
+    setSnapshotCollapsed(true);
     setRawOpen(false);
     setPendingMonitoringDesired(null);
   }, [serial]);
@@ -198,15 +216,14 @@ export const BluetoothMonitorPage = ({
       }
       const receivedAtMs = Date.now();
       setLastEventReceivedAtMs(receivedAtMs);
+      const nextEntry = { event: payload.event, receivedAtMs };
+      setSessionEvents((prev) => [nextEntry, ...prev].slice(0, SESSION_EVENT_LIMIT));
       if (timelinePausedRef.current) {
-        pendingEventsRef.current = [{ event: payload.event, receivedAtMs }, ...pendingEventsRef.current].slice(
-          0,
-          EVENT_LIMIT,
-        );
+        pendingEventsRef.current = [nextEntry, ...pendingEventsRef.current].slice(0, EVENT_LIMIT);
         setTimelineNewCount((prev) => prev + 1);
         return;
       }
-      setEvents((prev) => [{ event: payload.event, receivedAtMs }, ...prev].slice(0, EVENT_LIMIT));
+      setEvents((prev) => [nextEntry, ...prev].slice(0, EVENT_LIMIT));
     });
 
     return () => {
@@ -246,59 +263,10 @@ export const BluetoothMonitorPage = ({
   }, [timelinePaused]);
 
   useEffect(() => {
-    if (!tauriAvailable) {
-      return;
-    }
-    autoActionTokenRef.current += 1;
-    const token = autoActionTokenRef.current;
-    const previousOwnedSerial = ownedSerialRef.current;
-
-    void (async () => {
-      if (previousOwnedSerial && previousOwnedSerial !== serial) {
-        await onSetMonitorDesired(previousOwnedSerial, false, { announce: false });
-        if (autoActionTokenRef.current !== token) {
-          return;
-        }
-        ownedSerialRef.current = null;
-      }
-
-      if (!serial) {
-        ownedSerialRef.current = null;
-        return;
-      }
-
-      if (monitoringDesired) {
-        ownedSerialRef.current = serial;
-        return;
-      }
-
-      setPendingMonitoringDesired(true);
-      const result = await onSetMonitorDesired(serial, true, { announce: false });
-      if (autoActionTokenRef.current !== token || serialRef.current !== serial) {
-        if (result.ok && result.running) {
-          void onSetMonitorDesired(serial, false, { announce: false });
-        }
-        return;
-      }
-      setPendingMonitoringDesired(null);
-      if (result.ok && result.running) {
-        ownedSerialRef.current = serial;
-        setCommandError(null);
-        return;
-      }
-      ownedSerialRef.current = null;
-      setCommandError(result.message ?? "Failed to start Bluetooth monitor.");
-    })();
-    // Auto-start only on route entry or primary-device change.
-    // Manual pause/resume should not re-trigger this effect.
-  }, [serial, onSetMonitorDesired, tauriAvailable]);
-
-  useEffect(() => {
     return () => {
       if (!tauriAvailable) {
         return;
       }
-      autoActionTokenRef.current += 1;
       const serialToStop = ownedSerialRef.current;
       ownedSerialRef.current = null;
       if (serialToStop) {
@@ -352,8 +320,25 @@ export const BluetoothMonitorPage = ({
     });
   }, [events, filterCategories, filterSearch]);
 
+  const pairedDevices = useMemo<BluetoothPairedDeviceRow[]>(
+    () =>
+      buildBluetoothPairedDeviceRows({
+        snapshot,
+        stateSummary,
+        events: sessionEvents,
+      }),
+    [sessionEvents, snapshot, stateSummary],
+  );
+  const discoveredDevices = useMemo<BluetoothDiscoveredDeviceRow[]>(
+    () =>
+      buildBluetoothDiscoveredDeviceRows({
+        snapshot,
+        events: sessionEvents,
+      }),
+    [sessionEvents, snapshot],
+  );
   const bondedDevicesFiltered = useMemo(() => {
-    const list = snapshot?.bonded_devices ?? [];
+    const list = pairedDevices;
     const query = bondSearch.trim().toLowerCase();
     if (!query) {
       return list;
@@ -363,8 +348,7 @@ export const BluetoothMonitorPage = ({
       const address = device.address.toLowerCase();
       return name.includes(query) || address.includes(query);
     });
-  }, [bondSearch, snapshot]);
-
+  }, [bondSearch, pairedDevices]);
   const profiles = useMemo(() => Object.entries(snapshot?.profiles ?? {}), [snapshot]);
   const scanningClientCount =
     snapshot?.scanning.clients.length ?? readBluetoothNumberMetric(stateSummary?.metrics, "scanners") ?? 0;
@@ -378,7 +362,7 @@ export const BluetoothMonitorPage = ({
     hasFilters: hasActiveFilters,
   });
   const bondedEmptyState = resolveBluetoothBondedEmptyState({
-    totalDevices: snapshot?.bonded_devices.length ?? 0,
+    totalDevices: pairedDevices.length,
     filteredDevices: bondedDevicesFiltered.length,
     hasSearch: bondSearch.trim().length > 0,
   });
@@ -388,6 +372,30 @@ export const BluetoothMonitorPage = ({
   const lastSnapshotText = formatRelativeFromMs(nowMs, snapshotReceivedAtMs);
   const lastEventText = formatRelativeFromMs(nowMs, lastEventReceivedAtMs);
   const lastActivityText = formatRelativeFromMs(nowMs, lastAnyDataAtMs);
+  const bluetoothOff = adapterEnabled === false || activeStates.includes("Off");
+  const advertisingActive = (snapshot?.advertising.is_advertising ?? false) || activeStates.includes("Advertising");
+  const scanningActive = (snapshot?.scanning.is_scanning ?? false) || activeStates.includes("Scanning");
+  const scannerPreview = useMemo(
+    () => (snapshot?.scanning.clients ?? []).slice(0, 3).map(formatScannerClientLabel),
+    [snapshot],
+  );
+  const advertisingHeadline = advertisingActive ? "Advertising now" : "Not advertising";
+  const advertisingSummary = advertisingActive
+    ? advertisingSetCount > 0
+      ? `${advertisingSetCount} active set${advertisingSetCount === 1 ? "" : "s"} detected in the latest snapshot.`
+      : "Advertising activity is present, but no active set details were captured."
+    : "No active advertising sets in the latest snapshot.";
+  const scanningHeadline = scanningActive ? "Scanning now" : "Not scanning";
+  const scanningSummary = scanningActive
+    ? scanningClientCount > 0
+      ? `${scanningClientCount} scanner${scanningClientCount === 1 ? "" : "s"} active right now.`
+      : "Scanning activity is present, but no scanner list was captured."
+    : "No active scanners in the latest snapshot.";
+  const hasClearableSessionData = hasBluetoothMonitorSessionData({
+    visibleEvents: events.length,
+    sessionEvents: sessionEvents.length,
+    queuedEvents: timelineNewCount,
+  });
 
   const handleCopyText = async (text: string, successMessage: string) => {
     if (!text.trim()) {
@@ -443,6 +451,7 @@ export const BluetoothMonitorPage = ({
     pendingEventsRef.current = [];
     setTimelineNewCount(0);
     setEvents([]);
+    setSessionEvents([]);
   };
 
   const handleResumeTimeline = () => {
@@ -498,10 +507,10 @@ export const BluetoothMonitorPage = ({
         </div>
       ) : null}
 
-      {!commandError && adapterEnabled === false ? (
+      {!commandError && bluetoothOff ? (
         <div className="inline-alert warn">
           <strong>Bluetooth is off</strong>
-          <span>Turn Bluetooth on to collect live events and refresh the device snapshot.</span>
+          <span>Turn Bluetooth on for the selected device before using Bluetooth Monitor features.</span>
           <div className="button-row compact">
             <button type="button" onClick={handleEnableBluetooth} disabled={commandBusy || !tauriAvailable}>
               Enable Bluetooth
@@ -510,14 +519,14 @@ export const BluetoothMonitorPage = ({
         </div>
       ) : null}
 
-      {!commandError && sessionState === "starting" ? (
+      {!commandError && !bluetoothOff && sessionState === "starting" ? (
         <div className="inline-alert info">
           <strong>Preparing monitor</strong>
           <span>Connecting to the selected device and waiting for the first Bluetooth snapshot.</span>
         </div>
       ) : null}
 
-      {!commandError && sessionState === "stale" ? (
+      {!commandError && !bluetoothOff && sessionState === "stale" ? (
         <div className="inline-alert warn">
           <strong>Data is stale</strong>
           <span>Monitoring is on, but no recent Bluetooth data arrived. Check the device or resume monitoring.</span>
@@ -555,14 +564,64 @@ export const BluetoothMonitorPage = ({
             <span className="muted">Snapshot: {lastSnapshotText}</span>
             <span className="muted">Events: {lastEventText}</span>
           </div>
+
+          <div className="bluetooth-monitor-current-activity" aria-label="Current Bluetooth activity">
+            <div className={`bluetooth-monitor-activity-card ${advertisingActive ? "is-active" : ""}`}>
+              <div className="bluetooth-monitor-activity-top">
+                <span className="muted">Now Advertising</span>
+                <span className={`status-pill ${advertisingActive ? "ok" : "idle"}`}>
+                  {advertisingActive ? "Yes" : "No"}
+                </span>
+              </div>
+              <strong>{advertisingHeadline}</strong>
+              <span className="muted">{advertisingSummary}</span>
+              {snapshot?.advertising.sets.length ? (
+                <div className="bluetooth-monitor-chip-row bluetooth-monitor-chip-row-compact">
+                  {snapshot.advertising.sets.slice(0, 3).map((set, index) => (
+                    <span key={`${set.set_id ?? "set"}-${index}`} className="filter-chip bluetooth-monitor-chip">
+                      Set {set.set_id ?? index + 1}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className={`bluetooth-monitor-activity-card ${scanningActive ? "is-active" : ""}`}>
+              <div className="bluetooth-monitor-activity-top">
+                <span className="muted">Now Scanning</span>
+                <span className={`status-pill ${scanningActive ? "busy" : "idle"}`}>
+                  {scanningActive ? "Yes" : "No"}
+                </span>
+              </div>
+              <strong>{scanningHeadline}</strong>
+              <span className="muted">{scanningSummary}</span>
+              {scannerPreview.length ? (
+                <div className="bluetooth-monitor-chip-row bluetooth-monitor-chip-row-compact">
+                  {scannerPreview.map((client) => (
+                    <span key={client} className="filter-chip bluetooth-monitor-chip">
+                      {client}
+                    </span>
+                  ))}
+                  {scanningClientCount > scannerPreview.length ? (
+                    <span className="muted">+{scanningClientCount - scannerPreview.length} more</span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
         </div>
 
         <div className="bluetooth-monitor-hero-actions">
           <div className="button-row">
-            <button type="button" onClick={handleMonitorAction} disabled={commandBusy || !tauriAvailable}>
+            <button
+              type="button"
+              onClick={handleMonitorAction}
+              disabled={commandBusy || !tauriAvailable || bluetoothOff}
+              title={bluetoothOff ? "Turn Bluetooth on before starting the monitor." : undefined}
+            >
               {effectiveMonitoringDesired ? "Pause monitoring" : "Resume monitoring"}
             </button>
-            <button type="button" className="ghost" onClick={handleClearEvents} disabled={!events.length}>
+            <button type="button" className="ghost" onClick={handleClearEvents} disabled={!hasClearableSessionData}>
               Clear events
             </button>
             <button type="button" className="ghost" onClick={() => setRawOpen((prev) => !prev)}>
@@ -573,14 +632,30 @@ export const BluetoothMonitorPage = ({
       </section>
 
       <div className="dashboard-grid bluetooth-monitor-grid">
-        <section className="panel card bluetooth-monitor-card bluetooth-monitor-card-timeline">
+        <section
+          className={`panel card bluetooth-monitor-card bluetooth-monitor-card-timeline${
+            timelineCollapsed ? " is-collapsed" : ""
+          }`}
+        >
           <div className="card-header">
             <h2>Live Events</h2>
-            <span className="status-pill idle">
-              {hasActiveFilters ? `${filteredEvents.length} / ${events.length}` : filteredEvents.length}
-            </span>
+            <div className="bluetooth-monitor-card-actions">
+              <span className="status-pill idle">
+                {hasActiveFilters ? `${filteredEvents.length} / ${events.length}` : filteredEvents.length}
+              </span>
+              <button
+                type="button"
+                className="ghost bluetooth-monitor-collapse-button"
+                aria-expanded={!timelineCollapsed}
+                onClick={() => setTimelineCollapsed((prev) => !prev)}
+              >
+                {timelineCollapsed ? "Expand" : "Collapse"}
+              </button>
+            </div>
           </div>
 
+          {!timelineCollapsed ? (
+            <>
           <div className="bluetooth-monitor-toolbar">
             <input
               value={filterSearch}
@@ -690,16 +765,40 @@ export const BluetoothMonitorPage = ({
               <p className="muted">{timelineEmptyState.body}</p>
             </div>
           )}
+            </>
+          ) : (
+            <div className="bluetooth-monitor-collapsed-summary">
+              <span className="muted">
+                {filteredEvents.length ? `Latest visible events: ${filteredEvents.length}` : timelineEmptyState.title}
+              </span>
+            </div>
+          )}
         </section>
 
-        <section className="panel card bluetooth-monitor-card bluetooth-monitor-card-snapshot">
+        <section
+          className={`panel card bluetooth-monitor-card bluetooth-monitor-card-snapshot${
+            snapshotCollapsed ? " is-collapsed" : ""
+          }`}
+        >
           <div className="card-header">
             <h2>Activity Snapshot</h2>
-            <span className={`status-pill ${sessionState === "live" ? "ok" : sessionState === "starting" ? "busy" : "idle"}`}>
-              {sessionState === "live" ? "Fresh" : sessionState === "starting" ? "Loading" : "Snapshot"}
-            </span>
+            <div className="bluetooth-monitor-card-actions">
+              <span className={`status-pill ${sessionState === "live" ? "ok" : sessionState === "starting" ? "busy" : "idle"}`}>
+                {sessionState === "live" ? "Fresh" : sessionState === "starting" ? "Loading" : "Snapshot"}
+              </span>
+              <button
+                type="button"
+                className="ghost bluetooth-monitor-collapse-button"
+                aria-expanded={!snapshotCollapsed}
+                onClick={() => setSnapshotCollapsed((prev) => !prev)}
+              >
+                {snapshotCollapsed ? "Expand" : "Collapse"}
+              </button>
+            </div>
           </div>
 
+          {!snapshotCollapsed ? (
+            <>
           <div className="bluetooth-monitor-kpis">
             <span className="muted">Advertising sets: {advertisingSetCount}</span>
             <span className="muted">Scanners: {scanningClientCount}</span>
@@ -760,17 +859,43 @@ export const BluetoothMonitorPage = ({
               <p className="muted">No active scanners.</p>
             )}
           </div>
+
+          <div className="bluetooth-monitor-section">
+            <div className="bluetooth-monitor-section-header">
+              <h3>Profiles</h3>
+              <span className="muted">{profiles.length}</span>
+            </div>
+            {profiles.length ? (
+              <div className="bluetooth-monitor-profiles">
+                {profiles.slice(0, 12).map(([key, value]) => (
+                  <span key={key} className="filter-chip bluetooth-monitor-chip">
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+          ) : (
+              <p className="muted">No profile data detected.</p>
+            )}
+          </div>
+            </>
+          ) : (
+            <div className="bluetooth-monitor-collapsed-summary">
+              <span className="muted">
+                Advertising sets: {advertisingSetCount} · Scanners: {scanningClientCount} · Profiles: {profiles.length}
+              </span>
+            </div>
+          )}
         </section>
 
-        <section className="panel card bluetooth-monitor-card bluetooth-monitor-card-devices">
+        <section className="panel card bluetooth-monitor-card bluetooth-monitor-card-paired">
           <div className="card-header">
-            <h2>Devices & Profiles</h2>
-            <span className="status-pill idle">{snapshot?.bonded_devices.length ?? 0}</span>
+            <h2>Paired Devices</h2>
+            <span className="status-pill idle">{pairedDevices.length}</span>
           </div>
 
           <div className="bluetooth-monitor-section">
             <div className="bluetooth-monitor-section-header">
-              <h3>Bonded Devices</h3>
+              <h3>Known on this device</h3>
               <span className="muted">{bondedDevicesFiltered.length}</span>
             </div>
             <div className="bluetooth-monitor-toolbar bluetooth-monitor-toolbar-compact">
@@ -778,7 +903,7 @@ export const BluetoothMonitorPage = ({
                 value={bondSearch}
                 onChange={(event) => setBondSearch(event.target.value)}
                 placeholder="Search name or address"
-                aria-label="Search bonded Bluetooth devices"
+                aria-label="Search paired Bluetooth devices"
               />
               <button
                 type="button"
@@ -795,10 +920,19 @@ export const BluetoothMonitorPage = ({
                 {bondedDevicesFiltered.slice(0, bondShowAll ? 80 : 12).map((device) => (
                   <div key={device.address} className="bluetooth-monitor-row">
                     <div className="bluetooth-monitor-row-top">
-                      <strong>{device.name?.trim() || "Unknown device"}</strong>
+                      <div className="bluetooth-monitor-row-inline">
+                        <strong>{device.name?.trim() || "Unknown device"}</strong>
+                        <div className="bluetooth-monitor-chip-row bluetooth-monitor-chip-row-compact">
+                          <span className={`status-pill ${device.connection_tone}`}>
+                            {device.connection_label}
+                          </span>
+                          <span className="filter-chip bluetooth-monitor-chip">{device.bond_state}</span>
+                        </div>
+                      </div>
                       <span className="muted">
                         <code>{device.address}</code>
                       </span>
+                      {device.connection_detail ? <span className="muted">{device.connection_detail}</span> : null}
                     </div>
                   </div>
                 ))}
@@ -810,22 +944,45 @@ export const BluetoothMonitorPage = ({
               </div>
             )}
           </div>
+        </section>
 
+        <section className="panel card bluetooth-monitor-card bluetooth-monitor-card-discovered">
+          <div className="card-header">
+            <h2>Discovered Devices</h2>
+            <span className="status-pill idle">{discoveredDevices.length}</span>
+          </div>
           <div className="bluetooth-monitor-section">
             <div className="bluetooth-monitor-section-header">
-              <h3>Profiles</h3>
-              <span className="muted">{profiles.length}</span>
+              <h3>Seen in this monitor session</h3>
+              <span className="muted">{sessionEvents.length} events tracked</span>
             </div>
-            {profiles.length ? (
-              <div className="bluetooth-monitor-profiles">
-                {profiles.slice(0, 12).map(([key, value]) => (
-                  <span key={key} className="filter-chip bluetooth-monitor-chip">
-                    {key}: {value}
-                  </span>
+            {discoveredDevices.length ? (
+              <div className="bluetooth-monitor-list">
+                {discoveredDevices.map((device) => (
+                  <div key={device.address} className="bluetooth-monitor-row">
+                    <div className="bluetooth-monitor-row-top">
+                      <div className="bluetooth-monitor-row-inline">
+                        <strong>{device.name?.trim() || "Unknown device"}</strong>
+                        <div className="bluetooth-monitor-chip-row bluetooth-monitor-chip-row-compact">
+                          {device.paired ? <span className="status-pill busy">Paired</span> : null}
+                          <span className="filter-chip bluetooth-monitor-chip">
+                            RSSI: {device.last_rssi != null ? `${device.last_rssi} dBm` : "—"}
+                          </span>
+                        </div>
+                      </div>
+                      <span className="muted">
+                        <code>{device.address}</code>
+                      </span>
+                      <span className="muted">Last seen {formatRelativeFromMs(nowMs, device.last_seen_at_ms)}</span>
+                    </div>
+                  </div>
                 ))}
               </div>
             ) : (
-              <p className="muted">No profile data detected.</p>
+              <div className="bluetooth-monitor-empty bluetooth-monitor-empty-compact">
+                <p>No discovered devices yet.</p>
+                <p className="muted">Scan results seen during this monitor session will accumulate here.</p>
+              </div>
             )}
           </div>
         </section>

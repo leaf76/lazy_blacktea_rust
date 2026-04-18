@@ -189,11 +189,34 @@ export type BluetoothParsedEvent = {
   raw_line: string;
 };
 
+export type BluetoothMonitorEventEntry = {
+  event: BluetoothParsedEvent;
+  receivedAtMs: number;
+};
+
 export type BluetoothStateSummary = {
   serial: string;
   active_states: BluetoothState[];
   metrics: Record<string, unknown>;
   timestamp: number;
+};
+
+export type BluetoothPairedDeviceRow = {
+  address: string;
+  name?: string | null;
+  bond_state: BluetoothBondState;
+  connected: boolean;
+  connection_label: string;
+  connection_tone: "ok" | "idle" | "warn";
+  connection_detail?: string | null;
+};
+
+export type BluetoothDiscoveredDeviceRow = {
+  address: string;
+  name?: string | null;
+  last_rssi?: number | null;
+  last_seen_at_ms: number;
+  paired: boolean;
 };
 
 export type BluetoothSnapshotEvent = {
