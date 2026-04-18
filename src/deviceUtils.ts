@@ -51,6 +51,11 @@ export type DeviceQuickMenuSelection = {
   selectedSerials: string[];
   primarySerial: string;
 };
+export type DeviceInfoCopyItem = {
+  id: string;
+  label: string;
+  value: string;
+};
 export type DeviceGroupOption = {
   name: string;
   count: number;
@@ -185,6 +190,37 @@ export const formatDeviceInfoMarkdown = (device: DeviceInfo): string => {
     `- **Fingerprint:** ${formatDeviceValue(detail?.build_fingerprint)}`,
   ];
   return lines.join("\n");
+};
+
+export const buildDeviceInfoCopyItems = (device: DeviceInfo): DeviceInfoCopyItem[] => {
+  const detail = device.detail;
+  return [
+    { id: "all", label: "All Device Info", value: formatDeviceInfoMarkdown(device) },
+    { id: "serial", label: "Serial", value: formatDeviceValue(device.summary.serial) },
+    { id: "state", label: "State", value: formatDeviceValue(device.summary.state) },
+    { id: "name", label: "Name", value: formatDeviceValue(detail?.name) },
+    { id: "brand", label: "Brand", value: formatDeviceValue(detail?.brand) },
+    { id: "model", label: "Model", value: formatDeviceValue(detail?.model ?? device.summary.model) },
+    { id: "serial_number", label: "Serial Number", value: formatDeviceValue(detail?.serial_number) },
+    { id: "android", label: "Android", value: formatDeviceValue(detail?.android_version) },
+    { id: "api", label: "API", value: formatDeviceValue(detail?.api_level) },
+    { id: "processor", label: "Processor", value: formatDeviceValue(detail?.processor) },
+    { id: "resolution", label: "Resolution", value: formatDeviceValue(detail?.resolution) },
+    {
+      id: "storage",
+      label: "Storage",
+      value: detail?.storage_total_bytes != null ? formatBytes(detail.storage_total_bytes) : "Unknown",
+    },
+    {
+      id: "memory",
+      label: "Memory",
+      value: detail?.memory_total_bytes != null ? formatBytes(detail.memory_total_bytes) : "Unknown",
+    },
+    { id: "wifi", label: "WiFi", value: formatDeviceValue(detail?.wifi_is_on) },
+    { id: "bluetooth", label: "Bluetooth", value: formatDeviceValue(detail?.bt_is_on) },
+    { id: "gms", label: "GMS", value: formatDeviceValue(detail?.gms_version) },
+    { id: "fingerprint", label: "Fingerprint", value: formatDeviceValue(detail?.build_fingerprint) },
+  ];
 };
 
 export const mergeDeviceDetails = (

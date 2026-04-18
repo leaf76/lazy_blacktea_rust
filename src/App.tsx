@@ -210,6 +210,7 @@ import {
 import {
   applyGroupAssignment,
   applyDeviceDetailPatch,
+  buildDeviceInfoCopyItems,
   buildDeviceGroupOptions,
   buildTopbarOverview,
   buildDeviceQuickMenuActions,
@@ -217,7 +218,6 @@ import {
   filterDevicesBySearch,
   flattenDeviceGroups,
   formatPrimaryDeviceLabel,
-  formatDeviceInfoMarkdown,
   mergeDeviceDetails,
   reduceSelectionToOne,
   resolveDeviceQuickMenuSelection,
@@ -226,6 +226,7 @@ import {
   setPrimarySelection,
   withDeviceGroups,
   type DeviceContextActionId,
+  type DeviceInfoCopyItem,
   type DeviceQuickMenuAction,
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
@@ -1975,7 +1976,14 @@ function App() {
     outputPath: string | null;
     visibleActionIds: DeviceContextActionId[] | null;
   } | null>(null);
+  const [deviceContextSubmenu, setDeviceContextSubmenu] = useState<{
+    x: number;
+    y: number;
+    title: string;
+    items: DeviceInfoCopyItem[];
+  } | null>(null);
   const deviceContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const deviceContextSubmenuRef = useRef<HTMLDivElement | null>(null);
   const deviceContextMenuTriggerRef = useRef<HTMLElement | null>(null);
   const deviceContextMenuWasOpenRef = useRef(false);
   const deviceQuickSelectionHintShownRef = useRef(false);
@@ -3657,6 +3665,10 @@ function App() {
     });
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (deviceContextSubmenu) {
+          setDeviceContextSubmenu(null);
+          return;
+        }
         setDeviceContextMenu(null);
       }
     };
@@ -3668,7 +3680,22 @@ function App() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("scroll", handleScroll, true);
     };
-  }, [deviceContextMenu]);
+  }, [deviceContextMenu, deviceContextSubmenu]);
+
+  useEffect(() => {
+    if (!deviceContextSubmenu) {
+      return;
+    }
+    const focusFrame = window.requestAnimationFrame(() => {
+      const firstItem = deviceContextSubmenuRef.current?.querySelector<HTMLButtonElement>(
+        ".context-menu-item:not(:disabled)",
+      );
+      firstItem?.focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+    };
+  }, [deviceContextSubmenu]);
 
   useEffect(() => {
     if (deviceContextMenu) {
@@ -3683,6 +3710,7 @@ function App() {
       trigger.focus();
     }
     deviceContextMenuTriggerRef.current = null;
+    setDeviceContextSubmenu(null);
   }, [deviceContextMenu]);
 
   useEffect(() => {
@@ -11385,18 +11413,10 @@ function App() {
     }
   };
 
-  const handleCopyDeviceInfo = async () => {
-    const serial = ensureSingleSelection("device info copy");
-    if (!serial) {
-      return;
-    }
-    const device = devices.find((item) => item.summary.serial === serial);
-    if (!device) {
-      return;
-    }
+  const copyDeviceInfoValue = async (value: string, successMessage: string) => {
     try {
-      await writeText(formatDeviceInfoMarkdown(device));
-      pushToast("Device info copied.", "info");
+      await writeText(value);
+      pushToast(successMessage, "info");
     } catch (error) {
       pushToast(formatError(error), "error");
     }
@@ -11602,9 +11622,7 @@ function App() {
       scope: "single",
       hideWhenOutOfScope: true,
       disabled: busy || selectedCount !== 1,
-      onSelect: () => {
-        void handleCopyDeviceInfo();
-      },
+      onSelect: () => {},
     },
     {
       id: "screenshot",
@@ -11753,6 +11771,37 @@ function App() {
         ? `${selectedOnlineCount}/${selectedCount} online in current selection`
         : formatPrimaryDeviceLabel(selectedSerials[0] ?? deviceContextMenu.serial, deviceContextMenuTarget)
     : "";
+  const deviceContextMenuCopyItems = deviceContextMenuTarget
+    ? buildDeviceInfoCopyItems(deviceContextMenuTarget)
+    : [];
+  const deviceContextSubmenuPosition = deviceContextSubmenu
+    ? computeContextMenuPosition({
+        anchorX: deviceContextSubmenu.x,
+        anchorY: deviceContextSubmenu.y,
+        menuWidth: 250,
+        menuHeight: Math.max(64, 44 + deviceContextSubmenu.items.length * 36),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        margin: 10,
+      })
+    : null;
+
+  const openDeviceInfoCopySubmenu = (triggerElement: HTMLElement) => {
+    if (!deviceContextMenuTarget) {
+      return;
+    }
+    const items = buildDeviceInfoCopyItems(deviceContextMenuTarget);
+    if (!items.length) {
+      return;
+    }
+    const rect = triggerElement.getBoundingClientRect();
+    setDeviceContextSubmenu({
+      x: rect.right + 8,
+      y: rect.top,
+      title: "Copy Device Info",
+      items,
+    });
+  };
 
   const dashboardCardClassMap: Record<DashboardCardId, string> = {
     overview: "dashboard-hero",
@@ -14653,12 +14702,18 @@ function App() {
                                   action.disabled ||
                                   (action.id === "open_output" && !deviceContextMenu.outputPath) ||
                                   (!catalogAction && action.id !== "open_output");
+                                const hasSubmenu = action.id === "copy_device_info";
                                 return (
                                   <button
                                     key={action.id}
                                     type="button"
-                                    className={`context-menu-item${action.tone === "danger" ? " danger" : ""}`}
-                                    onClick={() => {
+                                    className={`context-menu-item${action.tone === "danger" ? " danger" : ""}${hasSubmenu ? " has-submenu" : ""}`}
+                                    onClick={(event) => {
+                                      if (hasSubmenu) {
+                                        event.stopPropagation();
+                                        openDeviceInfoCopySubmenu(event.currentTarget);
+                                        return;
+                                      }
                                       if (action.id === "open_output") {
                                         if (deviceContextMenu.outputPath) {
                                           void openPath(deviceContextMenu.outputPath);
@@ -14670,13 +14725,57 @@ function App() {
                                     }}
                                     disabled={disabled}
                                   >
-                                    {action.label}
+                                    {hasSubmenu ? (
+                                      <>
+                                        <span className="context-menu-item-label">{action.label}</span>
+                                        <span className="context-menu-item-caret" aria-hidden="true">
+                                          ›
+                                        </span>
+                                      </>
+                                    ) : (
+                                      action.label
+                                    )}
                                   </button>
                                 );
                               })}
                             </div>
                           ))}
                         </div>
+                        {deviceContextSubmenu && (
+                          <div
+                            ref={deviceContextSubmenuRef}
+                            className="context-menu context-menu-submenu"
+                            style={{
+                              top: deviceContextSubmenuPosition?.top ?? deviceContextSubmenu.y,
+                              left: deviceContextSubmenuPosition?.left ?? deviceContextSubmenu.x,
+                            }}
+                          >
+                            <div className="context-menu-header">
+                              <span className="context-menu-header-title">{deviceContextSubmenu.title}</span>
+                              <span className="context-menu-header-sub">
+                                {deviceContextMenuCopyItems.length
+                                  ? `${deviceContextMenuCopyItems.length} copy options`
+                                  : "Copy individual fields"}
+                              </span>
+                            </div>
+                            {deviceContextSubmenu.items.map((item) => (
+                              <button
+                                key={item.id}
+                                type="button"
+                                className="context-menu-item"
+                                onClick={() => {
+                                  void copyDeviceInfoValue(
+                                    item.value,
+                                    item.id === "all" ? "Device info copied." : `${item.label} copied.`,
+                                  );
+                                  setDeviceContextMenu(null);
+                                }}
+                              >
+                                {item.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </>
                     )}
 

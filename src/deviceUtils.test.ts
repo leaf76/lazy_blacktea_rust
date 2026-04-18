@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDeviceInfoCopyItems,
   applyGroupAssignment,
   applyDeviceDetailPatch,
   buildDeviceQuickMenuActions,
@@ -155,6 +156,42 @@ describe("deviceUtils", () => {
     expect(markdown).toContain("- **Memory:** 8.00 GB");
     expect(markdown).toContain("- **WiFi:** On");
     expect(markdown).toContain("- **Bluetooth:** Off");
+  });
+
+  it("builds device info copy items for full summary and individual fields", () => {
+    const device: DeviceInfo = {
+      summary: { serial: "alpha", state: "device", model: "Pixel" },
+      detail: {
+        serial: "alpha",
+        name: "panther",
+        brand: "google",
+        serial_number: "ABC123",
+        android_version: "15",
+        api_level: "35",
+        processor: "Tensor",
+        resolution: "1080x2400",
+        storage_total_bytes: 137_438_953_472,
+        memory_total_bytes: 8 * 1024 * 1024 * 1024,
+        wifi_is_on: true,
+        bt_is_on: false,
+        gms_version: "24.02",
+        build_fingerprint: "fingerprint",
+      },
+    };
+
+    const items = buildDeviceInfoCopyItems(device);
+
+    expect(items[0]).toEqual({
+      id: "all",
+      label: "All Device Info",
+      value: formatDeviceInfoMarkdown(device),
+    });
+    expect(items).toContainEqual({ id: "serial", label: "Serial", value: "alpha" });
+    expect(items).toContainEqual({ id: "model", label: "Model", value: "Pixel" });
+    expect(items).toContainEqual({ id: "storage", label: "Storage", value: "128 GB" });
+    expect(items).toContainEqual({ id: "memory", label: "Memory", value: "8.00 GB" });
+    expect(items).toContainEqual({ id: "wifi", label: "WiFi", value: "On" });
+    expect(items).toContainEqual({ id: "bluetooth", label: "Bluetooth", value: "Off" });
   });
 
   it("reduces selection to one device while keeping the primary when possible", () => {
