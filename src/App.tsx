@@ -220,10 +220,13 @@ import {
   formatDeviceInfoMarkdown,
   mergeDeviceDetails,
   reduceSelectionToOne,
+  resolveDeviceQuickMenuSelection,
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
   withDeviceGroups,
+  type DeviceContextActionId,
+  type DeviceQuickMenuAction,
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
 import { DeviceGroupPanel } from "./DeviceGroupPanel";
@@ -376,16 +379,10 @@ type TerminalDeviceState = {
   tail: string;
   autoScroll: boolean;
 };
-type QuickActionId =
-  | "screenshot"
-  | "reboot"
-  | "wifi-toggle"
-  | "bluetooth-toggle"
-  | "record"
-  | "logcat-clear"
-  | "mirror";
 type RebootMode = "normal" | "recovery" | "bootloader";
-type DashboardActionId = QuickActionId | "apk-installer";
+type DeviceCatalogActionEntry = DeviceQuickMenuAction & {
+  onSelect: () => void;
+};
 
 const TERMINAL_MAX_LINES = 500;
 const NET_PROFILER_MAX_SAMPLES = 180;
@@ -1976,11 +1973,7 @@ function App() {
     serial: string;
     source: DeviceQuickMenuSource;
     outputPath: string | null;
-  } | null>(null);
-  const [deviceCommandMenu, setDeviceCommandMenu] = useState<{
-    x: number;
-    y: number;
-    kind: "wifi" | "bluetooth";
+    visibleActionIds: DeviceContextActionId[] | null;
   } | null>(null);
   const deviceContextMenuRef = useRef<HTMLDivElement | null>(null);
   const deviceContextMenuTriggerRef = useRef<HTMLElement | null>(null);
@@ -2389,9 +2382,6 @@ function App() {
         : "Not loaded yet",
     [developerOptionsMatrixLogBufferLastReadAt],
   );
-  const deviceContextMenuActions = deviceContextMenu
-    ? buildDeviceQuickMenuActions(deviceContextMenu.source, deviceContextMenu.outputPath)
-    : [];
   const selectedConnectedCount = selectedSerials.reduce(
     (total, serial) => total + (terminalBySerial[serial]?.connected ? 1 : 0),
     0,
@@ -3694,24 +3684,6 @@ function App() {
     }
     deviceContextMenuTriggerRef.current = null;
   }, [deviceContextMenu]);
-
-  useEffect(() => {
-    if (!deviceCommandMenu) {
-      return;
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setDeviceCommandMenu(null);
-      }
-    };
-    const handleScroll = () => setDeviceCommandMenu(null);
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("scroll", handleScroll, true);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("scroll", handleScroll, true);
-    };
-  }, [deviceCommandMenu]);
 
   useEffect(() => {
     if (!filesContextMenu) {
@@ -5592,33 +5564,62 @@ function App() {
       anchorX?: number;
       anchorY?: number;
       showSelectionHint?: boolean;
+      visibleActionIds?: DeviceContextActionId[] | null;
     },
   ) => {
     const triggerElement = options?.triggerElement ?? null;
     const rect = triggerElement?.getBoundingClientRect();
     const anchorX = options?.anchorX ?? (rect ? rect.right - 12 : 24);
     const anchorY = options?.anchorY ?? (rect ? rect.top + Math.min(rect.height, 20) : 24);
+    const source = options?.source ?? "device_manager";
+    const resolvedSelection = resolveDeviceQuickMenuSelection({
+      source,
+      clickedSerial: serial,
+      selectedSerials,
+    });
 
     deviceContextMenuTriggerRef.current = triggerElement;
 
     if (options?.showSelectionHint && !deviceQuickSelectionHintShownRef.current) {
       deviceQuickSelectionHintShownRef.current = true;
-      pushToast("Right-click selects this device for quick actions.", "info");
+      pushToast("Right-click uses the clicked device or the current selection for quick actions.", "info");
     }
 
-    setSelectedSerials([serial]);
+    setSelectedSerials(resolvedSelection.selectedSerials);
     if (typeof options?.rowIndex === "number") {
       lastSelectedIndexRef.current = options.rowIndex;
     } else {
       lastSelectedIndexRef.current = null;
     }
-    setDeviceCommandMenu(null);
     setDeviceContextMenu({
       x: anchorX,
       y: anchorY,
       serial,
-      source: options?.source ?? "device_manager",
+      source,
       outputPath: options?.outputPath ?? null,
+      visibleActionIds: options?.visibleActionIds ?? null,
+    });
+  };
+
+  const openSelectedDeviceActionMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+    visibleActionIds: DeviceContextActionId[],
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const primarySerial = selectedSerials[0];
+    if (!primarySerial) {
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    deviceContextMenuTriggerRef.current = event.currentTarget;
+    setDeviceContextMenu({
+      x: rect.left + rect.width / 2,
+      y: rect.bottom + 6,
+      serial: primarySerial,
+      source: "device_manager",
+      outputPath: null,
+      visibleActionIds,
     });
   };
 
@@ -5630,6 +5631,7 @@ function App() {
       outputPath?: string | null;
       rowIndex?: number | null;
       showSelectionHint?: boolean;
+      visibleActionIds?: DeviceContextActionId[] | null;
     },
   ) => {
     event.preventDefault();
@@ -5649,6 +5651,7 @@ function App() {
       source?: DeviceQuickMenuSource;
       outputPath?: string | null;
       rowIndex?: number | null;
+      visibleActionIds?: DeviceContextActionId[] | null;
     },
   ) => {
     if (!isContextMenuShortcut(event)) {
@@ -5661,32 +5664,6 @@ function App() {
       triggerElement: event.currentTarget,
     });
   };
-
-  const deviceContextMenuPosition = deviceContextMenu
-    ? computeContextMenuPosition({
-        anchorX: deviceContextMenu.x,
-        anchorY: deviceContextMenu.y,
-        menuWidth: 210,
-        menuHeight: Math.max(48, 14 + deviceContextMenuActions.length * 36),
-        viewportWidth: window.innerWidth,
-        viewportHeight: window.innerHeight,
-        margin: 10,
-      })
-    : null;
-
-  const deviceCommandMenuPosition = deviceCommandMenu
-    ? (() => {
-        return computeContextMenuPosition({
-          anchorX: deviceCommandMenu.x,
-          anchorY: deviceCommandMenu.y,
-          menuWidth: 190,
-          menuHeight: Math.max(48, 14 + 2 * 36),
-          viewportWidth: window.innerWidth,
-          viewportHeight: window.innerHeight,
-          margin: 10,
-        });
-      })()
-    : null;
 
   const handleDeviceRowSelect = (
     event: React.MouseEvent<HTMLElement>,
@@ -11408,19 +11385,6 @@ function App() {
     }
   };
 
-  const handleCopyDeviceInfoSpecific = async (serial: string) => {
-    const device = devices.find((item) => item.summary.serial === serial);
-    if (!device) {
-      return;
-    }
-    try {
-      await writeText(formatDeviceInfoMarkdown(device));
-      pushToast("Device info copied.", "info");
-    } catch (error) {
-      pushToast(formatError(error), "error");
-    }
-  };
-
   const handleCopyDeviceInfo = async () => {
     const serial = ensureSingleSelection("device info copy");
     if (!serial) {
@@ -11616,452 +11580,179 @@ function App() {
     return `Recording in progress on ${selectedRunningScreenRecords.length} selected devices.`;
   }, [selectedRunningScreenRecords]);
 
-  const handleQuickWifiToggle = () => {
-    void handleToggleWifi(wifiActionMeta);
-  };
-
-  const handleQuickBluetoothToggle = () => {
-    void handleToggleBluetooth(bluetoothActionMeta);
-  };
-
-  const dashboardActions: Array<{
-    id: DashboardActionId;
-    title: string;
-    description: string;
-    hint?: string;
-    tone?: "primary";
-    onClick: () => void;
-    disabled: boolean;
-  }> = [
+  const deviceActionCatalog: DeviceCatalogActionEntry[] = [
+    {
+      id: "set_primary",
+      label: "Set Primary",
+      section: "selection",
+      scope: "single",
+      disabled: busy || selectedCount !== 1 || selectedSerials[0] === activeSerial,
+      onSelect: () => {
+        const serial = selectedSerials[0];
+        if (!serial) {
+          return;
+        }
+        handleSelectActiveSerial(serial);
+      },
+    },
+    {
+      id: "copy_device_info",
+      label: "Copy Device Info",
+      section: "selection",
+      scope: "single",
+      hideWhenOutOfScope: true,
+      disabled: busy || selectedCount !== 1,
+      onSelect: () => {
+        void handleCopyDeviceInfo();
+      },
+    },
     {
       id: "screenshot",
-      title: screenshotActionMeta.title,
-      description: screenshotActionMeta.description,
-      hint: screenshotActionMeta.hint,
-      tone: "primary",
-      onClick: handleQuickScreenshot,
-      disabled: busy || selectedSerials.length === 0 || screenshotActionMeta.disabled,
-    },
-    {
-      id: "reboot",
-      title: rebootActionMeta.title,
-      description: rebootActionMeta.description,
-      hint: rebootActionMeta.hint,
-      onClick: requestRebootConfirm,
-      disabled: busy || selectedSerials.length === 0 || rebootActionMeta.disabled,
-    },
-    {
-      id: "wifi-toggle",
-      title: wifiActionMeta.title,
-      description: wifiActionMeta.description,
-      hint: wifiActionMeta.hint,
-      onClick: handleQuickWifiToggle,
-      disabled: busy || selectedSerials.length === 0 || wifiActionMeta.disabled,
-    },
-    {
-      id: "bluetooth-toggle",
-      title: bluetoothActionMeta.title,
-      description: bluetoothActionMeta.description,
-      hint: bluetoothActionMeta.hint,
-      onClick: handleQuickBluetoothToggle,
-      disabled: busy || selectedSerials.length === 0 || bluetoothActionMeta.disabled,
+      label: screenshotActionMeta.title,
+      section: "capture",
+      scope: "both",
+      disabled: busy || selectedCount === 0 || screenshotActionMeta.disabled,
+      onSelect: () => {
+        void handleQuickScreenshot();
+      },
     },
     {
       id: "record",
-      title: screenRecordActionMeta.title,
-      description: screenRecordActionMeta.description,
-      hint: screenRecordActionMeta.hint,
-      tone: "primary",
-      onClick: handleQuickScreenRecord,
-      disabled: busy || selectedSerials.length === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled,
+      label: screenRecordActionMeta.title,
+      section: "capture",
+      scope: "both",
+      disabled: busy || selectedCount === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled,
+      onSelect: () => {
+        void handleQuickScreenRecord();
+      },
     },
     {
-      id: "logcat-clear",
-      title: logcatClearActionMeta.title,
-      description: logcatClearActionMeta.description,
-      hint: logcatClearActionMeta.hint,
-      onClick: handleQuickLogcatClear,
-      disabled: busy || logcatClearActionMeta.disabled,
+      id: "reboot",
+      label: rebootActionMeta.title,
+      section: "control",
+      scope: "both",
+      tone: "danger",
+      disabled: busy || selectedCount === 0 || rebootActionMeta.disabled,
+      onSelect: requestRebootConfirm,
     },
     {
       id: "mirror",
-      title: "Live Mirror",
-      description: scrcpyInfo?.available
-        ? "Launch scrcpy for a live mirror window."
-        : "Install scrcpy to enable live mirroring.",
-      hint: "Multi-device",
-      tone: "primary",
-      onClick: handleScrcpyLaunch,
-      disabled: busy || selectedSerials.length === 0,
+      label: "Live Mirror",
+      section: "control",
+      scope: "both",
+      disabled: busy || selectedCount === 0,
+      onSelect: () => {
+        void handleScrcpyLaunch();
+      },
     },
     {
-      id: "apk-installer",
-      title: "APK Installer",
-      description: "Install single, multiple, or split APK bundles.",
-      hint: "Installer flow",
-      onClick: () => navigate("/apk-installer"),
+      id: "wifi_enable",
+      label: "WiFi On",
+      section: "connectivity",
+      scope: "both",
+      disabled: busy || selectedCount === 0 || wifiActionMeta.eligibleSerials.length === 0,
+      onSelect: () => {
+        void handleToggleWifi(true);
+      },
+    },
+    {
+      id: "wifi_disable",
+      label: "WiFi Off",
+      section: "connectivity",
+      scope: "both",
+      disabled: busy || selectedCount === 0 || wifiActionMeta.eligibleSerials.length === 0,
+      onSelect: () => {
+        void handleToggleWifi(false);
+      },
+    },
+    {
+      id: "bluetooth_enable",
+      label: "Bluetooth On",
+      section: "connectivity",
+      scope: "both",
+      disabled: busy || selectedCount === 0 || bluetoothActionMeta.eligibleSerials.length === 0,
+      onSelect: () => {
+        void handleToggleBluetooth(true);
+      },
+    },
+    {
+      id: "bluetooth_disable",
+      label: "Bluetooth Off",
+      section: "connectivity",
+      scope: "both",
+      disabled: busy || selectedCount === 0 || bluetoothActionMeta.eligibleSerials.length === 0,
+      onSelect: () => {
+        void handleToggleBluetooth(false);
+      },
+    },
+    {
+      id: "logcat_clear",
+      label: "Clear Logcat",
+      section: "debug",
+      scope: "single",
+      hideWhenOutOfScope: true,
+      disabled: busy || logcatClearActionMeta.disabled,
+      onSelect: handleQuickLogcatClear,
+    },
+    {
+      id: "apk_installer",
+      label: "APK Installer",
+      section: "more",
+      scope: "both",
       disabled: busy,
+      onSelect: () => {
+        navigate("/apk-installer");
+      },
     },
   ];
 
-  const dashboardActionGroups = [
-    {
-      id: "capture",
-      title: "Capture",
-      description: "Screenshots and recordings.",
-      actionIds: ["screenshot", "record"],
-    },
-    {
-      id: "control",
-      title: "Control",
-      description: "Device control and mirroring.",
-      actionIds: ["reboot", "mirror"],
-    },
-    {
-      id: "connectivity",
-      title: "Connectivity",
-      description: "Network and radio toggles.",
-      actionIds: ["wifi-toggle", "bluetooth-toggle"],
-    },
-    {
-      id: "debug",
-      title: "Debug",
-      description: "Logcat and diagnostics.",
-      actionIds: ["logcat-clear"],
-    },
-    {
-      id: "install",
-      title: "Install",
-      description: "APK bundles and packages.",
-      actionIds: ["apk-installer"],
-    },
-  ];
-
-  const handleQuickActionsSelectAll = () => {
-    if (devices.length === 0) {
-      return;
-    }
-    if (deviceSelectionMode === "single") {
-      setSelectedSerials([devices[0].summary.serial]);
-      return;
-    }
-    setSelectedSerials(devices.map((device) => device.summary.serial));
-  };
-
-  const renderQuickActionGroups = () => (
-    <div className="quick-actions">
-      {dashboardActionGroups.map((group) => (
-        <div key={group.id} className="quick-action-group" role="group" aria-labelledby={`quick-action-group-${group.id}`}>
-          <div className="quick-action-group-header">
-            <div>
-              <span className="quick-action-group-overline">Batch Category</span>
-              <h3 id={`quick-action-group-${group.id}`}>{group.title}</h3>
-              <p className="muted">{group.description}</p>
-            </div>
-            <span className="badge">{group.actionIds.length} actions</span>
-          </div>
-          <div className="quick-action-grid">
-            {group.actionIds.map((actionId) => {
-              const action = dashboardActions.find((item) => item.id === actionId);
-              if (!action) {
-                return null;
-              }
-              return (
-                <button
-                  key={action.id}
-                  className={`quick-action${action.tone === "primary" ? " is-primary" : ""}`}
-                  onClick={action.onClick}
-                  disabled={action.disabled}
-                >
-                  <span className="quick-action-title">
-                    <span>{action.title}</span>
-                    {action.hint && <span className="quick-action-hint">{action.hint}</span>}
-                  </span>
-                  <span className="muted">{action.description}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </div>
+  const deviceActionCatalogMap = new Map(deviceActionCatalog.map((action) => [action.id, action] as const));
+  const visibleDeviceContextActions = deviceContextMenu
+    ? deviceActionCatalog.filter((action) =>
+        deviceContextMenu.visibleActionIds ? deviceContextMenu.visibleActionIds.includes(action.id) : true,
+      )
+    : [];
+  const deviceContextMenuSections = deviceContextMenu
+    ? buildDeviceQuickMenuActions({
+        source: deviceContextMenu.source,
+        scopeKind: selectedSerials.length > 1 ? "multi" : "single",
+        outputPath: deviceContextMenu.outputPath,
+        actions: visibleDeviceContextActions.map(({ onSelect: _onSelect, ...action }) => action),
+      })
+    : [];
+  const deviceContextMenuActionCount = deviceContextMenuSections.reduce(
+    (total, section) => total + section.actions.length,
+    0,
   );
-
-  const QuickActionsView = () => {
-    const quickActionsSelectedOnlineCount = selectedSerials.reduce((total, serial) => {
-      const summary = devices.find((device) => device.summary.serial === serial)?.summary;
-      return total + (summary?.state === "device" ? 1 : 0);
-    }, 0);
-    const isShortDeviceList = devices.length <= 2;
-
-    if (adbInfo && !adbInfo.available) {
-      return (
-        <div className="page-section quick-actions-page">
-          <div className="page-header">
-            <div>
-              <h1>Quick Actions</h1>
-              <p className="muted">ADB is required to run device actions.</p>
-            </div>
-          </div>
-          <section className="panel empty-state">
-            <div className="inline-alert error">
-              <strong>ADB not available</strong>
-              <span>
-                Configure the full path to the ADB executable in Settings or install Android Platform
-                Tools and ensure <code>adb</code> is on your PATH.
-              </span>
-              <span className="muted">
-                Current command: <code>{adbInfo.command_path || "adb"}</code>
-              </span>
-              {adbInfo.error && <span className="muted">Error: {adbInfo.error}</span>}
-            </div>
-            <div className="button-row">
-              <button className="ghost" onClick={() => navigate("/settings")} disabled={busy}>
-                Open Settings
-              </button>
-              <button onClick={refreshDevices} disabled={busy}>
-                Retry
-              </button>
-            </div>
-          </section>
-        </div>
-      );
-    }
-
-    if (!hasDevices) {
-      return (
-        <div className="page-section quick-actions-page">
-          <div className="page-header">
-            <div>
-              <h1>Quick Actions</h1>
-              <p className="muted">Connect at least one device to run quick actions.</p>
-            </div>
-          </div>
-          <section className="panel empty-state">
-            <div>
-              <h2>Connect a device to get started</h2>
-              <p className="muted">
-                Plug in via USB or pair wirelessly, then use this page for fast screenshot, reboot,
-                mirroring, and install flows.
-              </p>
-              <ol className="step-list">
-                <li>Enable Developer Options and USB/Wireless Debugging.</li>
-                <li>Connect the device via USB or open Wireless Debugging.</li>
-                <li>Pair using QR or pairing code, then refresh the device list.</li>
-              </ol>
-            </div>
-            <div className="button-row">
-              <button onClick={openPairingModal} disabled={busy}>
-                Wireless Pairing
-              </button>
-              <button className="ghost" onClick={refreshDevices} disabled={busy}>
-                Refresh Devices
-              </button>
-            </div>
-          </section>
-        </div>
-      );
-    }
-
-    return (
-      <div className="page-section quick-actions-page">
-        <div className="page-header">
-          <div>
-            <h1>Quick Actions</h1>
-            <p className="muted">Fast actions with compact device selection.</p>
-          </div>
-          <div className="page-actions">
-            <button className="ghost" onClick={refreshDevices} disabled={busy}>
-              Refresh Devices
-            </button>
-            <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
-              Manage Devices
-            </button>
-          </div>
-        </div>
-
-        {selectedSerials.length > 1 && (
-          <div className="quick-actions-batch-strip" role="status" aria-live="polite">
-            <strong>Batch Mode</strong>
-            <span>
-              {selectedSerials.length} selected • {quickActionsSelectedOnlineCount} online devices ready for multi-device actions.
-            </span>
-          </div>
-        )}
-
-        <div className="quick-actions-layout">
-          <section className="panel card quick-actions-devices-panel">
-            <div className="quick-actions-devices-toolbar">
-              <div className="quick-actions-devices-toolbar-main">
-                <div className="quick-actions-devices-heading">
-                  <h2>Devices</h2>
-                  <p className="muted">Select one or more devices, then run actions.</p>
-                </div>
-                <div className="toggle-group" role="group" aria-label="Selection mode">
-                  <button
-                    type="button"
-                    className={`toggle${deviceSelectionMode === "single" ? " active" : ""}`}
-                    onClick={() => handleSetDeviceSelectionMode("single")}
-                    disabled={busy}
-                  >
-                    Single
-                  </button>
-                  <button
-                    type="button"
-                    className={`toggle${deviceSelectionMode === "multi" ? " active" : ""}`}
-                    onClick={() => handleSetDeviceSelectionMode("multi")}
-                    disabled={busy}
-                  >
-                    Multi
-                  </button>
-                </div>
-              </div>
-              <div className="quick-actions-devices-toolbar-meta">
-                <div className="quick-actions-device-counts" aria-live="polite">
-                  <span className="badge">{selectedCount} selected</span>
-                  <span className="badge">{selectedOnlineCount} online</span>
-                </div>
-                <div
-                  className="quick-actions-device-controls-actions"
-                  role="group"
-                  aria-label="Device bulk selection actions"
-                >
-                  <button className="ghost" onClick={handleQuickActionsSelectAll} disabled={busy || devices.length === 0}>
-                    Select All
-                  </button>
-                  <button
-                    className="ghost"
-                    onClick={clearSelection}
-                    disabled={busy || devices.length === 0}
-                    title={devices.length === 0 ? "No devices detected." : "Keep one device selected."}
-                  >
-                    Keep One
-                  </button>
-                </div>
-              </div>
-            </div>
-            <p className="muted quick-actions-shortcut-note">
-              Tip: focus the device list and press Ctrl/Cmd + A to select all based on current mode.
-            </p>
-
-            <div
-              className={`quick-actions-device-list${isShortDeviceList ? " is-short-list" : ""}`}
-              role="region"
-              aria-label="Quick actions device list"
-              tabIndex={0}
-              onKeyDown={(event) => {
-                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
-                  event.preventDefault();
-                  handleQuickActionsSelectAll();
-                }
-              }}
-            >
-              {devices.map((device) => {
-                const serial = device.summary.serial;
-                const detail = device.detail;
-                const name = detail?.model ?? device.summary.model ?? serial;
-                const isSelected = selectedSerials.includes(serial);
-                const isActive = serial === activeSerial;
-                const stateTone =
-                  device.summary.state === "device"
-                    ? "ok"
-                    : device.summary.state === "unauthorized"
-                      ? "error"
-                      : "warn";
-
-                return (
-                  <div
-                    key={serial}
-                    className={`quick-actions-device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
-                    onClick={(event) => {
-                      const target = event.target as HTMLElement | null;
-                      if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
-                        return;
-                      }
-                      toggleDeviceInContextPopover(serial);
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(event) => {
-                      const target = event.target as HTMLElement | null;
-                      if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
-                        return;
-                      }
-                      if (isContextMenuShortcut(event)) {
-                        openDeviceQuickContextMenuFromKeyboard(event, serial, {
-                          source: "quick_actions",
-                        });
-                        return;
-                      }
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        toggleDeviceInContextPopover(serial);
-                      }
-                    }}
-                    onContextMenu={(event) =>
-                      openDeviceQuickContextMenuFromPointer(event, serial, {
-                        source: "quick_actions",
-                        showSelectionHint: true,
-                      })
-                    }
-                  >
-                    <label className="device-check" onClick={(event) => event.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onClick={(event) => event.stopPropagation()}
-                        onChange={() => toggleDeviceInContextPopover(serial)}
-                        disabled={busy}
-                        aria-label={`Select ${name}`}
-                      />
-                    </label>
-                    <div className="quick-actions-device-meta">
-                      <span className="quick-actions-device-name">{name}</span>
-                      <span className="quick-actions-device-serial">{serial}</span>
-                    </div>
-                    <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
-                    <button
-                      type="button"
-                      className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (!isActive) {
-                          handleSelectActiveSerial(serial);
-                        }
-                      }}
-                      disabled={busy || isActive}
-                      aria-label={isActive ? `${name} is primary device` : `Set ${name} as primary device`}
-                    >
-                      {isActive ? "Primary" : "Set Primary"}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="panel card quick-actions-panel">
-            <div className="card-header">
-              <div>
-                <h2>Quick Actions</h2>
-                <p className="muted">One-click actions using saved Settings defaults. Reboot still asks for confirmation.</p>
-              </div>
-              <span className="badge">
-                {selectedSerials.length ? `${selectedSerials.length} devices` : "Select device"}
-              </span>
-            </div>
-            {selectedSerials.length === 0 && (
-              <div className="inline-alert info">
-                <strong>Select a device</strong>
-                <span className="muted">Use the device list on this page to enable quick actions.</span>
-              </div>
-            )}
-            {renderQuickActionGroups()}
-          </section>
-        </div>
-      </div>
-    );
-  };
+  const deviceContextMenuPosition = deviceContextMenu
+    ? computeContextMenuPosition({
+        anchorX: deviceContextMenu.x,
+        anchorY: deviceContextMenu.y,
+        menuWidth: 230,
+        menuHeight: Math.max(64, 18 + deviceContextMenuSections.length * 26 + deviceContextMenuActionCount * 36),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        margin: 10,
+      })
+    : null;
+  const deviceContextMenuTarget = deviceContextMenu
+    ? devices.find((device) => device.summary.serial === (selectedSerials[0] ?? deviceContextMenu.serial)) ?? null
+    : null;
+  const deviceContextMenuHeaderTitle = deviceContextMenu
+    ? selectedSerials.length > 1
+      ? `${selectedSerials.length} selected devices`
+      : deviceContextMenuTarget?.detail?.model ??
+        deviceContextMenuTarget?.summary.model ??
+        selectedSerials[0] ??
+        deviceContextMenu.serial
+    : "";
+  const deviceContextMenuHeaderSub = deviceContextMenu
+    ? deviceContextMenu.source === "task"
+      ? "Task actions for this device"
+      : selectedSerials.length > 1
+        ? `${selectedOnlineCount}/${selectedCount} online in current selection`
+        : formatPrimaryDeviceLabel(selectedSerials[0] ?? deviceContextMenu.serial, deviceContextMenuTarget)
+    : "";
 
   const dashboardCardClassMap: Record<DashboardCardId, string> = {
     overview: "dashboard-hero",
@@ -12253,11 +11944,8 @@ function App() {
             <button className="ghost" onClick={openDashboardConfig} disabled={busy || !config}>
               Configure
             </button>
-            <button className="ghost" onClick={() => navigate("/quick-actions")} disabled={busy}>
-              Quick Actions
-            </button>
             <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
-              Manage Devices
+              Open Device Manager
             </button>
           </div>
         </div>
@@ -14001,7 +13689,6 @@ function App() {
             <NavLink to="/" end>
               Dashboard
             </NavLink>
-            <NavLink to="/quick-actions">Quick Actions</NavLink>
             <NavLink to="/devices">Device Manager</NavLink>
             <NavLink to="/bluetooth">Bluetooth Monitor</NavLink>
           </div>
@@ -14319,19 +14006,27 @@ function App() {
                     type="button"
                     className="context-menu-item"
                     role="menuitem"
-                    onClick={() => runTopActionsMenuCommand(() => void handleQuickScreenshot())}
-                    disabled={busy || selectedSerials.length === 0 || screenshotActionMeta.disabled}
+                    onClick={() =>
+                      runTopActionsMenuCommand(() => {
+                        deviceActionCatalogMap.get("screenshot")?.onSelect();
+                      })
+                    }
+                    disabled={deviceActionCatalogMap.get("screenshot")?.disabled ?? true}
                   >
-                    Screenshot
+                    {deviceActionCatalogMap.get("screenshot")?.label ?? "Screenshot"}
                   </button>
                   <button
                     type="button"
                     className="context-menu-item"
                     role="menuitem"
-                    onClick={() => runTopActionsMenuCommand(requestRebootConfirm)}
-                    disabled={busy || selectedSerials.length === 0 || rebootActionMeta.disabled}
+                    onClick={() =>
+                      runTopActionsMenuCommand(() => {
+                        deviceActionCatalogMap.get("reboot")?.onSelect();
+                      })
+                    }
+                    disabled={deviceActionCatalogMap.get("reboot")?.disabled ?? true}
                   >
-                    Reboot
+                    {deviceActionCatalogMap.get("reboot")?.label ?? "Reboot"}
                   </button>
                   <button
                     type="button"
@@ -14355,10 +14050,14 @@ function App() {
                     type="button"
                     className="context-menu-item"
                     role="menuitem"
-                    onClick={() => runTopActionsMenuCommand(() => void handleScrcpyLaunch())}
-                    disabled={busy || selectedSerials.length === 0}
+                    onClick={() =>
+                      runTopActionsMenuCommand(() => {
+                        deviceActionCatalogMap.get("mirror")?.onSelect();
+                      })
+                    }
+                    disabled={deviceActionCatalogMap.get("mirror")?.disabled ?? true}
                   >
-                    Live Mirror
+                    {deviceActionCatalogMap.get("mirror")?.label ?? "Live Mirror"}
                   </button>
                 </div>
               )}
@@ -14385,7 +14084,7 @@ function App() {
         <main className={`page${isDetachedPopupWindow ? " logcat-popup-page" : ""}`}>
           <Routes>
             <Route path="/" element={<DashboardView />} />
-            <Route path="/quick-actions" element={<QuickActionsView />} />
+            <Route path="/quick-actions" element={<Navigate to="/devices" replace />} />
             <Route path="/performance" element={<PerformanceView />} />
             <Route path="/network" element={<NetworkView />} />
             <Route path="/developer-options" element={<DeveloperOptionsView />} />
@@ -14860,33 +14559,46 @@ function App() {
                             <div className="button-row device-command-actions">
                               <button
                                 type="button"
+                                onClick={() => void handleQuickScreenshot()}
+                                disabled={busy || selectedCount === 0 || screenshotActionMeta.disabled}
+                              >
+                                {screenshotActionMeta.title}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleQuickScreenRecord()}
+                                disabled={busy || selectedCount === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled}
+                              >
+                                {screenRecordActionMeta.title}
+                              </button>
+                              <button
+                                type="button"
                                 className="ghost"
-                                onClick={(event) => {
-                                  event.preventDefault();
-                                  setDeviceContextMenu(null);
-                                  setDeviceCommandMenu({ x: event.clientX, y: event.clientY, kind: "wifi" });
-                                }}
-                                disabled={busy || selectedCount === 0}
+                                onClick={(event) => openSelectedDeviceActionMenu(event, ["wifi_enable", "wifi_disable"])}
+                                disabled={busy || selectedCount === 0 || wifiActionMeta.eligibleSerials.length === 0}
                               >
                                 WiFi…
                               </button>
                               <button
                                 type="button"
                                 className="ghost"
-                                onClick={(event) => {
-                                  event.preventDefault();
-                                  setDeviceContextMenu(null);
-                                  setDeviceCommandMenu({ x: event.clientX, y: event.clientY, kind: "bluetooth" });
-                                }}
-                                disabled={busy || selectedCount === 0}
+                                onClick={(event) =>
+                                  openSelectedDeviceActionMenu(event, ["bluetooth_enable", "bluetooth_disable"])
+                                }
+                                disabled={busy || selectedCount === 0 || bluetoothActionMeta.eligibleSerials.length === 0}
                               >
                                 Bluetooth…
                               </button>
-                              <button type="button" className="danger" onClick={requestRebootConfirm} disabled={busy || selectedCount === 0}>
-                                Reboot…
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => void handleScrcpyLaunch()}
+                                disabled={busy || selectedCount === 0}
+                              >
+                                Live Mirror
                               </button>
-                              <button onClick={handleCopyDeviceInfo} disabled={busy || selectedCount === 0}>
-                                Copy Device Info
+                              <button type="button" className="danger" onClick={requestRebootConfirm} disabled={busy || selectedCount === 0 || rebootActionMeta.disabled}>
+                                Reboot…
                               </button>
                             </div>
                           </div>
@@ -14927,109 +14639,43 @@ function App() {
                             left: deviceContextMenuPosition?.left ?? deviceContextMenu.x,
                           }}
                         >
-                          {deviceContextMenuActions.includes("set_primary") && (
-                            <button
-                              type="button"
-                              className="context-menu-item"
-                              onClick={() => {
-                                handleSelectActiveSerial(deviceContextMenu.serial);
-                                setDeviceContextMenu(null);
-                              }}
-                            >
-                              Set Primary
-                            </button>
-                          )}
-                          {deviceContextMenuActions.includes("copy_device_info") && (
-                            <button
-                              type="button"
-                              className="context-menu-item"
-                              onClick={() => {
-                                void handleCopyDeviceInfoSpecific(deviceContextMenu.serial);
-                                setDeviceContextMenu(null);
-                              }}
-                            >
-                              Copy Device Info
-                            </button>
-                          )}
-                          {deviceContextMenuActions.includes("open_output") && (
-                            <button
-                              type="button"
-                              className="context-menu-item"
-                              onClick={() => {
-                                if (deviceContextMenu.outputPath) {
-                                  void openPath(deviceContextMenu.outputPath);
-                                }
-                                setDeviceContextMenu(null);
-                              }}
-                            >
-                              Open output
-                            </button>
-                          )}
-                        </div>
-                      </>
-                    )}
-
-                    {deviceCommandMenu && (
-                      <>
-                        <div className="context-menu-backdrop" onClick={() => setDeviceCommandMenu(null)} />
-                        <div
-                          className="context-menu"
-                          style={{
-                            top: deviceCommandMenuPosition?.top ?? deviceCommandMenu.y,
-                            left: deviceCommandMenuPosition?.left ?? deviceCommandMenu.x,
-                          }}
-                        >
-                          {deviceCommandMenu.kind === "wifi" ? (
-                            <>
-                              <button
-                                type="button"
-                                className="context-menu-item"
-                                onClick={() => {
-                                  void handleToggleWifi(true);
-                                  setDeviceCommandMenu(null);
-                                }}
-                                disabled={busy || selectedCount === 0}
-                              >
-                                WiFi On
-                              </button>
-                              <button
-                                type="button"
-                                className="context-menu-item"
-                                onClick={() => {
-                                  void handleToggleWifi(false);
-                                  setDeviceCommandMenu(null);
-                                }}
-                                disabled={busy || selectedCount === 0}
-                              >
-                                WiFi Off
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button
-                                type="button"
-                                className="context-menu-item"
-                                onClick={() => {
-                                  void handleToggleBluetooth(true);
-                                  setDeviceCommandMenu(null);
-                                }}
-                                disabled={busy || selectedCount === 0}
-                              >
-                                Bluetooth On
-                              </button>
-                              <button
-                                type="button"
-                                className="context-menu-item"
-                                onClick={() => {
-                                  void handleToggleBluetooth(false);
-                                  setDeviceCommandMenu(null);
-                                }}
-                                disabled={busy || selectedCount === 0}
-                              >
-                                Bluetooth Off
-                              </button>
-                            </>
-                          )}
+                          <div className="context-menu-header">
+                            <span className="context-menu-header-title">{deviceContextMenuHeaderTitle}</span>
+                            <span className="context-menu-header-sub">{deviceContextMenuHeaderSub}</span>
+                          </div>
+                          {deviceContextMenuSections.map((section, index) => (
+                            <div key={section.id}>
+                              {index > 0 && <div className="context-menu-sep" />}
+                              <div className="context-menu-section-label">{section.title}</div>
+                              {section.actions.map((action) => {
+                                const catalogAction = deviceActionCatalogMap.get(action.id);
+                                const disabled =
+                                  action.disabled ||
+                                  (action.id === "open_output" && !deviceContextMenu.outputPath) ||
+                                  (!catalogAction && action.id !== "open_output");
+                                return (
+                                  <button
+                                    key={action.id}
+                                    type="button"
+                                    className={`context-menu-item${action.tone === "danger" ? " danger" : ""}`}
+                                    onClick={() => {
+                                      if (action.id === "open_output") {
+                                        if (deviceContextMenu.outputPath) {
+                                          void openPath(deviceContextMenu.outputPath);
+                                        }
+                                      } else {
+                                        catalogAction?.onSelect();
+                                      }
+                                      setDeviceContextMenu(null);
+                                    }}
+                                    disabled={disabled}
+                                  >
+                                    {action.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ))}
                         </div>
                       </>
                     )}

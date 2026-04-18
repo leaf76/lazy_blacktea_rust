@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   applyGroupAssignment,
   applyDeviceDetailPatch,
+  buildDeviceQuickMenuActions,
   buildDeviceGroupOptions,
   buildDeviceGroupSelectionSummary,
   buildTopbarOverview,
-  buildDeviceQuickMenuActions,
   computeContextMenuPosition,
   expandDeviceGroups,
   filterDevicesBySearch,
@@ -14,6 +14,7 @@ import {
   formatDeviceInfoMarkdown,
   mergeDeviceDetails,
   reduceSelectionToOne,
+  resolveDeviceQuickMenuSelection,
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
@@ -406,27 +407,184 @@ describe("deviceUtils", () => {
   });
 
   it("builds task quick-menu actions with output option only when output path is present", () => {
-    expect(buildDeviceQuickMenuActions("task", "/tmp/report.zip")).toEqual([
-      "set_primary",
-      "copy_device_info",
-      "open_output",
+    expect(
+      buildDeviceQuickMenuActions({
+        source: "task",
+        scopeKind: "single",
+        outputPath: "/tmp/report.zip",
+        actions: [],
+      }),
+    ).toEqual([
+      {
+        id: "selection",
+        title: "Selection",
+        actions: [
+          {
+            id: "set_primary",
+            label: "Set Primary",
+            section: "selection",
+            scope: "single",
+          },
+          {
+            id: "copy_device_info",
+            label: "Copy Device Info",
+            section: "selection",
+            scope: "single",
+          },
+          {
+            id: "open_output",
+            label: "Open Output",
+            section: "selection",
+            scope: "single",
+          },
+        ],
+      },
     ]);
-    expect(buildDeviceQuickMenuActions("task", "   ")).toEqual([
-      "set_primary",
-      "copy_device_info",
+    expect(
+      buildDeviceQuickMenuActions({
+        source: "task",
+        scopeKind: "single",
+        outputPath: "   ",
+        actions: [],
+      }),
+    ).toEqual([
+      {
+        id: "selection",
+        title: "Selection",
+        actions: [
+          {
+            id: "set_primary",
+            label: "Set Primary",
+            section: "selection",
+            scope: "single",
+          },
+          {
+            id: "copy_device_info",
+            label: "Copy Device Info",
+            section: "selection",
+            scope: "single",
+          },
+        ],
+      },
     ]);
-    expect(buildDeviceQuickMenuActions("task")).toEqual(["set_primary", "copy_device_info"]);
   });
 
-  it("builds non-task quick-menu actions without output option", () => {
-    expect(buildDeviceQuickMenuActions("device_manager", "/tmp/report.zip")).toEqual([
-      "set_primary",
-      "copy_device_info",
+  it("builds grouped quick-menu actions and disables single-device actions in multi scope", () => {
+    expect(
+      buildDeviceQuickMenuActions({
+        source: "device_manager",
+        scopeKind: "multi",
+        actions: [
+          {
+            id: "screenshot",
+            label: "Screenshot",
+            section: "capture",
+            scope: "both",
+          },
+          {
+            id: "set_primary",
+            label: "Set Primary",
+            section: "selection",
+            scope: "single",
+          },
+          {
+            id: "copy_device_info",
+            label: "Copy Device Info",
+            section: "selection",
+            scope: "single",
+            hideWhenOutOfScope: true,
+          },
+          {
+            id: "reboot",
+            label: "Reboot…",
+            section: "control",
+            scope: "both",
+            tone: "danger",
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        id: "selection",
+        title: "Selection",
+        actions: [
+          {
+            id: "set_primary",
+            label: "Set Primary",
+            section: "selection",
+            scope: "single",
+            disabled: true,
+          },
+        ],
+      },
+      {
+        id: "capture",
+        title: "Capture",
+        actions: [
+          {
+            id: "screenshot",
+            label: "Screenshot",
+            section: "capture",
+            scope: "both",
+          },
+        ],
+      },
+      {
+        id: "control",
+        title: "Control",
+        actions: [
+          {
+            id: "reboot",
+            label: "Reboot…",
+            section: "control",
+            scope: "both",
+            tone: "danger",
+          },
+        ],
+      },
     ]);
-    expect(buildDeviceQuickMenuActions("quick_actions", "/tmp/report.zip")).toEqual([
-      "set_primary",
-      "copy_device_info",
-    ]);
+  });
+
+  it("resolves row context selection to the current multi-selection when clicking a selected row", () => {
+    expect(
+      resolveDeviceQuickMenuSelection({
+        source: "device_manager",
+        clickedSerial: "bravo",
+        selectedSerials: ["alpha", "bravo", "charlie"],
+      }),
+    ).toEqual({
+      scopeKind: "multi",
+      selectedSerials: ["alpha", "bravo", "charlie"],
+      primarySerial: "alpha",
+    });
+  });
+
+  it("resolves row context selection to the clicked device when clicking an unselected row", () => {
+    expect(
+      resolveDeviceQuickMenuSelection({
+        source: "device_manager",
+        clickedSerial: "delta",
+        selectedSerials: ["alpha", "bravo", "charlie"],
+      }),
+    ).toEqual({
+      scopeKind: "single",
+      selectedSerials: ["delta"],
+      primarySerial: "delta",
+    });
+  });
+
+  it("always resolves task quick-menu selection to a single clicked device", () => {
+    expect(
+      resolveDeviceQuickMenuSelection({
+        source: "task",
+        clickedSerial: "bravo",
+        selectedSerials: ["alpha", "bravo", "charlie"],
+      }),
+    ).toEqual({
+      scopeKind: "single",
+      selectedSerials: ["bravo"],
+      primarySerial: "bravo",
+    });
   });
 
   it("builds topbar overview for empty selection", () => {

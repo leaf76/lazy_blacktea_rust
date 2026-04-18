@@ -6,7 +6,51 @@ type DeviceValue = string | number | boolean | null | undefined;
 type ConnectivityFlagKey = "wifi_is_on" | "bt_is_on";
 type TopbarTone = "ok" | "error" | "warn";
 export type DeviceQuickMenuSource = "device_manager" | "quick_actions" | "task";
-export type DeviceQuickMenuAction = "set_primary" | "copy_device_info" | "open_output";
+export type DeviceContextMenuScopeKind = "single" | "multi";
+export type DeviceContextActionId =
+  | "set_primary"
+  | "copy_device_info"
+  | "open_output"
+  | "screenshot"
+  | "record"
+  | "reboot"
+  | "wifi_enable"
+  | "wifi_disable"
+  | "bluetooth_enable"
+  | "bluetooth_disable"
+  | "logcat_clear"
+  | "mirror"
+  | "apk_installer";
+export type DeviceContextActionSectionId =
+  | "selection"
+  | "capture"
+  | "control"
+  | "connectivity"
+  | "debug"
+  | "more";
+export type DeviceContextActionScope = "single" | "multi" | "both";
+export type DeviceContextActionTone = "danger";
+export type DeviceQuickMenuAction = {
+  id: DeviceContextActionId;
+  label: string;
+  section: DeviceContextActionSectionId;
+  scope: DeviceContextActionScope;
+  disabled?: boolean;
+  hint?: string;
+  description?: string;
+  tone?: DeviceContextActionTone;
+  hideWhenOutOfScope?: boolean;
+};
+export type DeviceQuickMenuSection = {
+  id: DeviceContextActionSectionId;
+  title: string;
+  actions: DeviceQuickMenuAction[];
+};
+export type DeviceQuickMenuSelection = {
+  scopeKind: DeviceContextMenuScopeKind;
+  selectedSerials: string[];
+  primarySerial: string;
+};
 export type DeviceGroupOption = {
   name: string;
   count: number;
@@ -34,6 +78,24 @@ type ContextMenuPositionParams = {
   viewportWidth: number;
   viewportHeight: number;
   margin?: number;
+};
+
+const DEVICE_CONTEXT_SECTION_ORDER: DeviceContextActionSectionId[] = [
+  "selection",
+  "capture",
+  "control",
+  "connectivity",
+  "debug",
+  "more",
+];
+
+const DEVICE_CONTEXT_SECTION_TITLE: Record<DeviceContextActionSectionId, string> = {
+  selection: "Selection",
+  capture: "Capture",
+  control: "Control",
+  connectivity: "Connectivity",
+  debug: "Debug",
+  more: "More",
 };
 
 const formatDeviceValue = (value: DeviceValue): string => {
@@ -330,15 +392,139 @@ export const withDeviceGroups = (
   device_groups: expandDeviceGroups(groupMap),
 });
 
-export const buildDeviceQuickMenuActions = (
-  source: DeviceQuickMenuSource,
-  outputPath?: string | null,
-): DeviceQuickMenuAction[] => {
-  const actions: DeviceQuickMenuAction[] = ["set_primary", "copy_device_info"];
-  if (source === "task" && Boolean(outputPath?.trim())) {
-    actions.push("open_output");
+export const resolveDeviceQuickMenuSelection = ({
+  source,
+  clickedSerial,
+  selectedSerials,
+}: {
+  source: DeviceQuickMenuSource;
+  clickedSerial: string;
+  selectedSerials: string[];
+}): DeviceQuickMenuSelection => {
+  if (source === "task") {
+    return {
+      scopeKind: "single",
+      selectedSerials: [clickedSerial],
+      primarySerial: clickedSerial,
+    };
+  }
+
+  if (selectedSerials.includes(clickedSerial) && selectedSerials.length > 1) {
+    return {
+      scopeKind: "multi",
+      selectedSerials,
+      primarySerial: selectedSerials[0] ?? clickedSerial,
+    };
+  }
+
+  return {
+    scopeKind: "single",
+    selectedSerials: [clickedSerial],
+    primarySerial: clickedSerial,
+  };
+};
+
+const isActionOutOfScope = (
+  scopeKind: DeviceContextMenuScopeKind,
+  actionScope: DeviceContextActionScope,
+): boolean => {
+  if (actionScope === "both") {
+    return false;
+  }
+  return actionScope !== scopeKind;
+};
+
+const buildTaskQuickMenuActions = (outputPath?: string | null): DeviceQuickMenuAction[] => {
+  const actions: DeviceQuickMenuAction[] = [
+    {
+      id: "set_primary",
+      label: "Set Primary",
+      section: "selection",
+      scope: "single",
+    },
+    {
+      id: "copy_device_info",
+      label: "Copy Device Info",
+      section: "selection",
+      scope: "single",
+    },
+  ];
+  if (outputPath?.trim()) {
+    actions.push({
+      id: "open_output",
+      label: "Open Output",
+      section: "selection",
+      scope: "single",
+    });
   }
   return actions;
+};
+
+export const buildDeviceQuickMenuActions = ({
+  source,
+  scopeKind,
+  actions,
+  outputPath,
+}: {
+  source: DeviceQuickMenuSource;
+  scopeKind: DeviceContextMenuScopeKind;
+  actions: DeviceQuickMenuAction[];
+  outputPath?: string | null;
+}): DeviceQuickMenuSection[] => {
+  const rawActions =
+    actions.length > 0 ? actions : source === "task" ? buildTaskQuickMenuActions(outputPath) : [];
+
+  const grouped = new Map<DeviceContextActionSectionId, DeviceQuickMenuAction[]>();
+
+  rawActions.forEach((action) => {
+    if (isActionOutOfScope(scopeKind, action.scope)) {
+      if (action.hideWhenOutOfScope) {
+        return;
+      }
+      const scopedAction: DeviceQuickMenuAction = {
+        id: action.id,
+        label: action.label,
+        section: action.section,
+        scope: action.scope,
+        ...(action.description ? { description: action.description } : {}),
+        ...(action.hint ? { hint: action.hint } : {}),
+        ...(action.tone ? { tone: action.tone } : {}),
+        disabled: true,
+      };
+      const items = grouped.get(action.section) ?? [];
+      items.push(scopedAction);
+      grouped.set(action.section, items);
+      return;
+    }
+
+    const scopedAction: DeviceQuickMenuAction = {
+      id: action.id,
+      label: action.label,
+      section: action.section,
+      scope: action.scope,
+      ...(action.description ? { description: action.description } : {}),
+      ...(action.hint ? { hint: action.hint } : {}),
+      ...(action.tone ? { tone: action.tone } : {}),
+      ...(action.disabled ? { disabled: true } : {}),
+    };
+    const items = grouped.get(action.section) ?? [];
+    items.push(scopedAction);
+    grouped.set(action.section, items);
+  });
+
+  return DEVICE_CONTEXT_SECTION_ORDER.flatMap((sectionId) => {
+    const sectionActions = grouped.get(sectionId) ?? [];
+    if (!sectionActions.length) {
+      return [];
+    }
+    return [
+      {
+        id: sectionId,
+        title: DEVICE_CONTEXT_SECTION_TITLE[sectionId],
+        actions: sectionActions,
+      },
+    ];
+  });
 };
 
 export const computeContextMenuPosition = ({
