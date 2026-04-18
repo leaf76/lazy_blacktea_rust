@@ -14423,13 +14423,9 @@ function App() {
                         <div className="device-list device-list-stretch">
                           <div className="device-list-header">
                             <span />
-                            <span>Device</span>
-                            <span>Serial</span>
-                            <span>Platform</span>
-                            <span>Radios</span>
-                            <span>Battery</span>
-                            <span>Status</span>
-                            <span />
+                            <span>Identity</span>
+                            <span>Capability</span>
+                            <span>Status & Actions</span>
                           </div>
                           {visibleDevices.length === 0 ? (
                             <div className="device-list-empty" role="status" aria-live="polite">
@@ -14464,6 +14460,14 @@ function App() {
                             visibleDevices.map((device, index) => {
                               const serial = device.summary.serial;
                               const detail = device.detail;
+                              const modelLabel = detail?.model ?? device.summary.model ?? serial;
+                              const secondaryLabel =
+                                detail?.name && detail.name !== modelLabel ? detail.name : serial;
+                              const platformLabel = detail?.android_version
+                                ? `Android ${detail.android_version}`
+                                : "Android --";
+                              const apiLabel = detail?.api_level ? `API ${detail.api_level}` : "API --";
+                              const groupLabel = groupMap[serial] ?? null;
                               const wifi = detail?.wifi_is_on;
                               const bt = detail?.bt_is_on;
                               const batteryLevel = detail?.battery_level;
@@ -14477,6 +14481,7 @@ function App() {
                                 <div
                                   key={serial}
                                   className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
+                                  data-device-state={device.summary.state}
                                   onClick={(event) => handleDeviceRowSelect(event, serial, index)}
                                   tabIndex={0}
                                   onKeyDown={(event) => {
@@ -14496,7 +14501,7 @@ function App() {
                                       showSelectionHint: true,
                                     })
                                   }
-                                >
+                                  >
                                   <label className="device-check" onClick={(event) => event.stopPropagation()}>
                                     <input
                                       type="checkbox"
@@ -14515,82 +14520,91 @@ function App() {
                                       onChange={() => {}}
                                     />
                                   </label>
-                                  <div className="device-cell device-info">
-                                    <div className="device-info-main">
-                                      <strong>{detail?.model ?? device.summary.model ?? serial}</strong>
-                                      {isActive && <span className="device-active-badge">Primary</span>}
+                                  <div className="device-cell device-identity">
+                                    <div className="device-identity-main">
+                                      <div className="device-identity-heading">
+                                        <strong>{modelLabel}</strong>
+                                        {isActive && <span className="device-active-badge">Primary</span>}
+                                        {groupLabel && <span className="group-tag">{groupLabel}</span>}
+                                      </div>
+                                      <div className="device-identity-sub">
+                                        <span>{secondaryLabel}</span>
+                                      </div>
                                     </div>
-                                    <div className="device-tags">
-                                      {groupMap[serial] && <span className="group-tag">{groupMap[serial]}</span>}
+                                    <div className="device-identity-meta">
+                                      <span className="device-serial">{serial}</span>
                                     </div>
                                   </div>
-                                  <div className="device-cell device-serial">{serial}</div>
-                                  <div className="device-cell device-platform">
-                                    <span>{detail?.android_version ? `Android ${detail.android_version}` : "Android --"}</span>
-                                    <span className="muted">{detail?.api_level ? `API ${detail.api_level}` : "API --"}</span>
-                                  </div>
-                                  <div className="device-cell device-radios">
-                                    <span
-                                      className={`status-icon ${wifi == null ? "unknown" : wifi ? "ok" : "off"}`}
-                                      title={wifi == null ? "WiFi Unknown" : wifi ? "WiFi On" : "WiFi Off"}
-                                    >
-                                      WiFi
-                                    </span>
-                                    <span
-                                      className={`status-icon ${bt == null ? "unknown" : bt ? "ok" : "off"}`}
-                                      title={bt == null ? "Bluetooth Unknown" : bt ? "Bluetooth On" : "Bluetooth Off"}
-                                    >
-                                      BT
-                                    </span>
-                                  </div>
-                                  <div className="device-cell device-battery">
-                                    <span className="device-battery-value">
-                                      {batteryLevel != null ? `${batteryLevel}%` : "--"}
-                                    </span>
-                                    <span className="device-battery-track" aria-hidden="true">
+                                  <div className="device-cell device-capability">
+                                    <div className="device-platform">
+                                      <span>{platformLabel}</span>
+                                      <span className="muted">{apiLabel}</span>
+                                    </div>
+                                    <div className="device-radios">
                                       <span
-                                        className={`device-battery-fill ${batteryTone}`}
-                                        style={{ width: `${batteryPercent}%` }}
-                                      />
-                                    </span>
+                                        className={`status-icon ${wifi == null ? "unknown" : wifi ? "ok" : "off"}`}
+                                        title={wifi == null ? "WiFi Unknown" : wifi ? "WiFi On" : "WiFi Off"}
+                                      >
+                                        WiFi
+                                      </span>
+                                      <span
+                                        className={`status-icon ${bt == null ? "unknown" : bt ? "ok" : "off"}`}
+                                        title={bt == null ? "Bluetooth Unknown" : bt ? "Bluetooth On" : "Bluetooth Off"}
+                                      >
+                                        BT
+                                      </span>
+                                    </div>
+                                    <div className="device-battery">
+                                      <span className="device-battery-value">
+                                        {batteryLevel != null ? `${batteryLevel}%` : "--"}
+                                      </span>
+                                      <span className="device-battery-track" aria-hidden="true">
+                                        <span
+                                          className={`device-battery-fill ${batteryTone}`}
+                                          style={{ width: `${batteryPercent}%` }}
+                                        />
+                                      </span>
+                                    </div>
                                   </div>
-                                  <div className="device-cell device-state">
-                                    <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
-                                  </div>
-                                  <div className="device-cell device-actions">
-                                    <button
-                                      type="button"
-                                      className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        if (!isActive) {
-                                          handleSelectActiveSerial(serial);
+                                  <div className="device-cell device-status-actions">
+                                    <div className="device-state">
+                                      <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
+                                    </div>
+                                    <div className="device-actions">
+                                      <button
+                                        type="button"
+                                        className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          if (!isActive) {
+                                            handleSelectActiveSerial(serial);
+                                          }
+                                        }}
+                                        disabled={busy || isActive}
+                                        aria-label={
+                                          isActive
+                                            ? `${modelLabel} is primary device`
+                                            : `Set ${modelLabel} as primary device`
                                         }
-                                      }}
-                                      disabled={busy || isActive}
-                                      aria-label={
-                                        isActive
-                                          ? `${detail?.model ?? device.summary.model ?? serial} is primary device`
-                                          : `Set ${detail?.model ?? device.summary.model ?? serial} as primary device`
-                                      }
-                                      title={isActive ? "Primary device" : "Set as primary device"}
-                                    >
-                                      {isActive ? "Primary" : "Set Primary"}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="ghost icon-only"
-                                      onClick={(e) => {
-                                        openDeviceQuickContextMenuFromPointer(e, serial, {
-                                          source: "device_manager",
-                                          rowIndex: index,
-                                        });
-                                      }}
-                                      disabled={busy}
-                                      title="Device actions"
-                                    >
-                                      ⋯
-                                    </button>
+                                        title={isActive ? "Primary device" : "Set as primary device"}
+                                      >
+                                        {isActive ? "Primary" : "Set Primary"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="ghost icon-only"
+                                        onClick={(e) => {
+                                          openDeviceQuickContextMenuFromPointer(e, serial, {
+                                            source: "device_manager",
+                                            rowIndex: index,
+                                          });
+                                        }}
+                                        disabled={busy}
+                                        title="Device actions"
+                                      >
+                                        ⋯
+                                      </button>
+                                    </div>
                                   </div>
                                 </div>
                               );
