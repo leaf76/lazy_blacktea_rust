@@ -1,4 +1,4 @@
-import type { DeviceDetail, DeviceInfo } from "./types";
+import type { AppConfig, DeviceDetail, DeviceInfo } from "./types";
 import { formatBytes } from "./perf";
 
 type DeviceDetailPatch = Partial<Omit<DeviceDetail, "serial">>;
@@ -7,6 +7,19 @@ type ConnectivityFlagKey = "wifi_is_on" | "bt_is_on";
 type TopbarTone = "ok" | "error" | "warn";
 export type DeviceQuickMenuSource = "device_manager" | "quick_actions" | "task";
 export type DeviceQuickMenuAction = "set_primary" | "copy_device_info" | "open_output";
+export type DeviceGroupOption = {
+  name: string;
+  count: number;
+  isActiveFilter: boolean;
+};
+export type DeviceGroupSelectionSummary = {
+  kind: "none" | "single" | "multi";
+  groupState: "ungrouped" | "single_group" | "mixed";
+  groupName: string | null;
+  selectedCount: number;
+  assignedCount: number;
+  canClear: boolean;
+};
 export type TopbarOverview = {
   selectedCount: number;
   onlineSelectedCount: number;
@@ -187,6 +200,135 @@ export const selectSerialsForGroup = (
   }
   return serials.filter((serial) => groupMap[serial] === group);
 };
+
+export const applyGroupAssignment = (
+  groupMap: Record<string, string>,
+  serials: string[],
+  groupName: string,
+): Record<string, string> => {
+  if (!serials.length) {
+    return groupMap;
+  }
+
+  const next = { ...groupMap };
+  for (const serial of serials) {
+    if (groupName) {
+      next[serial] = groupName;
+    } else {
+      delete next[serial];
+    }
+  }
+  return next;
+};
+
+export const flattenDeviceGroups = (groups: Record<string, string[]>): Record<string, string> => {
+  const map: Record<string, string> = {};
+  Object.entries(groups || {}).forEach(([group, serials]) => {
+    serials.forEach((serial) => {
+      map[serial] = group;
+    });
+  });
+  return map;
+};
+
+export const expandDeviceGroups = (map: Record<string, string>): Record<string, string[]> => {
+  const groups: Record<string, string[]> = {};
+  Object.entries(map).forEach(([serial, group]) => {
+    if (!group) {
+      return;
+    }
+    if (!groups[group]) {
+      groups[group] = [];
+    }
+    groups[group].push(serial);
+  });
+  return groups;
+};
+
+export const buildDeviceGroupOptions = (
+  groupMap: Record<string, string>,
+  activeFilter: string,
+): DeviceGroupOption[] =>
+  Object.entries(expandDeviceGroups(groupMap))
+    .map(([name, serials]) => ({
+      name,
+      count: serials.length,
+      isActiveFilter: activeFilter === name,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+export const buildDeviceGroupSelectionSummary = (
+  selectedSerials: string[],
+  groupMap: Record<string, string>,
+): DeviceGroupSelectionSummary => {
+  if (!selectedSerials.length) {
+    return {
+      kind: "none",
+      groupState: "ungrouped",
+      groupName: null,
+      selectedCount: 0,
+      assignedCount: 0,
+      canClear: false,
+    };
+  }
+
+  const selectedGroups = selectedSerials
+    .map((serial) => groupMap[serial] ?? null)
+    .filter((group): group is string => Boolean(group));
+  const distinctGroups = Array.from(new Set(selectedGroups));
+  const assignedCount = selectedGroups.length;
+  const canClear = assignedCount > 0;
+
+  if (selectedSerials.length === 1) {
+    return {
+      kind: "single",
+      groupState: distinctGroups.length === 1 ? "single_group" : "ungrouped",
+      groupName: distinctGroups[0] ?? null,
+      selectedCount: 1,
+      assignedCount,
+      canClear,
+    };
+  }
+
+  if (assignedCount === 0) {
+    return {
+      kind: "multi",
+      groupState: "ungrouped",
+      groupName: null,
+      selectedCount: selectedSerials.length,
+      assignedCount: 0,
+      canClear: false,
+    };
+  }
+
+  if (assignedCount === selectedSerials.length && distinctGroups.length === 1) {
+    return {
+      kind: "multi",
+      groupState: "single_group",
+      groupName: distinctGroups[0] ?? null,
+      selectedCount: selectedSerials.length,
+      assignedCount,
+      canClear: true,
+    };
+  }
+
+  return {
+    kind: "multi",
+    groupState: "mixed",
+    groupName: null,
+    selectedCount: selectedSerials.length,
+    assignedCount,
+    canClear,
+  };
+};
+
+export const withDeviceGroups = (
+  config: AppConfig,
+  groupMap: Record<string, string>,
+): AppConfig => ({
+  ...config,
+  device_groups: expandDeviceGroups(groupMap),
+});
 
 export const buildDeviceQuickMenuActions = (
   source: DeviceQuickMenuSource,

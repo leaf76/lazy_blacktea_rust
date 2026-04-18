@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyGroupAssignment,
   applyDeviceDetailPatch,
+  buildDeviceGroupOptions,
+  buildDeviceGroupSelectionSummary,
   buildTopbarOverview,
   buildDeviceQuickMenuActions,
   computeContextMenuPosition,
+  expandDeviceGroups,
   filterDevicesBySearch,
+  flattenDeviceGroups,
   formatPrimaryDeviceLabel,
   formatDeviceInfoMarkdown,
   mergeDeviceDetails,
@@ -14,8 +19,9 @@ import {
   setPrimarySelection,
   shouldEnableConnectivityForSelection,
   selectSerialsForGroup,
+  withDeviceGroups,
 } from "./deviceUtils";
-import type { DeviceInfo } from "./types";
+import type { AppConfig, DeviceInfo } from "./types";
 
 describe("deviceUtils", () => {
   it("merges detailed device info and drops missing devices", () => {
@@ -194,6 +200,167 @@ describe("deviceUtils", () => {
     expect(selectSerialsForGroup(devices, groupMap, "Test")).toEqual(["alpha"]);
     expect(selectSerialsForGroup(devices, groupMap, "__all_devices__")).toEqual(["alpha", "bravo", "charlie"]);
     expect(selectSerialsForGroup(devices, groupMap, "Missing")).toEqual([]);
+  });
+
+  it("applies group assignments without mutating other devices", () => {
+    const current = {
+      alpha: "Team A",
+      bravo: "Team B",
+      charlie: "Team A",
+    };
+
+    expect(applyGroupAssignment(current, ["bravo", "delta"], "Team C")).toEqual({
+      alpha: "Team A",
+      bravo: "Team C",
+      charlie: "Team A",
+      delta: "Team C",
+    });
+    expect(current).toEqual({
+      alpha: "Team A",
+      bravo: "Team B",
+      charlie: "Team A",
+    });
+  });
+
+  it("clears group assignments for the selected serials only", () => {
+    expect(
+      applyGroupAssignment(
+        {
+          alpha: "Team A",
+          bravo: "Team B",
+          charlie: "Team A",
+        },
+        ["alpha", "charlie"],
+        "",
+      ),
+    ).toEqual({
+      bravo: "Team B",
+    });
+  });
+
+  it("round-trips grouped config values through flatten and expand helpers", () => {
+    const grouped = {
+      "Team A": ["alpha", "charlie"],
+      "Team B": ["bravo"],
+    };
+
+    expect(flattenDeviceGroups(grouped)).toEqual({
+      alpha: "Team A",
+      charlie: "Team A",
+      bravo: "Team B",
+    });
+    expect(expandDeviceGroups(flattenDeviceGroups(grouped))).toEqual(grouped);
+  });
+
+  it("injects the latest device groups into config before saving", () => {
+    const config = {
+      version: "0.0.72",
+      device_groups: {
+        Old: ["alpha"],
+      },
+    } as unknown as AppConfig;
+
+    expect(
+      withDeviceGroups(config, {
+        alpha: "QA",
+        bravo: "Lab",
+      }),
+    ).toEqual({
+      version: "0.0.72",
+      device_groups: {
+        QA: ["alpha"],
+        Lab: ["bravo"],
+      },
+    });
+  });
+
+  it("builds sorted group options with active filter metadata", () => {
+    expect(
+      buildDeviceGroupOptions(
+        {
+          alpha: "Beta",
+          bravo: "Alpha",
+          charlie: "Beta",
+        },
+        "Beta",
+      ),
+    ).toEqual([
+      { name: "Alpha", count: 1, isActiveFilter: false },
+      { name: "Beta", count: 2, isActiveFilter: true },
+    ]);
+  });
+
+  it("summarizes selection with no selected devices", () => {
+    expect(buildDeviceGroupSelectionSummary([], { alpha: "Lab" })).toEqual({
+      kind: "none",
+      groupState: "ungrouped",
+      groupName: null,
+      selectedCount: 0,
+      assignedCount: 0,
+      canClear: false,
+    });
+  });
+
+  it("summarizes a single selected device with a group", () => {
+    expect(
+      buildDeviceGroupSelectionSummary(["alpha"], {
+        alpha: "Lab",
+      }),
+    ).toEqual({
+      kind: "single",
+      groupState: "single_group",
+      groupName: "Lab",
+      selectedCount: 1,
+      assignedCount: 1,
+      canClear: true,
+    });
+  });
+
+  it("summarizes multi-selection when all devices are ungrouped", () => {
+    expect(
+      buildDeviceGroupSelectionSummary(["alpha", "bravo"], {
+        charlie: "Lab",
+      }),
+    ).toEqual({
+      kind: "multi",
+      groupState: "ungrouped",
+      groupName: null,
+      selectedCount: 2,
+      assignedCount: 0,
+      canClear: false,
+    });
+  });
+
+  it("summarizes multi-selection when all devices share one group", () => {
+    expect(
+      buildDeviceGroupSelectionSummary(["alpha", "bravo"], {
+        alpha: "Lab",
+        bravo: "Lab",
+      }),
+    ).toEqual({
+      kind: "multi",
+      groupState: "single_group",
+      groupName: "Lab",
+      selectedCount: 2,
+      assignedCount: 2,
+      canClear: true,
+    });
+  });
+
+  it("summarizes multi-selection with mixed groups and ungrouped devices", () => {
+    expect(
+      buildDeviceGroupSelectionSummary(["alpha", "bravo", "charlie"], {
+        alpha: "Lab",
+        bravo: "QA",
+      }),
+    ).toEqual({
+      kind: "multi",
+      groupState: "mixed",
+      groupName: null,
+      selectedCount: 3,
+      assignedCount: 2,
+      canClear: true,
+    });
   });
 
   it("reorders selection when setting primary while preserving remaining order", () => {
