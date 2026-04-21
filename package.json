@@ -1,7 +1,7 @@
 {
   "name": "lazy-blacktea",
   "private": true,
-  "version": "0.0.73",
+  "version": "0.0.74",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -24,12 +24,12 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "@types/node": "^25.5.0",
+    "@types/node": "^20.19.39",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4",
+    "vite": "^7.3.2",
     "vitest": "^4.0.18"
   }
 }

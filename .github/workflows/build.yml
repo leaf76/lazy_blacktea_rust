@@ -57,6 +57,21 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
+      - name: Frontend tests
+        run: npm run test
+
+      - name: Rust format check
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --all --all-features
+
       - name: Build Tauri bundles
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
