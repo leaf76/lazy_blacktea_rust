@@ -41,6 +41,101 @@ fn default_true() -> bool {
     true
 }
 
+fn default_theme_preset_id() -> String {
+    "system".to_string()
+}
+
+fn default_theme_background_kind() -> String {
+    "preset".to_string()
+}
+
+fn default_theme_background_fit() -> String {
+    "cover".to_string()
+}
+
+fn default_theme_opacity() -> f32 {
+    1.0
+}
+
+pub const THEME_BACKGROUND_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const THEME_COPY_TITLE_MAX_CHARS: usize = 80;
+const THEME_COPY_SUBTITLE_MAX_CHARS: usize = 120;
+const THEME_COPY_STATUS_MAX_CHARS: usize = 40;
+const THEME_PATH_MAX_CHARS: usize = 2048;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThemeBackgroundSource {
+    #[serde(default = "default_theme_background_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub path: String,
+}
+
+impl Default for ThemeBackgroundSource {
+    fn default() -> Self {
+        Self {
+            kind: default_theme_background_kind(),
+            path: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ThemeColorSettings {
+    #[serde(default)]
+    pub primary: String,
+    #[serde(default)]
+    pub accent: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub muted_text: String,
+    #[serde(default)]
+    pub panel: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ThemeCopyOverrides {
+    #[serde(default)]
+    pub app_title: String,
+    #[serde(default)]
+    pub app_subtitle: String,
+    #[serde(default)]
+    pub sidebar_status_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThemeStyleSettings {
+    #[serde(default = "default_theme_preset_id")]
+    pub preset_id: String,
+    #[serde(default)]
+    pub background_source: ThemeBackgroundSource,
+    #[serde(default = "default_theme_background_fit")]
+    pub background_fit: String,
+    #[serde(default = "default_theme_opacity")]
+    pub background_opacity: f32,
+    #[serde(default = "default_theme_opacity")]
+    pub panel_opacity: f32,
+    #[serde(default)]
+    pub colors: ThemeColorSettings,
+    #[serde(default)]
+    pub copy_overrides: ThemeCopyOverrides,
+}
+
+impl Default for ThemeStyleSettings {
+    fn default() -> Self {
+        Self {
+            preset_id: default_theme_preset_id(),
+            background_source: ThemeBackgroundSource::default(),
+            background_fit: default_theme_background_fit(),
+            background_opacity: default_theme_opacity(),
+            panel_opacity: default_theme_opacity(),
+            colors: ThemeColorSettings::default(),
+            copy_overrides: ThemeCopyOverrides::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiSettings {
     pub window_width: i32,
@@ -53,6 +148,8 @@ pub struct UiSettings {
     pub show_console_panel: bool,
     pub single_selection: bool,
     pub default_output_path: String,
+    #[serde(default)]
+    pub theme_style: ThemeStyleSettings,
 }
 
 impl Default for UiSettings {
@@ -68,6 +165,7 @@ impl Default for UiSettings {
             show_console_panel: false,
             single_selection: true,
             default_output_path: default_output_dir(),
+            theme_style: ThemeStyleSettings::default(),
         }
     }
 }
@@ -618,10 +716,112 @@ fn apply_legacy_overrides(mut config: AppConfig, value: &serde_json::Value) -> A
     config
 }
 
+fn is_allowed_theme_preset(value: &str) -> bool {
+    matches!(
+        value,
+        "system" | "midnight" | "terminal" | "graphite" | "daylight"
+    )
+}
+
+fn is_allowed_theme_background_kind(value: &str) -> bool {
+    matches!(value, "preset" | "none" | "local_path" | "managed_path")
+}
+
+fn is_allowed_theme_background_fit(value: &str) -> bool {
+    matches!(value, "cover" | "contain" | "repeat")
+}
+
+fn normalize_hex_color(value: &str) -> String {
+    let trimmed = value.trim().to_ascii_lowercase();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() == 4 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit) {
+        let mut expanded = String::from("#");
+        for value in trimmed[1..].chars() {
+            expanded.push(value);
+            expanded.push(value);
+        }
+        return expanded;
+    }
+    if bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit) {
+        return trimmed;
+    }
+    String::new()
+}
+
+fn normalize_copy_override(value: &str, max_chars: usize) -> String {
+    value.trim().chars().take(max_chars).collect()
+}
+
+fn truncate_path_value(value: &str) -> String {
+    value.trim().chars().take(THEME_PATH_MAX_CHARS).collect()
+}
+
+fn validate_theme_style(mut settings: ThemeStyleSettings) -> ThemeStyleSettings {
+    settings.preset_id = settings.preset_id.trim().to_string();
+    if !is_allowed_theme_preset(&settings.preset_id) {
+        settings.preset_id = default_theme_preset_id();
+    }
+
+    settings.background_source.kind = settings.background_source.kind.trim().to_string();
+    if !is_allowed_theme_background_kind(&settings.background_source.kind) {
+        settings.background_source = ThemeBackgroundSource::default();
+    } else {
+        settings.background_source.path = truncate_path_value(&settings.background_source.path);
+        if matches!(
+            settings.background_source.kind.as_str(),
+            "local_path" | "managed_path"
+        ) {
+            if settings.background_source.path.is_empty()
+                || !Path::new(&settings.background_source.path).is_file()
+            {
+                settings.background_source = ThemeBackgroundSource::default();
+            }
+        } else {
+            settings.background_source.path.clear();
+        }
+    }
+
+    settings.background_fit = settings.background_fit.trim().to_string();
+    if !is_allowed_theme_background_fit(&settings.background_fit) {
+        settings.background_fit = default_theme_background_fit();
+    }
+    if !settings.background_opacity.is_finite() {
+        settings.background_opacity = default_theme_opacity();
+    }
+    settings.background_opacity = settings.background_opacity.clamp(0.0, 1.0);
+    if !settings.panel_opacity.is_finite() {
+        settings.panel_opacity = default_theme_opacity();
+    }
+    settings.panel_opacity = settings.panel_opacity.clamp(0.72, 1.0);
+
+    settings.colors.primary = normalize_hex_color(&settings.colors.primary);
+    settings.colors.accent = normalize_hex_color(&settings.colors.accent);
+    settings.colors.text = normalize_hex_color(&settings.colors.text);
+    settings.colors.muted_text = normalize_hex_color(&settings.colors.muted_text);
+    settings.colors.panel = normalize_hex_color(&settings.colors.panel);
+
+    settings.copy_overrides.app_title = normalize_copy_override(
+        &settings.copy_overrides.app_title,
+        THEME_COPY_TITLE_MAX_CHARS,
+    );
+    settings.copy_overrides.app_subtitle = normalize_copy_override(
+        &settings.copy_overrides.app_subtitle,
+        THEME_COPY_SUBTITLE_MAX_CHARS,
+    );
+    settings.copy_overrides.sidebar_status_label = normalize_copy_override(
+        &settings.copy_overrides.sidebar_status_label,
+        THEME_COPY_STATUS_MAX_CHARS,
+    );
+
+    settings
+}
+
 fn validate_config(mut config: AppConfig) -> AppConfig {
     if !(0.5..=3.0).contains(&config.ui.ui_scale) {
         config.ui.ui_scale = 1.0;
     }
+    config.ui.font_size = config.ui.font_size.clamp(10, 18);
+    config.ui.theme_style = validate_theme_style(config.ui.theme_style);
     if config.ui.default_output_path.trim().is_empty() {
         config.ui.default_output_path = default_output_dir();
     }
@@ -677,6 +877,83 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
 
 pub fn normalize_config_for_save(config: AppConfig) -> AppConfig {
     validate_config(config)
+}
+
+fn theme_background_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("LAZY_BLACKTEA_THEME_DIR") {
+        return PathBuf::from(path);
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .or_else(|_| {
+            let drive = std::env::var("HOMEDRIVE")?;
+            let path = std::env::var("HOMEPATH")?;
+            Ok::<String, std::env::VarError>(format!("{drive}{path}"))
+        })
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".lazy_blacktea")
+        .join("themes")
+        .join("backgrounds")
+}
+
+fn validate_theme_background_extension(path: &Path, trace_id: &str) -> Result<String, AppError> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif") {
+        Ok(extension)
+    } else {
+        Err(AppError::validation(
+            "Theme background must be a png, jpg, jpeg, webp, or gif file",
+            trace_id,
+        ))
+    }
+}
+
+pub fn import_theme_background_from_path(
+    source_path: &Path,
+    trace_id: &str,
+) -> Result<String, AppError> {
+    let trace_id = normalize_trace_id(trace_id);
+    let extension = validate_theme_background_extension(source_path, &trace_id)?;
+    let metadata = fs::metadata(source_path).map_err(|err| {
+        AppError::validation(
+            format!("Failed to read theme background file: {err}"),
+            &trace_id,
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::validation(
+            "Theme background source must be a file",
+            &trace_id,
+        ));
+    }
+    if metadata.len() > THEME_BACKGROUND_MAX_BYTES {
+        return Err(AppError::validation(
+            "Theme background file is too large",
+            &trace_id,
+        ));
+    }
+
+    let target_dir = theme_background_dir();
+    fs::create_dir_all(&target_dir).map_err(|err| {
+        AppError::system(
+            format!("Failed to create theme background directory: {err}"),
+            &trace_id,
+        )
+    })?;
+    let target = target_dir.join(format!("theme-background-{}.{}", Uuid::new_v4(), extension));
+    fs::copy(source_path, &target).map_err(|err| {
+        AppError::system(
+            format!("Failed to import theme background: {err}"),
+            &trace_id,
+        )
+    })?;
+
+    Ok(target.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -819,6 +1096,109 @@ mod tests {
             .cards
             .iter()
             .any(|card| card.id == "device_profile"));
+    }
+
+    #[test]
+    fn theme_style_defaults_and_legacy_ui_load() {
+        let value = serde_json::json!({
+            "ui": {
+                "window_width": 1280,
+                "window_height": 760,
+                "window_x": 100,
+                "window_y": 100,
+                "ui_scale": 1.0,
+                "theme": "dark",
+                "font_size": 10,
+                "show_console_panel": false,
+                "single_selection": true,
+                "default_output_path": "/tmp"
+            }
+        });
+
+        let parsed: AppConfig = serde_json::from_value(value).expect("config should deserialize");
+        assert_eq!(parsed.ui.theme_style.preset_id, "system");
+        assert_eq!(parsed.ui.theme_style.background_source.kind, "preset");
+        assert_eq!(parsed.ui.theme_style.background_fit, "cover");
+    }
+
+    #[test]
+    fn validates_theme_style_values() {
+        let mut config = AppConfig::default();
+        config.ui.font_size = 99;
+        config.ui.theme_style.preset_id = "missing".to_string();
+        config.ui.theme_style.background_source.kind = "remote".to_string();
+        config.ui.theme_style.background_source.path = "/tmp/bg.png".to_string();
+        config.ui.theme_style.background_fit = "stretch".to_string();
+        config.ui.theme_style.background_opacity = 2.0;
+        config.ui.theme_style.panel_opacity = 0.2;
+        config.ui.theme_style.colors.primary = "blue".to_string();
+        config.ui.theme_style.colors.accent = "#0F766E".to_string();
+        config.ui.theme_style.colors.text = "#abc".to_string();
+        config.ui.theme_style.colors.muted_text = "inherit".to_string();
+        config.ui.theme_style.copy_overrides.app_title = "  My Lab  ".to_string();
+        config.ui.theme_style.copy_overrides.app_subtitle = "x".repeat(200);
+
+        let validated = validate_config(config);
+        assert_eq!(validated.ui.font_size, 18);
+        assert_eq!(validated.ui.theme_style.preset_id, "system");
+        assert_eq!(validated.ui.theme_style.background_source.kind, "preset");
+        assert!(validated.ui.theme_style.background_source.path.is_empty());
+        assert_eq!(validated.ui.theme_style.background_fit, "cover");
+        assert_eq!(validated.ui.theme_style.background_opacity, 1.0);
+        assert_eq!(validated.ui.theme_style.panel_opacity, 0.72);
+        assert!(validated.ui.theme_style.colors.primary.is_empty());
+        assert_eq!(validated.ui.theme_style.colors.accent, "#0f766e");
+        assert_eq!(validated.ui.theme_style.colors.text, "#aabbcc");
+        assert!(validated.ui.theme_style.colors.muted_text.is_empty());
+        assert_eq!(validated.ui.theme_style.copy_overrides.app_title, "My Lab");
+        assert_eq!(
+            validated.ui.theme_style.copy_overrides.app_subtitle.len(),
+            120
+        );
+    }
+
+    #[test]
+    fn theme_style_falls_back_when_background_path_is_missing() {
+        let mut config = AppConfig::default();
+        config.ui.theme_style.background_source.kind = "local_path".to_string();
+        config.ui.theme_style.background_source.path =
+            "/tmp/missing-lazy-blacktea-bg.png".to_string();
+
+        let validated = validate_config(config);
+        assert_eq!(validated.ui.theme_style.background_source.kind, "preset");
+        assert!(validated.ui.theme_style.background_source.path.is_empty());
+    }
+
+    #[test]
+    fn imports_theme_background_with_validation() {
+        let dir = TempDir::new().expect("tmp");
+        let source = dir.path().join("source.png");
+        fs::write(&source, b"png").expect("write image");
+        let theme_dir = dir.path().join("managed");
+        std::env::set_var("LAZY_BLACKTEA_THEME_DIR", &theme_dir);
+
+        let imported =
+            import_theme_background_from_path(&source, "theme-trace").expect("import background");
+        let imported_path = PathBuf::from(imported);
+        assert!(imported_path.exists());
+        assert_eq!(
+            imported_path.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+
+        std::env::remove_var("LAZY_BLACKTEA_THEME_DIR");
+    }
+
+    #[test]
+    fn rejects_invalid_theme_background_imports_with_trace_id() {
+        let dir = TempDir::new().expect("tmp");
+        let source = dir.path().join("source.txt");
+        fs::write(&source, b"text").expect("write text");
+
+        let err = import_theme_background_from_path(&source, "theme-trace")
+            .expect_err("expected validation error");
+        assert_eq!(err.code, "ERR_VALIDATION");
+        assert_eq!(err.trace_id, "theme-trace");
     }
 
     #[test]

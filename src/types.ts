@@ -545,6 +545,40 @@ export type UiSettings = {
   show_console_panel: boolean;
   single_selection: boolean;
   default_output_path: string;
+  theme_style: ThemeStyleSettings;
+};
+
+export type ThemeBackgroundKind = "preset" | "none" | "local_path" | "managed_path";
+
+export type ThemeBackgroundFit = "cover" | "contain" | "repeat";
+
+export type ThemeBackgroundSource = {
+  kind: ThemeBackgroundKind;
+  path: string;
+};
+
+export type ThemeColorSettings = {
+  primary: string;
+  accent: string;
+  text: string;
+  muted_text: string;
+  panel: string;
+};
+
+export type ThemeCopyOverrides = {
+  app_title: string;
+  app_subtitle: string;
+  sidebar_status_label: string;
+};
+
+export type ThemeStyleSettings = {
+  preset_id: string;
+  background_source: ThemeBackgroundSource;
+  background_fit: ThemeBackgroundFit;
+  background_opacity: number;
+  panel_opacity: number;
+  colors: ThemeColorSettings;
+  copy_overrides: ThemeCopyOverrides;
 };
 
 export type DeviceSettings = {

@@ -9,6 +9,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -57,6 +58,9 @@ import type {
   PerfSnapshot,
   ScreenRecordStatus,
   TerminalEvent,
+  ThemeBackgroundFit,
+  ThemeBackgroundKind,
+  ThemeStyleSettings,
   ScrcpyInfo,
 } from "./types";
 import {
@@ -79,6 +83,7 @@ import {
   generateBugreport,
   getConfig,
   getScreenRecordStatus,
+  importThemeBackground,
   installApkBatch,
   launchApp,
   launchScrcpy,
@@ -236,6 +241,14 @@ import {
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
 import { DeviceGroupPanel } from "./DeviceGroupPanel";
+import {
+  THEME_PRESETS,
+  buildDefaultThemeStyleSettings,
+  buildThemeCssVariables,
+  normalizeThemeFontSize,
+  normalizeThemeStyleSettings,
+  resolveThemeCopy,
+} from "./theme";
 import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
 import {
   LOGCAT_INACTIVITY_EVENTS,
@@ -11076,6 +11089,11 @@ function App() {
     options: { dashboard?: DashboardSettings; groupMap?: Record<string, string> } = {},
   ): AppConfig => ({
     ...withDeviceGroups(base, options.groupMap ?? groupMap),
+    ui: {
+      ...base.ui,
+      font_size: normalizeThemeFontSize(base.ui.font_size),
+      theme_style: normalizeThemeStyleSettings(base.ui.theme_style),
+    },
     apk_install: {
       ...base.apk_install,
       allow_downgrade: apkAllowDowngrade,
@@ -11086,6 +11104,42 @@ function App() {
     },
     dashboard: normalizeDashboardSettings(options.dashboard ?? base.dashboard),
   });
+
+  const updateThemeStyle = (updater: (current: ThemeStyleSettings) => ThemeStyleSettings) => {
+    setConfig((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      const current = normalizeThemeStyleSettings(prev.ui.theme_style);
+      return {
+        ...prev,
+        ui: {
+          ...prev.ui,
+          theme_style: normalizeThemeStyleSettings(updater(current)),
+        },
+      };
+    });
+  };
+
+  const updateThemeColor = (key: keyof ThemeStyleSettings["colors"], value: string) => {
+    updateThemeStyle((current) => ({
+      ...current,
+      colors: {
+        ...current.colors,
+        [key]: value,
+      },
+    }));
+  };
+
+  const updateThemeCopy = (key: keyof ThemeStyleSettings["copy_overrides"], value: string) => {
+    updateThemeStyle((current) => ({
+      ...current,
+      copy_overrides: {
+        ...current.copy_overrides,
+        [key]: value,
+      },
+    }));
+  };
 
   const openDashboardConfig = () => {
     setDashboardDraft(normalizeDashboardSettings(config?.dashboard));
@@ -11227,6 +11281,67 @@ function App() {
       setConfig((prev) => (prev ? { ...prev, file_gen_output_path: selected } : prev));
     } catch (error) {
       pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleBrowseThemeBackgroundPath = async () => {
+    try {
+      const selected = await openDialog({
+        title: "Select theme background image",
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "webp", "gif"],
+          },
+        ],
+      });
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+      updateThemeStyle((current) => ({
+        ...current,
+        background_source: {
+          kind: "local_path",
+          path: selected,
+        },
+      }));
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleImportThemeBackgroundPath = async () => {
+    try {
+      const selected = await openDialog({
+        title: "Import theme background image",
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "webp", "gif"],
+          },
+        ],
+      });
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+      setBusy(true);
+      const response = await importThemeBackground(selected);
+      updateThemeStyle((current) => ({
+        ...current,
+        background_source: {
+          kind: "managed_path",
+          path: response.data,
+        },
+      }));
+      pushToast("Theme background imported.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -13756,13 +13871,22 @@ function App() {
       </Suspense>
     );
   };
+  const effectiveThemeStyle = normalizeThemeStyleSettings(config?.ui.theme_style);
+  const themeCopy = resolveThemeCopy(effectiveThemeStyle);
+  const themeCssVariables = (config
+    ? buildThemeCssVariables(config.ui, {
+        isTauriRuntime: isTauriRuntime(),
+        convertFileSrc,
+      })
+    : {}) as CSSProperties;
+
   return (
-    <div className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`}>
+    <div className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`} style={themeCssVariables}>
       {!isDetachedPopupWindow && (
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-title">Lazy Blacktea</span>
-          <span className="brand-subtitle">Device Automation</span>
+          <span className="brand-title">{themeCopy.app_title}</span>
+          <span className="brand-subtitle">{themeCopy.app_subtitle}</span>
         </div>
         <nav className="nav-links">
           <div className="nav-group">
@@ -13806,6 +13930,7 @@ function App() {
           <div className="sidebar-status">
             <span className={`status-dot ${hasDevices ? "ok" : "warn"}`} />
             <span>
+              <span className="sidebar-status-label">{themeCopy.sidebar_status_label}: </span>
               {runningTaskCount > 0
                 ? `${runningTaskCount} tasks running`
                 : hasDevices
@@ -17503,6 +17628,272 @@ function App() {
                               <span className="muted">Save Settings to apply this path globally.</span>
                             </div>
                           )}
+                        </div>
+                        <div className="settings-group settings-span-2 appearance-settings-group">
+                          <h3>Appearance</h3>
+                          <div className="appearance-layout">
+                            <div className="appearance-controls">
+                              <label>
+                                Theme preset
+                                <select
+                                  value={effectiveThemeStyle.preset_id}
+                                  onChange={(event) =>
+                                    updateThemeStyle((current) => ({
+                                      ...current,
+                                      preset_id: event.target.value,
+                                    }))
+                                  }
+                                >
+                                  {THEME_PRESETS.map((preset) => (
+                                    <option key={preset.id} value={preset.id}>
+                                      {preset.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label>
+                                Background source
+                                <select
+                                  value={effectiveThemeStyle.background_source.kind}
+                                  onChange={(event) =>
+                                    updateThemeStyle((current) => ({
+                                      ...current,
+                                      background_source: {
+                                        kind: event.target.value as ThemeBackgroundKind,
+                                        path:
+                                          event.target.value === "local_path" ||
+                                          event.target.value === "managed_path"
+                                            ? current.background_source.path
+                                            : "",
+                                      },
+                                    }))
+                                  }
+                                >
+                                  <option value="preset">Preset background</option>
+                                  <option value="none">No background image</option>
+                                  <option value="local_path">Use local path</option>
+                                  <option value="managed_path">Imported image</option>
+                                </select>
+                              </label>
+                              {(effectiveThemeStyle.background_source.kind === "local_path" ||
+                                effectiveThemeStyle.background_source.kind === "managed_path") && (
+                                <label>
+                                  Image path
+                                  <input
+                                    value={effectiveThemeStyle.background_source.path}
+                                    placeholder="/Users/me/Pictures/background.png"
+                                    onChange={(event) =>
+                                      updateThemeStyle((current) => ({
+                                        ...current,
+                                        background_source: {
+                                          ...current.background_source,
+                                          path: event.target.value,
+                                        },
+                                      }))
+                                    }
+                                  />
+                                </label>
+                              )}
+                              <div className="button-row">
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={handleBrowseThemeBackgroundPath}
+                                  disabled={busy || !isTauriRuntime()}
+                                >
+                                  Use Local Image
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={handleImportThemeBackgroundPath}
+                                  disabled={busy || !isTauriRuntime()}
+                                >
+                                  Import Image
+                                </button>
+                              </div>
+                              {!isTauriRuntime() && (
+                                <div className="inline-alert info">
+                                  Image picking and importing are available in the desktop app build.
+                                </div>
+                              )}
+                              <label>
+                                Background fit
+                                <select
+                                  value={effectiveThemeStyle.background_fit}
+                                  onChange={(event) =>
+                                    updateThemeStyle((current) => ({
+                                      ...current,
+                                      background_fit: event.target.value as ThemeBackgroundFit,
+                                    }))
+                                  }
+                                >
+                                  <option value="cover">Cover</option>
+                                  <option value="contain">Contain</option>
+                                  <option value="repeat">Repeat</option>
+                                </select>
+                              </label>
+                              <label>
+                                Background opacity
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.05}
+                                  value={effectiveThemeStyle.background_opacity}
+                                  onChange={(event) =>
+                                    updateThemeStyle((current) => ({
+                                      ...current,
+                                      background_opacity: Number(event.target.value),
+                                    }))
+                                  }
+                                />
+                              </label>
+                              <label>
+                                Panel opacity
+                                <input
+                                  type="range"
+                                  min={0.72}
+                                  max={1}
+                                  step={0.02}
+                                  value={effectiveThemeStyle.panel_opacity}
+                                  onChange={(event) =>
+                                    updateThemeStyle((current) => ({
+                                      ...current,
+                                      panel_opacity: Number(event.target.value),
+                                    }))
+                                  }
+                                />
+                              </label>
+                              <label>
+                                Font size
+                                <input
+                                  type="number"
+                                  min={10}
+                                  max={18}
+                                  value={config.ui.font_size}
+                                  onChange={(event) =>
+                                    setConfig((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            ui: {
+                                              ...prev.ui,
+                                              font_size: normalizeThemeFontSize(event.target.value),
+                                            },
+                                          }
+                                        : prev,
+                                    )
+                                  }
+                                />
+                              </label>
+                              <div className="theme-color-grid">
+                                <label>
+                                  Primary
+                                  <input
+                                    type="color"
+                                    value={effectiveThemeStyle.colors.primary || "#2563eb"}
+                                    onChange={(event) => updateThemeColor("primary", event.target.value)}
+                                  />
+                                </label>
+                                <label>
+                                  Accent
+                                  <input
+                                    type="color"
+                                    value={effectiveThemeStyle.colors.accent || "#0f766e"}
+                                    onChange={(event) => updateThemeColor("accent", event.target.value)}
+                                  />
+                                </label>
+                                <label>
+                                  Text
+                                  <input
+                                    type="color"
+                                    value={effectiveThemeStyle.colors.text || "#0f172a"}
+                                    onChange={(event) => updateThemeColor("text", event.target.value)}
+                                  />
+                                </label>
+                                <label>
+                                  Panel
+                                  <input
+                                    type="color"
+                                    value={effectiveThemeStyle.colors.panel || "#ffffff"}
+                                    onChange={(event) => updateThemeColor("panel", event.target.value)}
+                                  />
+                                </label>
+                              </div>
+                              <div className="button-row">
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() =>
+                                    setConfig((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            ui: {
+                                              ...prev.ui,
+                                              font_size: 13,
+                                              theme_style: buildDefaultThemeStyleSettings(),
+                                            },
+                                          }
+                                        : prev,
+                                    )
+                                  }
+                                  disabled={busy}
+                                >
+                                  Reset Appearance
+                                </button>
+                              </div>
+                            </div>
+                            <div className="appearance-preview" aria-label="Appearance preview">
+                              <div className="appearance-preview-window">
+                                <div className="appearance-preview-sidebar">
+                                  <strong>{themeCopy.app_title}</strong>
+                                  <span>{themeCopy.app_subtitle}</span>
+                                </div>
+                                <div className="appearance-preview-main">
+                                  <div className="appearance-preview-card">
+                                    <strong>Dashboard</strong>
+                                    <span>Primary actions and device status.</span>
+                                    <button type="button">Primary Action</button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="appearance-copy-grid">
+                            <label>
+                              App title
+                              <input
+                                value={effectiveThemeStyle.copy_overrides.app_title}
+                                placeholder="Lazy Blacktea"
+                                maxLength={80}
+                                onChange={(event) => updateThemeCopy("app_title", event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              App subtitle
+                              <input
+                                value={effectiveThemeStyle.copy_overrides.app_subtitle}
+                                placeholder="Device Automation"
+                                maxLength={120}
+                                onChange={(event) => updateThemeCopy("app_subtitle", event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Sidebar status label
+                              <input
+                                value={effectiveThemeStyle.copy_overrides.sidebar_status_label}
+                                placeholder="Device Status"
+                                maxLength={40}
+                                onChange={(event) => updateThemeCopy("sidebar_status_label", event.target.value)}
+                              />
+                            </label>
+                          </div>
+                          <div className="muted settings-hint">
+                            Appearance settings are saved locally. Imported images are copied into the app-managed theme
+                            folder; local image paths continue to reference the original file.
+                          </div>
                         </div>
 	                        <div className="settings-group">
 	                          <h3>Output Paths</h3>

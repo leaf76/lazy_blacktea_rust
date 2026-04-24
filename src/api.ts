@@ -49,6 +49,7 @@ const COMMAND_ERROR_META: Record<string, { title: string; source: string }> = {
   get_config: { title: "Load Settings", source: "settings.load" },
   save_app_config: { title: "Save Settings", source: "settings.save" },
   reset_config: { title: "Reset Settings", source: "settings.reset" },
+  import_theme_background: { title: "Import Theme Background", source: "settings.theme.import_background" },
   check_adb: { title: "ADB Check", source: "adb.check" },
   list_devices: { title: "Refresh Devices", source: "devices.list" },
   adb_pair: { title: "Wireless Pair", source: "wireless.pair" },
@@ -208,6 +209,16 @@ export const saveConfig = async (config: AppConfig) => {
 export const resetConfig = async () => {
   const traceId = createTraceId();
   return tauriInvoke<CommandResponse<AppConfig>>("reset_config", {
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const importThemeBackground = async (sourcePath: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<string>>("import_theme_background", {
+    source_path: sourcePath,
+    sourcePath,
     trace_id: traceId,
     traceId,
   });

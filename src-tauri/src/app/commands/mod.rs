@@ -50,7 +50,8 @@ use crate::app::bluetooth::service::start_bluetooth_monitor as start_bluetooth_m
 use crate::app::bugreport_extract;
 use crate::app::bugreport_logcat;
 use crate::app::config::{
-    clamp_terminal_buffer_lines, load_config, normalize_config_for_save, save_config, AppConfig,
+    clamp_terminal_buffer_lines, import_theme_background_from_path, load_config,
+    normalize_config_for_save, save_config, AppConfig,
 };
 use crate::app::diagnostics;
 use crate::app::error::AppError;
@@ -2208,6 +2209,19 @@ pub fn reset_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfi
     Ok(CommandResponse {
         trace_id,
         data: config,
+    })
+}
+
+#[tauri::command(async)]
+pub fn import_theme_background(
+    source_path: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<String>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let imported = import_theme_background_from_path(Path::new(&source_path), &trace_id)?;
+    Ok(CommandResponse {
+        trace_id,
+        data: imported,
     })
 }
 
