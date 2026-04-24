@@ -423,6 +423,13 @@ type RebootMode = "normal" | "recovery" | "bootloader";
 type DeviceCatalogActionEntry = DeviceQuickMenuAction & {
   onSelect: () => void;
 };
+const SETTINGS_TABS = [
+  { id: "connectivity", label: "Connectivity" },
+  { id: "appearance", label: "Appearance" },
+  { id: "system", label: "System" },
+  { id: "operations", label: "Operations" },
+] as const;
+type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
 
 const TERMINAL_MAX_LINES = 500;
 const NET_PROFILER_MAX_SAMPLES = 180;
@@ -2132,6 +2139,7 @@ function App() {
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [iosToolsInfo, setIosToolsInfo] = useState<IosToolsInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("connectivity");
   const [dashboardConfigOpen, setDashboardConfigOpen] = useState(false);
   const [dashboardDraft, setDashboardDraft] = useState<DashboardSettings>(buildDefaultDashboardSettings());
   const [dashboardCopiedKey, setDashboardCopiedKey] = useState<string | null>(null);
@@ -14037,13 +14045,35 @@ function App() {
   };
   const effectiveThemeStyle = normalizeThemeStyleSettings(config?.ui.theme_style);
   const themeCopy = resolveThemeCopy(effectiveThemeStyle);
+  const activeSettingsTabIndex = SETTINGS_TABS.findIndex((tab) => tab.id === activeSettingsTab);
+  const activeSettingsTabConfig =
+    SETTINGS_TABS[activeSettingsTabIndex >= 0 ? activeSettingsTabIndex : 0] ?? SETTINGS_TABS[0];
+  const handleSettingsTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    const currentIndex = activeSettingsTabIndex >= 0 ? activeSettingsTabIndex : 0;
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? SETTINGS_TABS.length - 1
+          : event.key === "ArrowLeft"
+            ? (currentIndex - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length
+            : (currentIndex + 1) % SETTINGS_TABS.length;
+    const nextTab = SETTINGS_TABS[nextIndex];
+
+    setActiveSettingsTab(nextTab.id);
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-settings-tab="${nextTab.id}"]`)?.focus();
+  };
   const themeCssVariables = (config
     ? buildThemeCssVariables(config.ui, {
         isTauriRuntime: isTauriRuntime(),
         convertFileSrc,
       })
     : {}) as CSSProperties;
-
   return (
     <div className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`} style={themeCssVariables}>
       {!isDetachedPopupWindow && (
@@ -14087,9 +14117,6 @@ function App() {
         <div className="sidebar-footer">
           <button className="ghost" onClick={openPairingModal} disabled={busy}>
             Connect Device
-          </button>
-          <button className="ghost" onClick={() => navigate("/settings")}>
-            Settings
           </button>
           <div className="sidebar-status">
             <span className={`status-dot ${hasDevices ? "ok" : "warn"}`} />
@@ -17773,13 +17800,42 @@ function App() {
                         <p className="muted">Persisted locally. Update defaults for actions.</p>
                       </div>
                     </div>
-                    <section className="panel">
+                    <section className="panel settings-panel">
                       <div className="panel-header">
                         <h2>Settings</h2>
                         <span>Saved locally</span>
                       </div>
-                      <div className="settings-grid">
-                        <div className="settings-group settings-span-2">
+                      <div
+                        className="settings-tabs"
+                        role="tablist"
+                        aria-label="Settings sections"
+                        onKeyDown={handleSettingsTabKeyDown}
+                      >
+                        {SETTINGS_TABS.map((tab) => (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            role="tab"
+                            id={`settings-tab-${tab.id}`}
+                            className="settings-tab"
+                            aria-selected={activeSettingsTab === tab.id}
+                            aria-controls={`settings-panel-${tab.id}`}
+                            tabIndex={activeSettingsTab === tab.id ? 0 : -1}
+                            data-settings-tab={tab.id}
+                            onClick={() => setActiveSettingsTab(tab.id)}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div
+                        id={`settings-panel-${activeSettingsTabConfig.id}`}
+                        className={`settings-tab-panel settings-tab-panel-${activeSettingsTabConfig.id}`}
+                        role="tabpanel"
+                        aria-labelledby={`settings-tab-${activeSettingsTabConfig.id}`}
+                      >
+                        <div className="settings-grid">
+                          <div className="settings-group settings-span-2 settings-section-connectivity">
                           <h3>ADB</h3>
                           <label>
                             ADB executable path
@@ -17821,7 +17877,7 @@ function App() {
                             </div>
                           )}
                         </div>
-                        <div className="settings-group settings-span-2">
+                          <div className="settings-group settings-span-2 settings-section-connectivity">
                           <h3>iOS Tools</h3>
                           <div className="muted settings-hint">
                             iOS device inventory uses Xcode <code>devicectl</code> on macOS or
@@ -17869,7 +17925,7 @@ function App() {
                             </span>
                           </div>
                         </div>
-                        <div className="settings-group settings-span-2 appearance-settings-group">
+                          <div className="settings-group settings-span-2 appearance-settings-group settings-section-appearance">
                           <h3>Appearance</h3>
                           <div className="appearance-layout">
                             <div className="appearance-controls">
@@ -18135,7 +18191,7 @@ function App() {
                             folder; local image paths continue to reference the original file.
                           </div>
                         </div>
-	                        <div className="settings-group">
+	                        <div className="settings-group settings-section-system">
 	                          <h3>Output Paths</h3>
 	                          <label>
 	                            Default Output
@@ -18182,7 +18238,7 @@ function App() {
                             Folder for generated exports (logcat, UI inspector). Leave blank to reuse Default Output.
                           </div>
 	                        </div>
-                          <div className="settings-group">
+                          <div className="settings-group settings-section-system">
                             <h3>Updates</h3>
                             <div className="muted settings-hint">
                               Check for new versions from GitHub Releases. Installing updates will restart the app.
@@ -18256,7 +18312,7 @@ function App() {
                             )}
                           </div>
 
-                          <div className="settings-group">
+                          <div className="settings-group settings-section-system">
                             <h3>Notifications</h3>
                             <label className="toggle">
                               <input
@@ -18452,7 +18508,7 @@ function App() {
                               Notify on cancelled
                             </label>
                           </div>
-	                        <div className="settings-group">
+	                        <div className="settings-group settings-section-connectivity">
 	                          <h3>Devices</h3>
 	                          <label className="toggle">
 	                            <input
@@ -18503,7 +18559,7 @@ function App() {
                               for startup or recovery sync, not fixed polling.
                             </div>
 		                        </div>
-	                        <div className="settings-group">
+	                        <div className="settings-group settings-section-operations">
 	                          <h3>Commands</h3>
 	                          <label>
 	                            Timeout (sec)
@@ -18548,7 +18604,7 @@ function App() {
                             see flaky ADB/USB behavior.
                           </div>
                         </div>
-                        <div className="settings-group">
+                        <div className="settings-group settings-section-operations">
                           <h3>Screenshot</h3>
                           <label>
                             Display ID
@@ -18592,7 +18648,7 @@ function App() {
                             Extra <code>screencap</code> flags, space-separated. Leave blank for defaults.
                           </div>
                         </div>
-                        <div className="settings-group">
+                        <div className="settings-group settings-section-operations">
                           <h3>Screenrecord</h3>
                           <label>
                             Bit rate
@@ -18757,7 +18813,7 @@ function App() {
                             Enable verbose <code>screenrecord</code> output for troubleshooting.
                           </div>
                         </div>
-                        <div className="settings-group">
+                        <div className="settings-group settings-section-operations">
                           <h3>scrcpy</h3>
                           <label className="toggle">
                             <input
@@ -18874,6 +18930,7 @@ function App() {
                             Additional scrcpy CLI args, space-separated. Leave blank for defaults.
                           </div>
                         </div>
+                      </div>
                       </div>
                       <div className="button-row settings-actions">
                         <button onClick={handleSaveConfig} disabled={busy}>

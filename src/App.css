@@ -145,6 +145,7 @@ textarea {
   display: grid;
   grid-template-columns: 220px 1fr;
   background: var(--color-bg-app);
+  color: var(--color-text);
   font-size: var(--theme-font-size);
   overflow: hidden;
   position: relative;
@@ -4221,6 +4222,47 @@ button.danger:hover:not(:disabled) {
   justify-content: flex-end;
   border-top: 1px solid var(--color-border);
   padding-top: 12px;
+  margin-top: 14px;
+}
+
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.settings-tab {
+  min-height: 34px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-panel);
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.settings-tab[aria-selected="true"] {
+  background: var(--nav-active-bg);
+  border-color: var(--nav-active-border);
+  color: var(--nav-active-text);
+  font-weight: 600;
+}
+
+.settings-tab:hover {
+  background: var(--color-bg-subtle);
+}
+
+.settings-tab[aria-selected="true"]:hover {
+  background: var(--nav-active-bg);
+}
+
+.settings-tab-panel-connectivity .settings-group:not(.settings-section-connectivity),
+.settings-tab-panel-appearance .settings-group:not(.settings-section-appearance),
+.settings-tab-panel-system .settings-group:not(.settings-section-system),
+.settings-tab-panel-operations .settings-group:not(.settings-section-operations) {
+  display: none;
 }
 
 @media (max-width: 1200px) {
