@@ -6421,10 +6421,11 @@ pub fn start_perf_monitor(
                                     {
                                         let delta = total.saturating_sub(prev_total) as u128;
                                         let dt_ms = now.duration_since(prev_instant).as_millis();
-                                        if dt_ms > 0 {
-                                            let per_sec_x100 = ((delta * 100_000u128) / dt_ms)
-                                                .min(u16::MAX as u128)
-                                                as u16;
+                                        if let Some(rate_x100) =
+                                            (delta * 100_000u128).checked_div(dt_ms)
+                                        {
+                                            let per_sec_x100 =
+                                                rate_x100.min(u16::MAX as u128) as u16;
                                             missed_frames_per_sec_x100 = Some(per_sec_x100);
                                         }
                                     }
