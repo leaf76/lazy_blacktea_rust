@@ -231,7 +231,8 @@ import {
   buildIosToolGuidanceRows,
   buildTopbarOverview,
   buildDeviceQuickMenuActions,
-  computeContextMenuPosition,
+  computeContextMenuLayout,
+  computeContextSubmenuLayout,
   filterDevicesBySearch,
   flattenDeviceGroups,
   formatDeviceApiLabel,
@@ -2019,6 +2020,8 @@ function App() {
   const [deviceContextSubmenu, setDeviceContextSubmenu] = useState<{
     x: number;
     y: number;
+    triggerLeft: number;
+    triggerRight: number;
     title: string;
     items: DeviceInfoCopyItem[];
   } | null>(null);
@@ -12028,11 +12031,33 @@ function App() {
     0,
   );
   const deviceContextMenuPosition = deviceContextMenu
-    ? computeContextMenuPosition({
+    ? computeContextMenuLayout({
         anchorX: deviceContextMenu.x,
         anchorY: deviceContextMenu.y,
         menuWidth: 230,
-        menuHeight: Math.max(64, 18 + deviceContextMenuSections.length * 26 + deviceContextMenuActionCount * 36),
+        desiredMenuHeight: Math.max(64, 18 + deviceContextMenuSections.length * 26 + deviceContextMenuActionCount * 36),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        margin: 10,
+      })
+    : null;
+  const filesContextMenuPosition = filesContextMenu
+    ? computeContextMenuLayout({
+        anchorX: filesContextMenu.x,
+        anchorY: filesContextMenu.y,
+        menuWidth: 280,
+        desiredMenuHeight: 420,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        margin: 10,
+      })
+    : null;
+  const appsContextMenuPosition = appsContextMenu
+    ? computeContextMenuLayout({
+        anchorX: appsContextMenu.x,
+        anchorY: appsContextMenu.y,
+        menuWidth: 240,
+        desiredMenuHeight: 420,
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
         margin: 10,
@@ -12060,14 +12085,16 @@ function App() {
     ? buildDeviceInfoCopyItems(deviceContextMenuTarget)
     : [];
   const deviceContextSubmenuPosition = deviceContextSubmenu
-    ? computeContextMenuPosition({
-        anchorX: deviceContextSubmenu.x,
-        anchorY: deviceContextSubmenu.y,
+    ? computeContextSubmenuLayout({
+        triggerLeft: deviceContextSubmenu.triggerLeft,
+        triggerRight: deviceContextSubmenu.triggerRight,
+        triggerTop: deviceContextSubmenu.y,
         menuWidth: 250,
-        menuHeight: Math.max(64, 44 + deviceContextSubmenu.items.length * 36),
+        desiredMenuHeight: Math.max(64, 44 + deviceContextSubmenu.items.length * 36),
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
         margin: 10,
+        gutter: 8,
       })
     : null;
 
@@ -12083,6 +12110,8 @@ function App() {
     setDeviceContextSubmenu({
       x: rect.right + 8,
       y: rect.top,
+      triggerLeft: rect.left,
+      triggerRight: rect.right,
       title: "Copy Device Info",
       items,
     });
@@ -14757,6 +14786,8 @@ function App() {
                                 detail?.device_name ?? detail?.model ?? device.summary.model ?? serial;
                               const secondaryLabel =
                                 detail?.name && detail.name !== modelLabel ? detail.name : serial;
+                              const showSecondaryLabel = secondaryLabel !== modelLabel;
+                              const showSerialMeta = serial !== modelLabel && serial !== secondaryLabel;
                               const platformLabel = formatDevicePlatformLabel(device);
                               const apiLabel = formatDeviceApiLabel(device);
                               const trustLabel = detail?.trust_status;
@@ -14794,7 +14825,7 @@ function App() {
                                       showSelectionHint: true,
                                     })
                                   }
-                                  >
+                                >
                                   <label className="device-check" onClick={(event) => event.stopPropagation()}>
                                     <input
                                       type="checkbox"
@@ -14821,13 +14852,17 @@ function App() {
                                         {isActive && <span className="device-active-badge">Primary</span>}
                                         {groupLabel && <span className="group-tag">{groupLabel}</span>}
                                       </div>
-                                      <div className="device-identity-sub">
-                                        <span>{secondaryLabel}</span>
+                                      {showSecondaryLabel && (
+                                        <div className="device-identity-sub">
+                                          <span>{secondaryLabel}</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                    {showSerialMeta && (
+                                      <div className="device-identity-meta">
+                                        <span className="device-serial">{serial}</span>
                                       </div>
-                                    </div>
-                                    <div className="device-identity-meta">
-                                      <span className="device-serial">{serial}</span>
-                                    </div>
+                                    )}
                                   </div>
                                   <div className="device-cell device-capability">
                                     <div className="device-platform">
@@ -14991,10 +15026,12 @@ function App() {
                         />
                         <div
                           ref={deviceContextMenuRef}
-                          className="context-menu"
+                          className="context-menu context-menu-scrollable"
                           style={{
                             top: deviceContextMenuPosition?.top ?? deviceContextMenu.y,
                             left: deviceContextMenuPosition?.left ?? deviceContextMenu.x,
+                            maxHeight: deviceContextMenuPosition?.maxHeight,
+                            width: 230,
                           }}
                         >
                           <div className="context-menu-header">
@@ -15057,6 +15094,8 @@ function App() {
                             style={{
                               top: deviceContextSubmenuPosition?.top ?? deviceContextSubmenu.y,
                               left: deviceContextSubmenuPosition?.left ?? deviceContextSubmenu.x,
+                              maxHeight: deviceContextSubmenuPosition?.maxHeight,
+                              width: 250,
                             }}
                           >
                             <div className="context-menu-header">
@@ -15996,10 +16035,12 @@ function App() {
                       <>
                         <div className="context-menu-backdrop" onClick={() => setFilesContextMenu(null)} />
                         <div
-                          className="context-menu"
+                          className="context-menu context-menu-scrollable"
                           style={{
-                            top: filesContextMenu.y,
-                            left: Math.max(10, filesContextMenu.x - 160),
+                            top: filesContextMenuPosition?.top ?? filesContextMenu.y,
+                            left: filesContextMenuPosition?.left ?? Math.max(10, filesContextMenu.x - 160),
+                            maxHeight: filesContextMenuPosition?.maxHeight,
+                            width: 280,
                           }}
                         >
                           {(() => {
@@ -16805,8 +16846,13 @@ function App() {
 	                          onMouseDown={() => setAppsContextMenu(null)}
 	                        />
 	                        <div
-	                          className="context-menu"
-	                          style={{ left: appsContextMenu.x, top: appsContextMenu.y, minWidth: 240 }}
+	                          className="context-menu context-menu-scrollable"
+	                          style={{
+	                            left: appsContextMenuPosition?.left ?? appsContextMenu.x,
+	                            top: appsContextMenuPosition?.top ?? appsContextMenu.y,
+	                            maxHeight: appsContextMenuPosition?.maxHeight,
+	                            width: 240,
+	                          }}
 	                          onMouseDown={(event) => event.stopPropagation()}
 	                        >
 	                          {(() => {

@@ -8,7 +8,9 @@ import {
   buildDeviceGroupOptions,
   buildDeviceGroupSelectionSummary,
   buildTopbarOverview,
+  computeContextMenuLayout,
   computeContextMenuPosition,
+  computeContextSubmenuLayout,
   expandDeviceGroups,
   filterDevicesBySearch,
   flattenDeviceGroups,
@@ -905,5 +907,57 @@ describe("deviceUtils", () => {
     });
     expect(pos.left).toBe(10);
     expect(pos.top).toBe(10);
+  });
+
+  it("sizes tall context menus to the viewport before positioning", () => {
+    const layout = computeContextMenuLayout({
+      anchorX: 1260,
+      anchorY: 700,
+      menuWidth: 240,
+      desiredMenuHeight: 900,
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      margin: 10,
+    });
+
+    expect(layout.left).toBe(1020);
+    expect(layout.top).toBe(10);
+    expect(layout.maxHeight).toBe(700);
+  });
+
+  it("keeps tall context submenus aligned with their trigger and scrollable", () => {
+    const layout = computeContextSubmenuLayout({
+      triggerLeft: 814,
+      triggerRight: 1158,
+      triggerTop: 693,
+      menuWidth: 250,
+      desiredMenuHeight: 800,
+      viewportWidth: 1980,
+      viewportHeight: 1240,
+      margin: 10,
+      gutter: 8,
+    });
+
+    expect(layout.left).toBe(1166);
+    expect(layout.top).toBe(693);
+    expect(layout.maxHeight).toBe(537);
+  });
+
+  it("opens context submenus to the left when the right side would overflow", () => {
+    const layout = computeContextSubmenuLayout({
+      triggerLeft: 1710,
+      triggerRight: 1940,
+      triggerTop: 120,
+      menuWidth: 250,
+      desiredMenuHeight: 360,
+      viewportWidth: 1980,
+      viewportHeight: 1240,
+      margin: 10,
+      gutter: 8,
+    });
+
+    expect(layout.left).toBe(1452);
+    expect(layout.top).toBe(120);
+    expect(layout.maxHeight).toBe(360);
   });
 });

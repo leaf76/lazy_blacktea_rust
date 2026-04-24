@@ -96,6 +96,31 @@ type ContextMenuPositionParams = {
   viewportHeight: number;
   margin?: number;
 };
+type ContextMenuLayoutParams = Omit<ContextMenuPositionParams, "menuHeight"> & {
+  desiredMenuHeight: number;
+};
+type ContextMenuLayout = {
+  top: number;
+  left: number;
+  maxHeight: number;
+};
+type ContextSubmenuLayoutParams = {
+  triggerLeft: number;
+  triggerRight: number;
+  triggerTop: number;
+  menuWidth: number;
+  desiredMenuHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  margin?: number;
+  gutter?: number;
+  minVisibleHeight?: number;
+};
+type ContextSubmenuLayout = {
+  top: number;
+  left: number;
+  maxHeight: number;
+};
 
 const DEVICE_CONTEXT_SECTION_ORDER: DeviceContextActionSectionId[] = [
   "selection",
@@ -788,6 +813,81 @@ export const computeContextMenuPosition = ({
   return {
     top: Math.round(top),
     left: Math.round(left),
+  };
+};
+
+export const computeContextMenuLayout = ({
+  anchorX,
+  anchorY,
+  menuWidth,
+  desiredMenuHeight,
+  viewportWidth,
+  viewportHeight,
+  margin = 10,
+}: ContextMenuLayoutParams): ContextMenuLayout => {
+  const safeMargin = Math.max(0, margin);
+  const safeViewportHeight = Math.max(1, viewportHeight);
+  const maxViewportHeight = Math.max(1, safeViewportHeight - safeMargin * 2);
+  const maxHeight = Math.min(Math.max(1, desiredMenuHeight), maxViewportHeight);
+  const position = computeContextMenuPosition({
+    anchorX,
+    anchorY,
+    menuWidth,
+    menuHeight: maxHeight,
+    viewportWidth,
+    viewportHeight,
+    margin: safeMargin,
+  });
+
+  return {
+    ...position,
+    maxHeight: Math.round(maxHeight),
+  };
+};
+
+export const computeContextSubmenuLayout = ({
+  triggerLeft,
+  triggerRight,
+  triggerTop,
+  menuWidth,
+  desiredMenuHeight,
+  viewportWidth,
+  viewportHeight,
+  margin = 10,
+  gutter = 8,
+  minVisibleHeight = 160,
+}: ContextSubmenuLayoutParams): ContextSubmenuLayout => {
+  const safeWidth = Math.max(1, menuWidth);
+  const safeDesiredHeight = Math.max(1, desiredMenuHeight);
+  const safeViewportWidth = Math.max(1, viewportWidth);
+  const safeViewportHeight = Math.max(1, viewportHeight);
+  const safeMargin = Math.max(0, margin);
+  const safeGutter = Math.max(0, gutter);
+  const safeMinVisibleHeight = Math.max(1, minVisibleHeight);
+  const maxViewportHeight = Math.max(1, safeViewportHeight - safeMargin * 2);
+
+  const rightLeft = triggerRight + safeGutter;
+  const leftLeft = triggerLeft - safeWidth - safeGutter;
+  let left =
+    rightLeft + safeWidth + safeMargin <= safeViewportWidth || leftLeft < safeMargin
+      ? rightLeft
+      : leftLeft;
+
+  const maxLeft = Math.max(safeMargin, safeViewportWidth - safeWidth - safeMargin);
+  left = Math.min(Math.max(left, safeMargin), maxLeft);
+
+  const availableBelow = Math.max(0, safeViewportHeight - triggerTop - safeMargin);
+  const desiredVisibleHeight = Math.min(safeDesiredHeight, maxViewportHeight);
+  const shouldAlignToTrigger = availableBelow >= Math.min(safeMinVisibleHeight, desiredVisibleHeight);
+  const top = shouldAlignToTrigger
+    ? triggerTop
+    : Math.max(safeMargin, safeViewportHeight - desiredVisibleHeight - safeMargin);
+  const maxHeight = shouldAlignToTrigger ? Math.min(desiredVisibleHeight, availableBelow) : desiredVisibleHeight;
+
+  return {
+    top: Math.round(top),
+    left: Math.round(left),
+    maxHeight: Math.round(maxHeight),
   };
 };
 

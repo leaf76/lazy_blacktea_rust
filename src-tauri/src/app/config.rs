@@ -137,6 +137,7 @@ impl Default for ThemeStyleSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct UiSettings {
     pub window_width: i32,
     pub window_height: i32,
@@ -171,6 +172,7 @@ impl Default for UiSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct DeviceSettings {
     #[serde(default = "default_device_refresh_interval")]
     pub refresh_interval: i32,
@@ -197,6 +199,7 @@ impl Default for DeviceSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct CommandSettings {
     pub max_history_size: usize,
     pub auto_save_history: bool,
@@ -221,6 +224,7 @@ pub struct AdbSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct LoggingSettings {
     pub log_level: String,
     pub log_to_file: bool,
@@ -240,6 +244,7 @@ impl Default for LoggingSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct LogcatSettings {
     pub max_lines: i32,
     pub history_multiplier: i32,
@@ -261,6 +266,7 @@ impl Default for LogcatSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ScrcpySettings {
     pub stay_awake: bool,
     pub turn_screen_off: bool,
@@ -286,6 +292,7 @@ impl Default for ScrcpySettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ApkInstallSettings {
     pub replace_existing: bool,
     pub allow_downgrade: bool,
@@ -307,6 +314,7 @@ impl Default for ApkInstallSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ScreenshotSettings {
     pub extra_args: String,
     pub display_id: i32,
@@ -322,6 +330,7 @@ impl Default for ScreenshotSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ScreenRecordSettings {
     pub bit_rate: String,
     pub time_limit_sec: i32,
@@ -351,6 +360,7 @@ impl Default for ScreenRecordSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct LogcatViewerSettings {
     pub compact_mode: bool,
     pub show_preview_panel: bool,
@@ -1096,6 +1106,35 @@ mod tests {
             .cards
             .iter()
             .any(|card| card.id == "device_profile"));
+    }
+
+    #[test]
+    fn loads_partial_nested_settings_with_defaults() {
+        let value = serde_json::json!({
+            "command": {
+                "parallel_execution": false
+            },
+            "apk_install": {
+                "extra_args": "--user 0"
+            },
+            "screen_record": {
+                "display_id": 2
+            }
+        });
+
+        let parsed: AppConfig = serde_json::from_value(value).expect("config should deserialize");
+        assert_eq!(parsed.command.max_history_size, 50);
+        assert!(parsed.command.auto_save_history);
+        assert_eq!(parsed.command.command_timeout, 30);
+        assert!(!parsed.command.parallel_execution);
+        assert!(parsed.apk_install.replace_existing);
+        assert!(parsed.apk_install.allow_downgrade);
+        assert!(parsed.apk_install.grant_permissions);
+        assert!(!parsed.apk_install.allow_test_packages);
+        assert_eq!(parsed.apk_install.extra_args, "--user 0");
+        assert_eq!(parsed.screen_record.bit_rate, "4000000");
+        assert_eq!(parsed.screen_record.time_limit_sec, 180);
+        assert_eq!(parsed.screen_record.display_id, 2);
     }
 
     #[test]

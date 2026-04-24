@@ -3924,6 +3924,12 @@ button.danger:hover:not(:disabled) {
   gap: 2px;
 }
 
+.context-menu-scrollable {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
 .context-menu-header {
   display: flex;
   flex-direction: column;
@@ -4015,6 +4021,9 @@ button.danger:hover:not(:disabled) {
 .context-menu-submenu {
   z-index: 42;
   min-width: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .file-grid {
