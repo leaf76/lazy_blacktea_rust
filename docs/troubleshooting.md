@@ -92,6 +92,32 @@ idevicecrashreport --version
 
 Confirm the output folder is writable and the iPhone is trusted. The app writes crash reports only to the configured local output folder or an explicitly selected folder.
 
+## iOS Configuration Profile Install Fails
+
+Configuration profile install is macOS-only in the MVP and requires Apple Configurator `cfgutil`.
+
+1. Install Apple Configurator from the App Store.
+2. In Apple Configurator, install the command-line tool, then verify:
+
+   ```bash
+   cfgutil help
+   cfgutil list
+   ```
+
+3. In the app, open **Settings -> iOS Tools -> Test iOS Tools** and confirm `cfgutil` is `available`.
+4. Connect the iPhone over USB, unlock it, and accept the trust prompt.
+5. Open **Profiles**, validate the `.mobileconfig`, select eligible iOS devices, then install.
+
+Common causes:
+
+- `cfgutil` is missing or not in `PATH`.
+- The iPhone is locked, untrusted, or not visible in `cfgutil list`.
+- The profile has the same identifier as an existing profile and the device rejects the update.
+- The profile requires supervision, missing user input, or a payload that cannot be installed silently.
+- The profile contains an MDM enrollment or network-dependent payload and the device is not ready for that step.
+
+Linux note: this app does not install `.mobileconfig` through libimobiledevice. Use MDM, Apple Configurator on macOS, or user-guided installation for Linux workflows.
+
 ## macOS: App Blocked (Unsigned Build)
 
 If macOS says the app cannot be opened:

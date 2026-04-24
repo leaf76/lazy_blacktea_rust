@@ -31,6 +31,7 @@ export type DeviceContextActionId =
   | "bluetooth_disable"
   | "logcat_clear"
   | "ios_crash_reports"
+  | "install_configuration_profile"
   | "mirror"
   | "apk_installer";
 export type DeviceContextActionSectionId =
@@ -190,6 +191,16 @@ export const buildIosToolGuidanceRows = (
       error: tools?.devicectl.error,
     },
     {
+      id: "cfgutil",
+      label: "Apple Configurator cfgutil",
+      status: isMacos ? toGuidanceStatus(tools?.cfgutil.available) : "not_required",
+      role: "macos_only",
+      detail: isMacos
+        ? "Required on macOS to install configuration profiles on USB-connected iOS devices."
+        : "macOS-only; configuration profile install is not supported on this host.",
+      error: tools?.cfgutil.error,
+    },
+    {
       id: "usbmuxd",
       label: "usbmuxd service",
       status: "not_checked",
@@ -262,6 +273,16 @@ export const getIosCrashReportEligibleSerials = (devices: DeviceInfo[]): string[
         device.summary.state === "device" &&
         getDevicePlatform(device) === "ios" &&
         hasDeviceCapability(device, "crash_reports"),
+    )
+    .map((device) => device.summary.serial);
+
+export const getIosConfigurationProfileEligibleSerials = (devices: DeviceInfo[]): string[] =>
+  devices
+    .filter(
+      (device) =>
+        device.summary.state === "device" &&
+        getDevicePlatform(device) === "ios" &&
+        hasDeviceCapability(device, "configuration_profiles"),
     )
     .map((device) => device.summary.serial);
 

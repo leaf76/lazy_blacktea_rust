@@ -2148,6 +2148,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "mime_guess",
+ "plist",
  "png 0.18.0",
  "quick-xml 0.38.4",
  "regex",

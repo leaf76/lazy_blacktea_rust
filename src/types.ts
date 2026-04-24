@@ -11,6 +11,7 @@ export type DeviceCapabilities = {
   mirror?: boolean;
   reboot?: boolean;
   connectivity?: boolean;
+  configuration_profiles?: boolean;
 };
 
 export type DeviceSummary = {
@@ -97,6 +98,24 @@ export type IosToolsInfo = {
   ideviceinfo: IosToolStatus;
   idevicesyslog: IosToolStatus;
   idevicecrashreport: IosToolStatus;
+  cfgutil: IosToolStatus;
+};
+
+export type MobileconfigSummary = {
+  display_name?: string | null;
+  identifier?: string | null;
+  uuid?: string | null;
+  payload_type?: string | null;
+  payload_count: number;
+};
+
+export type IosProfileInstallStatus = "installed" | "failed" | "skipped";
+
+export type IosProfileInstallResult = {
+  serial: string;
+  status: IosProfileInstallStatus;
+  message: string;
+  trace_id: string;
 };
 
 export type UiHierarchyCaptureResult = {

@@ -51,9 +51,11 @@ import type {
   DashboardFieldId,
   DashboardSettings,
   FilePreview,
+  IosProfileInstallResult,
   IosToolsInfo,
   LegacyLogcatPreset,
   LogcatEvent,
+  MobileconfigSummary,
   NetProfilerEvent,
   NetProfilerSnapshot,
   PerfEvent,
@@ -90,6 +92,7 @@ import {
   getScreenRecordStatus,
   importThemeBackground,
   installApkBatch,
+  installIosConfigurationProfile,
   launchApp,
   launchScrcpy,
   mkdirDeviceDir,
@@ -134,6 +137,7 @@ import {
   stopLogcat,
   stopScreenRecord,
   uninstallApp,
+  validateMobileconfig,
 } from "./api";
 import {
   appendRetainedLogcatEntries,
@@ -238,6 +242,7 @@ import {
   flattenDeviceGroups,
   formatDeviceApiLabel,
   formatDevicePlatformLabel,
+  getIosConfigurationProfileEligibleSerials,
   getIosCrashReportEligibleSerials,
   formatPrimaryDeviceLabel,
   getDevicePlatform,
@@ -2139,6 +2144,13 @@ function App() {
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
   const [iosToolsInfo, setIosToolsInfo] = useState<IosToolsInfo | null>(null);
+  const [mobileconfigPath, setMobileconfigPath] = useState("");
+  const [mobileconfigSummary, setMobileconfigSummary] = useState<MobileconfigSummary | null>(null);
+  const [mobileconfigValidationError, setMobileconfigValidationError] = useState<string | null>(null);
+  const [profileTargetSerials, setProfileTargetSerials] = useState<string[]>([]);
+  const [profileInstallResults, setProfileInstallResults] = useState<IosProfileInstallResult[]>([]);
+  const [profileConfirmOpen, setProfileConfirmOpen] = useState(false);
+  const [profileInstalling, setProfileInstalling] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("connectivity");
   const [dashboardConfigOpen, setDashboardConfigOpen] = useState(false);
@@ -11421,6 +11433,127 @@ function App() {
     }
   };
 
+  const handleValidateMobileconfigPath = async (profilePath = mobileconfigPath) => {
+    const trimmed = profilePath.trim();
+    if (!trimmed) {
+      setMobileconfigSummary(null);
+      setMobileconfigValidationError("Select a .mobileconfig file first.");
+      return;
+    }
+    setProfileInstallResults([]);
+    setMobileconfigValidationError(null);
+    setProfileInstalling(true);
+    try {
+      const response = await validateMobileconfig(trimmed);
+      setMobileconfigSummary(response.data);
+      setMobileconfigPath(trimmed);
+      pushToast("Configuration profile validated.", "info");
+    } catch (error) {
+      setMobileconfigSummary(null);
+      setMobileconfigValidationError(formatError(error));
+      pushToast(formatError(error), "error");
+    } finally {
+      setProfileInstalling(false);
+    }
+  };
+
+  const handleBrowseMobileconfigPath = async () => {
+    try {
+      const selected = await openDialog({
+        title: "Select configuration profile",
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Configuration Profiles",
+            extensions: ["mobileconfig"],
+          },
+        ],
+      });
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+      setMobileconfigPath(selected);
+      setMobileconfigSummary(null);
+      setMobileconfigValidationError(null);
+      void handleValidateMobileconfigPath(selected);
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleOpenConfigurationProfiles = () => {
+    setProfileTargetSerials(iosConfigurationProfileEligibleSerials);
+    setProfileInstallResults([]);
+    navigate("/profiles");
+  };
+
+  const toggleProfileTargetSerial = (serial: string) => {
+    setProfileTargetSerials((prev) =>
+      prev.includes(serial) ? prev.filter((item) => item !== serial) : [...prev, serial],
+    );
+  };
+
+  const selectAllProfileTargets = () => {
+    setProfileTargetSerials(iosProfileCapableDevices.map((device) => device.summary.serial));
+  };
+
+  const clearProfileTargets = () => {
+    setProfileTargetSerials([]);
+  };
+
+  const getValidProfileTargetSerials = () => {
+    const eligible = new Set(
+      devices
+        .filter(
+          (device) =>
+            getDevicePlatform(device) === "ios" &&
+            device.summary.state === "device" &&
+            hasDeviceCapability(device, "configuration_profiles"),
+        )
+        .map((device) => device.summary.serial),
+    );
+    return profileTargetSerials.filter((serial) => eligible.has(serial));
+  };
+
+  const requestProfileInstallConfirm = () => {
+    if (!mobileconfigSummary) {
+      setMobileconfigValidationError("Validate the configuration profile before installing it.");
+      return;
+    }
+    if (!getValidProfileTargetSerials().length) {
+      pushToast("Select at least one eligible iOS device.", "error");
+      return;
+    }
+    setProfileConfirmOpen(true);
+  };
+
+  const closeProfileInstallConfirm = () => {
+    if (!profileInstalling) {
+      setProfileConfirmOpen(false);
+    }
+  };
+
+  const handleConfirmProfileInstall = async () => {
+    setProfileConfirmOpen(false);
+    setProfileInstalling(true);
+    try {
+      const response = await installIosConfigurationProfile(getValidProfileTargetSerials(), mobileconfigPath);
+      setProfileInstallResults(response.data);
+      const installedCount = response.data.filter((item) => item.status === "installed").length;
+      const failedCount = response.data.filter((item) => item.status === "failed").length;
+      const skippedCount = response.data.filter((item) => item.status === "skipped").length;
+      pushToast(
+        `Profile install finished: ${installedCount} installed, ${failedCount} failed, ${skippedCount} skipped.`,
+        failedCount > 0 ? "error" : "info",
+      );
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setProfileInstalling(false);
+    }
+  };
+
   const handleImportThemeBackgroundPath = async () => {
     try {
       const selected = await openDialog({
@@ -11786,6 +11919,20 @@ function App() {
     () => getIosCrashReportEligibleSerials(selectedDevices),
     [selectedDevices],
   );
+  const iosConfigurationProfileEligibleSerials = useMemo(
+    () => getIosConfigurationProfileEligibleSerials(selectedDevices),
+    [selectedDevices],
+  );
+  const iosProfileCapableDevices = useMemo(
+    () =>
+      devices.filter(
+        (device) =>
+          getDevicePlatform(device) === "ios" &&
+          device.summary.state === "device" &&
+          hasDeviceCapability(device, "configuration_profiles"),
+      ),
+    [devices],
+  );
   const wifiStateBySerial = useMemo(
     () =>
       Object.fromEntries(
@@ -12008,6 +12155,21 @@ function App() {
       onSelect: () => {
         void handleExportIosCrashReports();
       },
+    },
+    {
+      id: "install_configuration_profile",
+      label: "Install Configuration Profile",
+      section: "more",
+      scope: "both",
+      disabled:
+        busy ||
+        selectedCount === 0 ||
+        iosConfigurationProfileEligibleSerials.length !== selectedDevices.length,
+      hint:
+        selectedCount === 0
+          ? "Select one or more iOS devices."
+          : "Requires online iOS devices and Apple Configurator cfgutil.",
+      onSelect: handleOpenConfigurationProfiles,
     },
     {
       id: "apk_installer",
@@ -13956,6 +14118,217 @@ function App() {
     );
   };
 
+  const ProfilesView = () => {
+    const eligibleSerials = new Set(iosProfileCapableDevices.map((device) => device.summary.serial));
+    const validTargets = profileTargetSerials.filter((serial) => eligibleSerials.has(serial));
+    const iosDevices = devices.filter((device) => getDevicePlatform(device) === "ios");
+    const profileTitle = mobileconfigSummary?.display_name ?? "Unvalidated profile";
+    const profileIdentifier = mobileconfigSummary?.identifier ?? "Unknown identifier";
+
+    return (
+      <div className="page-section">
+        <div className="page-header">
+          <div>
+            <h1>Profiles</h1>
+            <p className="muted">Install configuration profiles on USB-connected iOS devices with Apple Configurator.</p>
+          </div>
+          <div className="page-actions">
+            <span className="badge">macOS cfgutil</span>
+            <button className="ghost" onClick={handleCheckIosTools} disabled={busy || profileInstalling}>
+              Check Tools
+            </button>
+          </div>
+        </div>
+
+        {hostOs !== "macos" && (
+          <div className="inline-alert info">
+            <strong>macOS required</strong>
+            <span>
+              Configuration profile install uses Apple Configurator <code>cfgutil</code>, which is macOS-only.
+            </span>
+          </div>
+        )}
+
+        <section className="panel profiles-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Configuration Profile</h2>
+              <span>Select and validate a .mobileconfig file before installing.</span>
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={handleBrowseMobileconfigPath} disabled={profileInstalling}>
+                Browse
+              </button>
+              <button
+                className="ghost"
+                onClick={() => void handleValidateMobileconfigPath()}
+                disabled={profileInstalling || !mobileconfigPath.trim()}
+              >
+                Validate
+              </button>
+            </div>
+          </div>
+
+          <label className="profiles-file-input">
+            Profile path
+            <input
+              value={mobileconfigPath}
+              onChange={(event) => {
+                setMobileconfigPath(event.target.value);
+                setMobileconfigSummary(null);
+                setMobileconfigValidationError(null);
+                setProfileInstallResults([]);
+              }}
+              placeholder="/Users/me/Profiles/lab.mobileconfig"
+              disabled={profileInstalling}
+            />
+          </label>
+
+          {mobileconfigValidationError && (
+            <div className="inline-alert error">
+              <strong>Profile validation failed</strong>
+              <span>{mobileconfigValidationError}</span>
+            </div>
+          )}
+
+          {mobileconfigSummary && (
+            <div className="profiles-summary-grid">
+              <div className="profiles-summary-item">
+                <span className="muted">Name</span>
+                <strong>{profileTitle}</strong>
+              </div>
+              <div className="profiles-summary-item">
+                <span className="muted">Identifier</span>
+                <strong>{profileIdentifier}</strong>
+              </div>
+              <div className="profiles-summary-item">
+                <span className="muted">UUID</span>
+                <strong>{mobileconfigSummary.uuid ?? "Unknown"}</strong>
+              </div>
+              <div className="profiles-summary-item">
+                <span className="muted">Payloads</span>
+                <strong>{mobileconfigSummary.payload_count}</strong>
+              </div>
+            </div>
+          )}
+        </section>
+
+        <section className="panel profiles-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Targets</h2>
+              <span>{validTargets.length} eligible iOS devices selected.</span>
+            </div>
+            <div className="button-row">
+              <button className="ghost" onClick={selectAllProfileTargets} disabled={profileInstalling || iosProfileCapableDevices.length === 0}>
+                Select all
+              </button>
+              <button className="ghost" onClick={clearProfileTargets} disabled={profileInstalling || profileTargetSerials.length === 0}>
+                Clear
+              </button>
+            </div>
+          </div>
+
+          {iosDevices.length === 0 ? (
+            <div className="empty-state compact">
+              <div>
+                <h3>No iOS devices detected</h3>
+                <p className="muted">Connect an iPhone or iPad over USB, unlock it, trust this Mac, then refresh devices.</p>
+              </div>
+              <button className="ghost" onClick={() => void refreshDevices()} disabled={busy || profileInstalling}>
+                Refresh Devices
+              </button>
+            </div>
+          ) : (
+            <div className="profiles-device-list">
+              {iosDevices.map((device) => {
+                const serial = device.summary.serial;
+                const eligible = eligibleSerials.has(serial);
+                const name = device.detail?.device_name ?? device.summary.model ?? serial;
+                const reason =
+                  device.summary.state !== "device"
+                    ? "Device is not online."
+                    : hasDeviceCapability(device, "configuration_profiles")
+                      ? "Ready for cfgutil profile install."
+                      : "Apple Configurator cfgutil is missing or unavailable.";
+                return (
+                  <label key={serial} className={`profiles-device-row ${eligible ? "" : "is-disabled"}`}>
+                    <input
+                      type="checkbox"
+                      checked={profileTargetSerials.includes(serial)}
+                      onChange={() => toggleProfileTargetSerial(serial)}
+                      disabled={profileInstalling || !eligible}
+                    />
+                    <span className="profiles-device-main">
+                      <strong>{name}</strong>
+                      <span className="muted">{serial}</span>
+                    </span>
+                    <span className="badge">{device.detail?.os_version ? `iOS ${device.detail.os_version}` : "iOS"}</span>
+                    <span className="muted profiles-device-reason">{reason}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <section className="panel profiles-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Install</h2>
+              <span>Each selected device is processed independently.</span>
+            </div>
+            <button
+              onClick={requestProfileInstallConfirm}
+              disabled={profileInstalling || !mobileconfigSummary || validTargets.length === 0}
+            >
+              Install Profile
+            </button>
+          </div>
+          <div className="inline-alert info">
+            <strong>Device confirmation may be required</strong>
+            <span>
+              Some profiles require user confirmation, a trusted and unlocked device, or a supervised device. Rejected
+              devices are reported per device.
+            </span>
+          </div>
+
+          {profileInstallResults.length > 0 && (
+            <div className="profiles-result-table" role="table" aria-label="Profile install results">
+              <div className="profiles-result-row profiles-result-head" role="row">
+                <div role="columnheader">Status</div>
+                <div role="columnheader">Device</div>
+                <div role="columnheader">Message</div>
+                <div role="columnheader">Trace</div>
+              </div>
+              {profileInstallResults.map((result) => {
+                const device = devices.find((item) => item.summary.serial === result.serial);
+                const name = device?.detail?.device_name ?? device?.summary.model ?? result.serial;
+                return (
+                  <div className="profiles-result-row" role="row" key={`${result.serial}:${result.trace_id}`}>
+                    <div role="cell">
+                      <span className={`status-pill ${result.status === "installed" ? "ok" : result.status === "skipped" ? "warn" : "error"}`}>
+                        {result.status}
+                      </span>
+                    </div>
+                    <div role="cell">
+                      <strong>{name}</strong>
+                      <span className="muted">{result.serial}</span>
+                    </div>
+                    <div role="cell">{result.message}</div>
+                    <div role="cell">
+                      <code>{result.trace_id}</code>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  };
+
   const DeveloperOptionsView = () => {
     const groupedOptions: DeveloperOptionsGroup[] = DEVELOPER_OPTION_CATEGORY_ORDER
       .map((category) => ({
@@ -14106,6 +14479,7 @@ function App() {
             <NavLink to="/apps">App Manager</NavLink>
             <NavLink to="/files">File Explorer</NavLink>
             <NavLink to="/apk-installer">APK Installer</NavLink>
+            <NavLink to="/profiles">Profiles</NavLink>
             <NavLink to="/actions">Shell Commands</NavLink>
           </div>
           <div className="nav-group">
@@ -14485,6 +14859,7 @@ function App() {
             <Route path="/quick-actions" element={<Navigate to="/devices" replace />} />
             <Route path="/performance" element={<PerformanceView />} />
             <Route path="/network" element={<NetworkView />} />
+            <Route path="/profiles" element={<ProfilesView />} />
             <Route path="/developer-options" element={<DeveloperOptionsView />} />
             <Route
               path="/tasks"
@@ -17900,10 +18275,15 @@ function App() {
                                 <code>ideviceinfo -u "&lt;UDID&gt;"</code>
                               </>
                             ) : (
-                              <span className="muted">
-                                On macOS, install Xcode command line tools for <code>devicectl</code>. On Linux,
-                                install libimobiledevice tools and enable <code>usbmuxd</code>.
-                              </span>
+                              <>
+                                <span>macOS setup commands:</span>
+                                <code>xcode-select --install</code>
+                                <code>cfgutil help</code>
+                                <span className="muted">
+                                  Install Apple Configurator from the App Store, then install its command-line tool to
+                                  enable <code>cfgutil</code>.
+                                </span>
+                              </>
                             )}
                             <span className="muted">
                               Unlock the iPhone and accept the trust prompt before refreshing devices.
@@ -19066,6 +19446,45 @@ function App() {
               <button onClick={openTaskCenterFromCompletionModal}>View Task Center</button>
               <button className="ghost" onClick={closeTaskCompletionModal}>
                 Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {profileConfirmOpen && (
+        <div className="modal-backdrop" onClick={closeProfileInstallConfirm}>
+          <div className="modal confirm-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Install Configuration Profile</h3>
+                <p className="muted">
+                  {mobileconfigSummary?.display_name ?? "Selected profile"} will be installed on{" "}
+                  {getValidProfileTargetSerials().length} iOS device
+                  {getValidProfileTargetSerials().length === 1 ? "" : "s"}.
+                </p>
+              </div>
+              <button className="ghost" onClick={closeProfileInstallConfirm} disabled={profileInstalling}>
+                Close
+              </button>
+            </div>
+            <div className="inline-alert info">
+              <strong>Confirm on devices if prompted</strong>
+              <span>
+                Apple security rules still apply. Some payloads may require a supervised, trusted, unlocked device or
+                manual confirmation.
+              </span>
+            </div>
+            <div className="task-summary">
+              <span className="badge">{mobileconfigSummary?.identifier ?? "Unknown identifier"}</span>
+              <span className="badge">{mobileconfigSummary?.payload_count ?? 0} payloads</span>
+            </div>
+            <div className="button-row">
+              <button onClick={handleConfirmProfileInstall} disabled={profileInstalling}>
+                Confirm Install
+              </button>
+              <button className="ghost" onClick={closeProfileInstallConfirm} disabled={profileInstalling}>
+                Cancel
               </button>
             </div>
           </div>

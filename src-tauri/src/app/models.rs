@@ -42,6 +42,8 @@ pub struct DeviceCapabilities {
     pub reboot: bool,
     #[serde(default)]
     pub connectivity: bool,
+    #[serde(default)]
+    pub configuration_profiles: bool,
 }
 
 impl DeviceCapabilities {
@@ -57,10 +59,11 @@ impl DeviceCapabilities {
             mirror: true,
             reboot: true,
             connectivity: true,
+            configuration_profiles: false,
         }
     }
 
-    pub fn ios_observation(logs: bool, crash_reports: bool) -> Self {
+    pub fn ios_observation(logs: bool, crash_reports: bool, configuration_profiles: bool) -> Self {
         Self {
             logs,
             crash_reports,
@@ -72,6 +75,7 @@ impl DeviceCapabilities {
             mirror: false,
             reboot: false,
             connectivity: false,
+            configuration_profiles,
         }
     }
 }
@@ -171,6 +175,32 @@ pub struct IosToolsInfo {
     pub ideviceinfo: IosToolStatus,
     pub idevicesyslog: IosToolStatus,
     pub idevicecrashreport: IosToolStatus,
+    pub cfgutil: IosToolStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MobileconfigSummary {
+    pub display_name: Option<String>,
+    pub identifier: Option<String>,
+    pub uuid: Option<String>,
+    pub payload_type: Option<String>,
+    pub payload_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IosProfileInstallStatus {
+    Installed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IosProfileInstallResult {
+    pub serial: String,
+    pub status: IosProfileInstallStatus,
+    pub message: String,
+    pub trace_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

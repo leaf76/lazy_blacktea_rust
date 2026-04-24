@@ -229,6 +229,47 @@ describe("api command args compatibility", () => {
     );
   });
 
+  it("sends both snake_case and camelCase keys for validateMobileconfig", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: { payload_count: 1 } });
+
+    const { validateMobileconfig } = await import("./api");
+    await validateMobileconfig("/tmp/test.mobileconfig");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "validate_mobileconfig",
+      expect.objectContaining({
+        profile_path: "/tmp/test.mobileconfig",
+        profilePath: "/tmp/test.mobileconfig",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
+
+  it("sends both snake_case and camelCase keys for installIosConfigurationProfile", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: [] });
+
+    const { installIosConfigurationProfile } = await import("./api");
+    await installIosConfigurationProfile(["ios-udid"], "/tmp/test.mobileconfig");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "install_ios_configuration_profile",
+      expect.objectContaining({
+        serials: ["ios-udid"],
+        profile_path: "/tmp/test.mobileconfig",
+        profilePath: "/tmp/test.mobileconfig",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
+
   it("sends trace args for getScreenRecordStatus", async () => {
     const invokeMock = invoke as unknown as {
       mockResolvedValue: (value: unknown) => void;

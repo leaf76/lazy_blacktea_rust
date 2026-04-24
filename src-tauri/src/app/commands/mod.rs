@@ -62,9 +62,10 @@ use crate::app::models::{
     BugreportExtractResult, BugreportLogAroundPage, BugreportLogFilters, BugreportLogPage,
     BugreportLogSearchResult, BugreportLogSummary, BugreportResult, CommandResponse, CommandResult,
     DeviceCapabilities, DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult,
-    IosToolsInfo, LegacyLogcatPreset, LogcatExportResult, LogcatStatus, NetProfilerSnapshot,
-    PerfSnapshot, ScrcpyInfo, ScreenRecordStartResult, ScreenRecordStatus, ScreenRecordStopResult,
-    TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
+    IosProfileInstallResult, IosToolsInfo, LegacyLogcatPreset, LogcatExportResult, LogcatStatus,
+    MobileconfigSummary, NetProfilerSnapshot, PerfSnapshot, ScrcpyInfo, ScreenRecordStartResult,
+    ScreenRecordStatus, ScreenRecordStopResult, TerminalEvent, TerminalSessionInfo,
+    UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
 use crate::app::net_profiler::parse::{
     parse_cmd_package_list_u, parse_dumpsys_netstats_app_uid_stats, parse_xt_qtaguid_stats,
@@ -7236,6 +7237,27 @@ pub fn export_ios_crash_reports(
 ) -> Result<CommandResponse<HostCommandResult>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     let data = ios::export_crash_reports(&serial, output_dir, &trace_id)?;
+    Ok(CommandResponse { trace_id, data })
+}
+
+#[tauri::command(async)]
+pub fn validate_mobileconfig(
+    profile_path: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<MobileconfigSummary>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let data = ios::validate_mobileconfig(&profile_path, &trace_id)?;
+    Ok(CommandResponse { trace_id, data })
+}
+
+#[tauri::command(async)]
+pub fn install_ios_configuration_profile(
+    serials: Vec<String>,
+    profile_path: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<Vec<IosProfileInstallResult>>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let data = ios::install_configuration_profile(serials, &profile_path, &trace_id)?;
     Ok(CommandResponse { trace_id, data })
 }
 

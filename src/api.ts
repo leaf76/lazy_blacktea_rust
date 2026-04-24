@@ -21,10 +21,12 @@ import type {
   DeviceInfo,
   FilePreview,
   HostCommandResult,
+  IosProfileInstallResult,
   IosToolsInfo,
   LegacyLogcatPreset,
   LogcatExportResult,
   LogcatStatus,
+  MobileconfigSummary,
   ScreenRecordStartResult,
   ScreenRecordStatus,
   ScreenRecordStopResult,
@@ -93,6 +95,8 @@ const COMMAND_ERROR_META: Record<string, { title: string; source: string }> = {
   stop_ios_syslog: { title: "Stop iOS Syslog", source: "ios.syslog.stop" },
   get_ios_syslog_status: { title: "iOS Syslog Status", source: "ios.syslog.status" },
   export_ios_crash_reports: { title: "Export iOS Crash Reports", source: "ios.crash.export" },
+  validate_mobileconfig: { title: "Validate Configuration Profile", source: "ios.profile.validate" },
+  install_ios_configuration_profile: { title: "Install Configuration Profile", source: "ios.profile.install" },
   list_apps: { title: "List Apps", source: "apps.list" },
   get_app_basic_info: { title: "Load App Details", source: "apps.detail" },
   get_app_icon: { title: "Load App Icon", source: "apps.icon" },
@@ -209,6 +213,27 @@ export const exportDiagnosticsBundle = async (outputDir?: string) => {
     payload.outputDir = outputDir;
   }
   return tauriInvoke<CommandResponse<string>>("export_diagnostics_bundle", payload);
+};
+
+export const validateMobileconfig = async (profilePath: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<MobileconfigSummary>>("validate_mobileconfig", {
+    profile_path: profilePath,
+    profilePath,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const installIosConfigurationProfile = async (serials: string[], profilePath: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<IosProfileInstallResult[]>>("install_ios_configuration_profile", {
+    serials,
+    profile_path: profilePath,
+    profilePath,
+    trace_id: traceId,
+    traceId,
+  });
 };
 
 export const saveConfig = async (config: AppConfig) => {

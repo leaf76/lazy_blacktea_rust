@@ -113,6 +113,38 @@ ideviceinfo -u "IOS_UDID"
 - Keep Android and iPhone connected while ADB tracking emits updates. The iPhone row should remain visible after Android state changes.
 - Select one iPhone with `idevicecrashreport` available. The device action menu should expose **Export iOS Crash Reports**.
 
+### iOS Configuration Profile Install Smoke
+
+Use this on macOS with Apple Configurator installed. This flow is not supported on Linux in the MVP.
+
+1. Install Apple Configurator from the App Store, install its command-line tool, and verify:
+
+```bash
+cfgutil help
+cfgutil list
+```
+
+2. Connect one trusted, unlocked iPhone over USB. For two-device batch validation, connect two trusted iPhones.
+3. Launch the app, open **Settings -> iOS Tools -> Test iOS Tools**, and confirm `cfgutil` is `available`.
+4. Open **Profiles**, choose a harmless test `.mobileconfig`, and click **Validate**. Expected result:
+
+- The profile name, identifier, UUID when present, and payload count are shown.
+- Invalid extension, missing file, malformed plist, or oversized profile failures are human-readable.
+- Full payload contents are not shown in logs or UI.
+
+5. Select one or more eligible iOS devices and click **Install Profile**. Expected result:
+
+- A confirmation modal appears before the install starts.
+- Each selected device reports `installed`, `failed`, or `skipped` independently.
+- If one device rejects the profile, other selected devices still report their own result.
+
+6. Negative checks:
+
+- Hide `cfgutil` from `PATH` and confirm Settings plus Profiles explain that Apple Configurator `cfgutil` is required.
+- Select Android devices only and confirm **Install Configuration Profile** is unavailable.
+- Use a duplicate or rejected profile and confirm the result table shows the per-device failure message.
+- Lock or untrust the iPhone and confirm the UI reports a readable trust/connection next step.
+
 ### Samsung UI Inspector RCA Probe
 
 When a Samsung device fails `UI Inspector Capture`, collect a probe bundle before changing backend logic:

@@ -39,5 +39,6 @@ mime_guess = "2"
 base64 = "0.22"
 png = "0.18"
 quick-xml = "0.38"
+plist = "1"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled", "functions"] }

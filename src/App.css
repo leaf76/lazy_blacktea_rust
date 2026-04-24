@@ -7317,6 +7317,97 @@ textarea:disabled {
   padding: 6px 0;
 }
 
+.profiles-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.profiles-file-input {
+  display: grid;
+  gap: 6px;
+}
+
+.profiles-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.profiles-summary-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-subtle);
+  border-radius: 8px;
+}
+
+.profiles-summary-item strong,
+.profiles-device-main strong,
+.profiles-result-row strong {
+  overflow-wrap: anywhere;
+}
+
+.profiles-device-list {
+  display: grid;
+  gap: 8px;
+}
+
+.profiles-device-row {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto minmax(180px, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+}
+
+.profiles-device-row.is-disabled {
+  opacity: 0.68;
+}
+
+.profiles-device-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.profiles-device-reason {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.profiles-result-table {
+  display: grid;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.profiles-result-row {
+  display: grid;
+  grid-template-columns: 120px minmax(180px, 1fr) minmax(220px, 2fr) minmax(140px, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.profiles-result-row:first-child {
+  border-top: none;
+}
+
+.profiles-result-head {
+  background: var(--color-bg-subtle);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
 @media (max-width: 880px) {
   .perf-grid {
     grid-template-columns: 1fr;
@@ -7328,6 +7419,12 @@ textarea:disabled {
 
   .net-profiler-row {
     grid-template-columns: minmax(0, 1fr) 110px 110px 110px;
+  }
+
+  .profiles-summary-grid,
+  .profiles-device-row,
+  .profiles-result-row {
+    grid-template-columns: 1fr;
   }
 }
 

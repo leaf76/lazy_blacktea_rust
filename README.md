@@ -34,6 +34,7 @@ Optional: install `scrcpy` if you want screen mirroring support.
 Optional for iOS inventory:
 
 - macOS: install Xcode command line tools for `devicectl`, or install libimobiledevice tools.
+- macOS profile install: install Apple Configurator and its `cfgutil` command-line tool, then verify `cfgutil help`.
 - Linux Ubuntu/Debian: install libimobiledevice and enable `usbmuxd`:
 
 ```bash
@@ -64,6 +65,7 @@ ideviceinfo -u "IOS_UDID"
 | Device list and basic info | Yes, via `adb` | Yes, via `devicectl` or libimobiledevice |
 | Live logs | Yes, logcat | Yes, syslog when `idevicesyslog` is available |
 | Crash report export | No dedicated Android flow | Yes, when `idevicecrashreport` is available |
+| Configuration profile install | No | Yes, macOS + Apple Configurator `cfgutil` + USB only |
 | Shell commands | Yes | No |
 | File browser and file mutation | Yes | No |
 | APK / app install workflow | Yes | No |
@@ -81,6 +83,7 @@ ideviceinfo -u "IOS_UDID"
 - `adb` available in `PATH`, or set an absolute ADB path in Settings
 - Android device with USB debugging enabled
 - For iOS inventory on macOS: Xcode command line tools or libimobiledevice tools available in `PATH`
+- For iOS configuration profile install on macOS: Apple Configurator `cfgutil` available in `PATH`
 - For iOS inventory on Linux: `usbmuxd` running plus `idevice_id` and `ideviceinfo`; `idevicesyslog` and `idevicecrashreport` enable optional observation features
 
 ## Documentation

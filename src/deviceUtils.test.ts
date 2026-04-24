@@ -19,6 +19,7 @@ import {
   formatPrimaryDeviceLabel,
   formatDeviceInfoMarkdown,
   getDevicePlatform,
+  getIosConfigurationProfileEligibleSerials,
   getIosCrashReportEligibleSerials,
   hasDeviceCapability,
   mergeDeviceDetails,
@@ -338,11 +339,18 @@ describe("deviceUtils", () => {
           version_output: "",
           error: "command not found",
         },
+        cfgutil: {
+          available: false,
+          command_path: "cfgutil",
+          version_output: "",
+          error: "command not found",
+        },
       },
       "linux",
     );
 
     expect(rows.find((row) => row.id === "devicectl")?.status).toBe("not_required");
+    expect(rows.find((row) => row.id === "cfgutil")?.status).toBe("not_required");
     expect(rows.find((row) => row.id === "devicectl")?.detail).toContain("macOS-only");
     expect(rows.find((row) => row.id === "usbmuxd")?.role).toBe("required");
     expect(rows.find((row) => row.id === "idevice_id")?.status).toBe("available");
@@ -374,6 +382,33 @@ describe("deviceUtils", () => {
     ];
 
     expect(getIosCrashReportEligibleSerials(devices)).toEqual(["ios-ready"]);
+  });
+
+  it("selects only online iOS devices with configuration profile capability", () => {
+    const devices: DeviceInfo[] = [
+      {
+        summary: { platform: "ios", serial: "ios-ready", state: "device" },
+        detail: null,
+        capabilities: { configuration_profiles: true },
+      },
+      {
+        summary: { platform: "ios", serial: "ios-no-cfgutil", state: "device" },
+        detail: null,
+        capabilities: { configuration_profiles: false },
+      },
+      {
+        summary: { platform: "ios", serial: "ios-offline", state: "offline" },
+        detail: null,
+        capabilities: { configuration_profiles: true },
+      },
+      {
+        summary: { platform: "android", serial: "android-ready", state: "device" },
+        detail: null,
+        capabilities: { configuration_profiles: true },
+      },
+    ];
+
+    expect(getIosConfigurationProfileEligibleSerials(devices)).toEqual(["ios-ready"]);
   });
 
   it("splits monitoring serials by platform and treats unknown serials as Android", () => {
