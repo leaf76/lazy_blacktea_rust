@@ -1960,6 +1960,10 @@ textarea {
   gap: 12px;
 }
 
+.device-manager-panel.is-context-menu-open {
+  backdrop-filter: none;
+}
+
 .devices-workspace .device-manager-panel {
   flex: 1 1 auto;
   min-height: 0;

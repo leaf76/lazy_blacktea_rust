@@ -881,6 +881,24 @@ describe("deviceUtils", () => {
     expect(pos).toEqual({ left: 300, top: 200 });
   });
 
+  it("treats pointer anchors as viewport coordinates for fixed menus", () => {
+    const containerOffset = { left: 180, top: 96 };
+    const layout = computeContextMenuLayout({
+      anchorX: 420,
+      anchorY: 260,
+      menuWidth: 230,
+      desiredMenuHeight: 180,
+      viewportWidth: 1280,
+      viewportHeight: 720,
+      margin: 10,
+    });
+
+    expect(layout.left).toBe(420);
+    expect(layout.top).toBe(260);
+    expect(layout.left).not.toBe(420 - containerOffset.left);
+    expect(layout.top).not.toBe(260 - containerOffset.top);
+  });
+
   it("flips and clamps context-menu position at the bottom-right corner", () => {
     const pos = computeContextMenuPosition({
       anchorX: 1260,

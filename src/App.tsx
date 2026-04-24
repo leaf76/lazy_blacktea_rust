@@ -17,6 +17,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -14697,7 +14698,9 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  <section className="panel panel-stretch logcat-panel device-manager-panel">
+                  <section
+                    className={`panel panel-stretch logcat-panel device-manager-panel${deviceContextMenu ? " is-context-menu-open" : ""}`}
+                  >
                     <div className="panel-header">
                       <div>
                         <h2>Devices</h2>
@@ -15045,7 +15048,7 @@ function App() {
                         onClearFilter={clearDeviceGroupFilter}
                       />
                     </div>
-                    {deviceContextMenu && (
+                    {deviceContextMenu && typeof document !== "undefined" && createPortal(
                       <>
                         <div
                           className="context-menu-backdrop"
@@ -15151,9 +15154,9 @@ function App() {
                             ))}
                           </div>
                         )}
-                      </>
+                      </>,
+                      document.body,
                     )}
-
                   </section>
                 </div>
               }
