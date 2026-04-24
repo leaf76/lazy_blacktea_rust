@@ -52,6 +52,13 @@
   --theme-background-opacity-percent: 100%;
   --theme-panel-opacity: 1;
   --theme-panel-opacity-percent: 100%;
+  --surface-panel-bg: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  --surface-subtle-bg: color-mix(in srgb, var(--color-bg-subtle) var(--theme-panel-opacity-percent), transparent);
+  --surface-control-bg: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  --surface-popover-bg: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  --surface-active-bg: color-mix(in srgb, var(--nav-active-bg) var(--theme-panel-opacity-percent), transparent);
+  --surface-badge-bg: color-mix(in srgb, var(--badge-bg) var(--theme-panel-opacity-percent), transparent);
+  --surface-tag-bg: color-mix(in srgb, var(--tag-bg) var(--theme-panel-opacity-percent), transparent);
   --theme-font-size: 13px;
   --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --font-display: "Space Grotesk", "IBM Plex Sans", sans-serif;
@@ -172,7 +179,7 @@ textarea {
 .sidebar {
   position: relative;
   z-index: 1;
-  background: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  background: var(--surface-panel-bg);
   backdrop-filter: blur(12px);
   border-right: 1px solid var(--color-border);
   padding: 18px 14px;
@@ -231,14 +238,14 @@ textarea {
 }
 
 .nav-links a[aria-current="page"] {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--nav-active-border);
   color: var(--nav-active-text);
   font-weight: 600;
 }
 
 .nav-links a:hover {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .sidebar-footer {
@@ -292,7 +299,7 @@ textarea {
   gap: 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  background: var(--surface-panel-bg);
   backdrop-filter: blur(12px);
   position: sticky;
   top: 0;
@@ -316,7 +323,7 @@ textarea {
   min-height: 42px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   width: 100%;
 }
 
@@ -328,7 +335,7 @@ textarea {
   padding: 0 10px;
   border-radius: 999px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   font-size: 12px;
   color: var(--color-text);
   cursor: pointer;
@@ -339,12 +346,12 @@ textarea {
 }
 
 .device-chip:hover {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   border-color: var(--nav-active-border);
 }
 
 .device-chip:active {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
 }
 
 .device-chip:focus-visible {
@@ -353,7 +360,7 @@ textarea {
 }
 
 .device-chip.primary {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--nav-active-border);
   color: var(--nav-active-text);
   font-weight: 500;
@@ -371,7 +378,7 @@ textarea {
 .device-chip.picker:hover {
   border-style: solid;
   color: var(--color-text);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .device-chip-dot {
@@ -440,7 +447,7 @@ textarea {
   padding: 6px 10px;
   border-radius: 10px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   color: inherit;
   text-align: left;
   cursor: pointer;
@@ -486,7 +493,8 @@ textarea {
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-popover-bg);
+  backdrop-filter: blur(12px);
   box-shadow: var(--shadow-card);
   z-index: 20;
   display: flex;
@@ -538,7 +546,7 @@ textarea {
   padding: 3px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   gap: 3px;
 }
 
@@ -557,7 +565,7 @@ textarea {
 }
 
 .device-popover-mode button.active {
-  background: var(--toggle-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--toggle-active-border);
   color: var(--toggle-active-text);
 }
@@ -612,12 +620,12 @@ textarea {
 }
 
 .device-popover-row:hover {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--nav-active-border);
 }
 
 .device-popover-row.is-selected {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--nav-active-border);
 }
 
@@ -682,7 +690,7 @@ textarea {
   padding: 4px 10px;
   border-radius: 999px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .top-overview-label {
@@ -743,7 +751,7 @@ textarea {
 .top-actions-deemphasized .top-actions-menu-anchor > button.ghost:focus-visible {
   color: var(--color-text);
   border-color: var(--nav-active-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .top-actions-deemphasized .status-pill {
@@ -757,7 +765,7 @@ textarea {
   padding: 4px 10px;
   border-radius: 999px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   user-select: text;
 }
 
@@ -771,7 +779,7 @@ textarea {
   font-size: 12px;
   white-space: pre-wrap;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   border-radius: 12px;
   padding: 10px;
   max-height: 240px;
@@ -846,7 +854,7 @@ textarea {
 }
 
 .panel {
-  background: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  background: var(--surface-panel-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-14);
   padding: 14px;
@@ -1401,7 +1409,7 @@ textarea {
     135deg,
     rgba(37, 99, 235, 0.12),
     rgba(15, 23, 42, 0.03) 52%,
-    var(--color-bg-panel) 100%
+    var(--surface-panel-bg) 100%
   );
 }
 
@@ -1412,7 +1420,7 @@ textarea {
 
 .dashboard-page .panel {
   border-color: var(--dashboard-hero-border);
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.03), var(--color-bg-panel));
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.03), var(--surface-panel-bg));
 }
 
 .dashboard-page .card-header h2 {
@@ -1421,13 +1429,13 @@ textarea {
 }
 
 .dashboard-page .badge {
-  background: var(--tag-bg);
+  background: var(--surface-tag-bg);
   color: var(--tag-text);
 }
 
 .dashboard-hero {
   grid-column: span 12;
-  background: linear-gradient(140deg, rgba(37, 99, 235, 0.16), var(--color-bg-panel) 66%);
+  background: linear-gradient(140deg, rgba(37, 99, 235, 0.16), var(--surface-panel-bg) 66%);
   border-color: var(--dashboard-hero-border);
 }
 
@@ -1451,7 +1459,7 @@ textarea {
   border: 1px solid var(--dashboard-hero-border);
   border-radius: 12px;
   padding: 10px 12px;
-  background: linear-gradient(160deg, var(--dashboard-hero-accent), var(--color-bg-panel) 70%);
+  background: linear-gradient(160deg, var(--dashboard-hero-accent), var(--surface-panel-bg) 70%);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1469,7 +1477,7 @@ textarea {
 .dashboard-toolbar-stat {
   border: 1px solid var(--color-border);
   border-radius: 999px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   padding: 5px 10px;
   display: inline-flex;
   align-items: baseline;
@@ -1531,7 +1539,7 @@ textarea {
 .dashboard-field {
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: linear-gradient(180deg, var(--color-bg-subtle), var(--color-bg-panel));
+  background: linear-gradient(180deg, var(--surface-subtle-bg), var(--surface-panel-bg));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1633,7 +1641,7 @@ textarea {
   gap: 8px;
   padding: 6px 8px;
   border-radius: 8px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   border: 1px solid var(--color-border);
 }
 
@@ -1701,7 +1709,8 @@ textarea {
 .dashboard-config-drawer {
   width: min(520px, 100%);
   height: 100%;
-  background: var(--color-bg-panel);
+  background: var(--surface-popover-bg);
+  backdrop-filter: blur(12px);
   border-left: 1px solid var(--color-border);
   box-shadow: var(--shadow-card);
   padding: 14px;
@@ -1738,7 +1747,7 @@ textarea {
 .dashboard-config-card {
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -1776,7 +1785,7 @@ textarea {
   gap: 8px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   padding: 6px 8px;
 }
 
@@ -1876,7 +1885,7 @@ textarea {
   border: 1px solid var(--color-border);
   border-radius: 10px;
   padding: 8px 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1939,7 +1948,7 @@ textarea {
   gap: 10px;
   padding: 8px 10px;
   border-radius: 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .step-list {
@@ -2001,7 +2010,7 @@ textarea {
   padding: 10px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .device-filter-main {
@@ -2077,7 +2086,7 @@ textarea {
   padding: 8px 12px;
   border-radius: 10px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   font-size: 11px;
   color: var(--color-text-muted);
   text-transform: uppercase;
@@ -2091,7 +2100,7 @@ textarea {
   border: 1px solid var(--color-border);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
-    var(--color-bg-subtle);
+    var(--surface-subtle-bg);
   transition:
     border-color 120ms ease,
     box-shadow 120ms ease,
@@ -2116,7 +2125,7 @@ textarea {
 .device-row.is-selected {
   background:
     linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(59, 130, 246, 0.03)),
-    var(--color-bg-subtle);
+    var(--surface-subtle-bg);
   border-color: rgba(59, 130, 246, 0.35);
 }
 
@@ -2242,7 +2251,7 @@ button.ghost.icon-only {
 .device-row .device-primary-action.is-primary {
   border-color: var(--color-primary-600);
   color: var(--color-primary-600);
-  background: color-mix(in srgb, var(--nav-active-bg) 92%, transparent);
+  background: var(--surface-active-bg);
 }
 
 .device-serial {
@@ -2395,7 +2404,7 @@ button.ghost.icon-only {
 .device-list-empty {
   border: 1px dashed var(--color-border);
   border-radius: 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -2424,7 +2433,7 @@ button.ghost.icon-only {
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   position: sticky;
   bottom: 12px;
   z-index: 2;
@@ -2483,7 +2492,7 @@ button.ghost.icon-only {
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .device-group-section-header {
@@ -2551,7 +2560,7 @@ button.ghost.icon-only {
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-bg-panel) 86%, transparent);
+  background: var(--surface-panel-bg);
   color: var(--color-text);
   text-align: left;
 }
@@ -2580,7 +2589,7 @@ button.ghost.icon-only {
   border: 1px dashed var(--color-border);
   border-radius: 12px;
   padding: 12px;
-  background: color-mix(in srgb, var(--color-bg-panel) 80%, transparent);
+  background: var(--surface-panel-bg);
 }
 
 .device-group-filter-clear {
@@ -2744,7 +2753,7 @@ button.ghost.icon-only {
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border-radius: 999px;
   padding: 3px 8px;
   font-size: 11px;
@@ -2825,7 +2834,7 @@ button.ghost.icon-only {
   gap: 10px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border-top-left-radius: 12px;
   border-top-right-radius: 12px;
 }
@@ -2906,7 +2915,7 @@ button.ghost.icon-only {
   align-items: center;
   gap: 6px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border-radius: 999px;
   padding: 3px 8px;
   font-size: 11px;
@@ -2998,7 +3007,7 @@ button.ghost.icon-only {
   padding: 10px;
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .bugreport-log-header-top {
@@ -3032,7 +3041,7 @@ button.ghost.icon-only {
   padding: 4px;
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .bugreport-log-actions-group button {
@@ -3048,7 +3057,7 @@ button.ghost.icon-only {
   padding: 8px 10px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .bugreport-log-meta-main {
@@ -3097,7 +3106,7 @@ button.ghost.icon-only {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 8px 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -3217,7 +3226,7 @@ button.ghost.icon-only {
   text-align: left;
   width: 100%;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border-radius: 8px;
   padding: 6px 8px;
   font-size: 12px;
@@ -3243,7 +3252,7 @@ button.ghost.icon-only {
 .bugreport-extract-card {
   border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -3339,7 +3348,7 @@ button.ghost.icon-only {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3380,7 +3389,7 @@ button.ghost.icon-only {
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   border-radius: 10px;
   font-size: 12px;
   transition: background 0.15s ease;
@@ -3420,7 +3429,7 @@ button.ghost.icon-only {
 }
 
 .file-row.is-selected {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
   box-shadow: inset 0 0 0 1px var(--nav-active-border);
 }
 
@@ -3429,11 +3438,11 @@ button.ghost.icon-only {
   padding: 8px 10px;
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .files-nav-row {
-  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--color-bg-subtle) 62%);
+  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--surface-subtle-bg) 62%);
 }
 
 .files-nav-controls {
@@ -3480,7 +3489,7 @@ button.ghost.icon-only {
   padding: 8px 10px;
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .file-breadcrumbs-label {
@@ -3561,7 +3570,7 @@ button.ghost.icon-only {
   padding: 10px 2px 4px;
   margin-top: auto;
   border-top: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   z-index: 2;
 }
 
@@ -3625,7 +3634,7 @@ button.ghost.icon-only {
 }
 
 .file-drop-overlay-inner {
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border: 1px dashed var(--color-border);
   border-radius: 16px;
   padding: 18px 20px;
@@ -3654,7 +3663,7 @@ button.danger:hover:not(:disabled) {
   gap: 10px;
   text-align: left;
   padding: 10px 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   border-radius: 14px;
   border: 1px solid transparent;
   cursor: pointer;
@@ -3919,7 +3928,8 @@ button.danger:hover:not(:disabled) {
   position: fixed;
   z-index: 41;
   min-width: 180px;
-  background: var(--color-bg-panel);
+  background: var(--surface-popover-bg);
+  backdrop-filter: blur(12px);
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 6px;
@@ -4073,11 +4083,11 @@ button.danger:hover:not(:disabled) {
 }
 
 .file-card:hover {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .file-card.is-selected {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--nav-active-border);
 }
 
@@ -4156,7 +4166,7 @@ button.danger:hover:not(:disabled) {
   width: 24px;
   height: 24px;
   border-radius: 6px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border: 1px solid var(--color-border);
   opacity: 0;
   transition: opacity 0.15s ease;
@@ -4177,7 +4187,7 @@ button.danger:hover:not(:disabled) {
   padding: 2px 6px;
   border-radius: 999px;
   font-size: 11px;
-  background: var(--badge-bg);
+  background: var(--surface-badge-bg);
   color: var(--badge-text);
   width: fit-content;
 }
@@ -4209,7 +4219,7 @@ button.danger:hover:not(:disabled) {
   padding: 12px;
   border-radius: var(--radius-10);
   border: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-bg-subtle) var(--theme-panel-opacity-percent), transparent);
+  background: var(--surface-subtle-bg);
   backdrop-filter: blur(10px);
 }
 
@@ -4241,25 +4251,25 @@ button.danger:hover:not(:disabled) {
   padding: 7px 12px;
   border-radius: 8px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   color: var(--color-text);
   font-size: 13px;
   line-height: 1.2;
 }
 
 .settings-tab[aria-selected="true"] {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--nav-active-border);
   color: var(--nav-active-text);
   font-weight: 600;
 }
 
 .settings-tab:hover {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .settings-tab[aria-selected="true"]:hover {
-  background: var(--nav-active-bg);
+  background: var(--surface-active-bg);
 }
 
 .settings-tab-panel-connectivity .settings-group:not(.settings-section-connectivity),
@@ -4419,7 +4429,7 @@ button.danger:hover:not(:disabled) {
 
 .appearance-preview-sidebar {
   padding: 12px;
-  background: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  background: var(--surface-panel-bg);
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
@@ -4452,7 +4462,7 @@ button.danger:hover:not(:disabled) {
   padding: 12px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent);
+  background: var(--surface-panel-bg);
 }
 
 .appearance-preview-card button {
@@ -4529,7 +4539,7 @@ button.danger:hover:not(:disabled) {
   padding: 12px;
   border-radius: var(--radius-10);
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .developer-options-scope-card h2 {
@@ -4550,7 +4560,7 @@ button.danger:hover:not(:disabled) {
 
 .developer-options-mode-button.is-active {
   border: 1px solid var(--toggle-active-border);
-  background: var(--toggle-active-bg);
+  background: var(--surface-active-bg);
   color: var(--toggle-active-text);
 }
 
@@ -4563,7 +4573,7 @@ button.danger:hover:not(:disabled) {
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--dashboard-hero-border);
-  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--color-bg-subtle) 65%);
+  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--surface-subtle-bg) 65%);
 }
 
 .developer-options-batch-copy {
@@ -4613,7 +4623,7 @@ button.danger:hover:not(:disabled) {
   padding: 10px;
   border-radius: var(--radius-10);
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .developer-options-option.is-disabled {
@@ -4740,7 +4750,7 @@ button.danger:hover:not(:disabled) {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   overflow: auto;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .developer-options-matrix-table {
@@ -4762,7 +4772,7 @@ button.danger:hover:not(:disabled) {
   position: sticky;
   top: 0;
   z-index: 2;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .developer-options-matrix-table th:last-child,
@@ -4781,7 +4791,7 @@ button.danger:hover:not(:disabled) {
   left: 0;
   z-index: 1;
   min-width: 220px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .developer-options-matrix-option-col {
@@ -4880,7 +4890,7 @@ button.danger:hover:not(:disabled) {
 
 .toggle-group .toggle {
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   color: var(--color-text);
   padding: 6px 10px;
   border-radius: 999px;
@@ -4888,7 +4898,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .toggle-group .toggle.active {
-  background: var(--toggle-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--toggle-active-border);
   color: var(--toggle-active-text);
 }
@@ -4918,13 +4928,13 @@ button.danger:hover:not(:disabled) {
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
-  background: var(--tag-bg);
+  background: var(--surface-tag-bg);
   color: var(--tag-text);
   border: 1px solid color-mix(in srgb, var(--tag-text) 20%, transparent);
 }
 
 .group-tag.is-muted {
-  background: color-mix(in srgb, var(--color-bg-subtle) 72%, transparent);
+  background: var(--surface-subtle-bg);
   color: var(--color-text-muted);
   border-color: var(--color-border);
 }
@@ -4936,7 +4946,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .group-tag.is-active-filter {
-  background: color-mix(in srgb, var(--nav-active-bg) 92%, transparent);
+  background: var(--surface-active-bg);
   color: var(--color-primary-600);
   border-color: color-mix(in srgb, var(--color-primary-600) 36%, transparent);
 }
@@ -4977,7 +4987,7 @@ button.ghost {
 }
 
 button.ghost.active {
-  background: var(--toggle-active-bg);
+  background: var(--surface-active-bg);
   border-color: var(--toggle-active-border);
   color: var(--toggle-active-text);
 }
@@ -4997,7 +5007,7 @@ textarea {
   border: 1px solid var(--color-border);
   padding: 6px 10px;
   font-size: 12px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   color: var(--color-text);
 }
 
@@ -5012,7 +5022,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .output-block summary {
@@ -5102,7 +5112,7 @@ textarea:disabled {
   padding: 10px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -5357,7 +5367,7 @@ textarea:disabled {
   appearance: none;
   -webkit-appearance: none;
   -moz-appearance: none;
-  background-color: var(--color-bg-panel);
+  background-color: var(--surface-control-bg);
   border: 1px solid var(--color-border);
   color: var(--color-text);
   background-image:
@@ -5573,7 +5583,7 @@ textarea:disabled {
   padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   font-size: 10px;
   min-height: 24px;
 }
@@ -5774,7 +5784,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 8px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -5797,7 +5807,7 @@ textarea:disabled {
 
 .filter-chip {
   border: 1px solid var(--color-border);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 11px;
@@ -5818,7 +5828,7 @@ textarea:disabled {
 }
 
 .filter-chip:hover {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .logcat-output {
@@ -6037,7 +6047,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 8px 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   font-size: 12px;
   color: var(--color-text);
   display: flex;
@@ -6094,7 +6104,7 @@ textarea:disabled {
   height: min(70vh, 720px);
   width: 100%;
   border-radius: 12px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .ui-inspector-workspace .ui-frame {
@@ -6133,7 +6143,7 @@ textarea:disabled {
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   font-size: 12px;
   color: var(--color-text);
 }
@@ -6195,7 +6205,7 @@ textarea:disabled {
   padding: 8px 10px;
   border-radius: 12px;
   border: 1px solid var(--dashboard-hero-border);
-  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--color-bg-subtle) 65%);
+  background: linear-gradient(135deg, var(--dashboard-hero-accent), var(--surface-subtle-bg) 65%);
 }
 
 .bugreport-batch-strip strong {
@@ -6216,7 +6226,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .bugreport-card-running {
@@ -6225,7 +6235,7 @@ textarea:disabled {
 
 .bugreport-card-success {
   border-color: rgba(22, 163, 74, 0.45);
-  background: linear-gradient(160deg, rgba(22, 163, 74, 0.12), var(--color-bg-subtle) 60%);
+  background: linear-gradient(160deg, rgba(22, 163, 74, 0.12), var(--surface-subtle-bg) 60%);
 }
 
 .bugreport-card-error {
@@ -6319,7 +6329,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .task-device-main {
@@ -6347,7 +6357,8 @@ textarea:disabled {
 }
 
 .modal {
-  background: var(--color-bg-panel);
+  background: var(--surface-popover-bg);
+  backdrop-filter: blur(12px);
   border-radius: 16px;
   padding: 16px;
   width: min(520px, 100%);
@@ -6367,7 +6378,7 @@ textarea:disabled {
 
 .action-modal {
   border: 1px solid var(--dashboard-hero-border);
-  background: linear-gradient(160deg, var(--dashboard-hero-accent), var(--color-bg-panel) 55%);
+  background: linear-gradient(160deg, var(--dashboard-hero-accent), var(--surface-panel-bg) 55%);
 }
 
 .action-modal .modal-header h3 {
@@ -6387,7 +6398,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .task-completion-output-header {
@@ -6411,7 +6422,7 @@ textarea:disabled {
   border-radius: 10px;
   border: 1px solid var(--color-border);
   padding: 8px 10px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .task-completion-output-main {
@@ -6445,7 +6456,7 @@ textarea:disabled {
 .action-targets {
   padding: 6px 10px;
   border-radius: 10px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   border: 1px solid var(--color-border);
 }
 
@@ -6466,7 +6477,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -6492,7 +6503,7 @@ textarea:disabled {
 }
 
 .badge.badge-accent {
-  background: var(--tag-bg);
+  background: var(--surface-tag-bg);
   color: var(--tag-text);
   border: 1px solid var(--dashboard-hero-border);
 }
@@ -6566,14 +6577,14 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 10px 12px;
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   transition: border-color 140ms ease, background-color 140ms ease;
   grid-template-columns: 28px minmax(120px, 1fr) minmax(140px, 200px) auto;
 }
 
 .modal .logcat-popup-selector-row:hover:not(.is-disabled) {
   border-color: var(--color-accent);
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .modal .logcat-popup-selector-row input[type="checkbox"] {
@@ -6627,7 +6638,7 @@ textarea:disabled {
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .pairing-step.inactive {
@@ -6937,7 +6948,7 @@ textarea:disabled {
   padding: 10px 12px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-10);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .net-profiler-chart-header {
@@ -6995,7 +7006,7 @@ textarea:disabled {
   border: 1px solid var(--color-border);
   border-radius: 999px;
   overflow: hidden;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
 }
 
 .net-profiler-pin-main {
@@ -7032,7 +7043,7 @@ textarea:disabled {
 
 .net-profiler-pin-remove:hover:not(:disabled) {
   color: var(--color-text);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .net-profiler-color-swatch {
@@ -7067,7 +7078,7 @@ textarea:disabled {
   width: 100%;
   height: 180px;
   display: block;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-10);
 }
@@ -7177,7 +7188,7 @@ textarea:disabled {
 .net-profiler-tooltip {
   position: absolute;
   top: 12px;
-  background: var(--color-bg-panel);
+  background: var(--surface-panel-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-10);
   padding: 8px 10px;
@@ -7239,11 +7250,11 @@ textarea:disabled {
 }
 
 .net-profiler-table .net-profiler-row:not(.net-profiler-head):hover {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
 }
 
 .net-profiler-row.is-focused {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   box-shadow: inset 3px 0 0 var(--color-primary);
 }
 
@@ -7274,7 +7285,7 @@ textarea:disabled {
 }
 
 .net-profiler-head {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -7339,7 +7350,7 @@ textarea:disabled {
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   border-radius: 8px;
 }
 
@@ -7401,7 +7412,7 @@ textarea:disabled {
 }
 
 .profiles-result-head {
-  background: var(--color-bg-subtle);
+  background: var(--surface-subtle-bg);
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
