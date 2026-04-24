@@ -20,9 +20,10 @@ use crate::app::adb::apps::{
     parse_dumpsys_first_install_time, parse_dumpsys_granted_permissions,
     parse_dumpsys_initiating_package_name, parse_dumpsys_installer_package_name,
     parse_dumpsys_installing_package_name, parse_dumpsys_last_update_time,
-    parse_dumpsys_originating_package_name, parse_dumpsys_requested_permissions,
-    parse_dumpsys_target_sdk, parse_dumpsys_user_id, parse_dumpsys_version_code,
-    parse_dumpsys_version_name, parse_pm_list_packages_output, parse_pm_path_output,
+    parse_dumpsys_originating_package_name, parse_dumpsys_package_versions,
+    parse_dumpsys_requested_permissions, parse_dumpsys_target_sdk, parse_dumpsys_user_id,
+    parse_dumpsys_version_code, parse_dumpsys_version_name, parse_pm_list_packages_output,
+    parse_pm_path_output,
 };
 use crate::app::adb::bugreport::{parse_bugreportz_line, BugreportzPayload};
 use crate::app::adb::device_tracking::start_device_tracker;
@@ -5028,41 +5029,46 @@ pub fn list_apps(
         ));
     }
 
-    let include_versions = include_versions.unwrap_or(false);
+    let versions_by_package = if include_versions.unwrap_or(false) {
+        let dump_args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "shell".to_string(),
+            "dumpsys".to_string(),
+            "package".to_string(),
+        ];
+        match run_command_with_timeout(&adb_program, &dump_args, Duration::from_secs(30), &trace_id)
+        {
+            Ok(out) if out.exit_code.unwrap_or_default() == 0 => {
+                parse_dumpsys_package_versions(&out.stdout)
+            }
+            Ok(out) => {
+                warn!(
+                    trace_id = %trace_id,
+                    exit_code = ?out.exit_code,
+                    stderr = %out.stderr,
+                    "bulk dumpsys package failed while listing app versions"
+                );
+                HashMap::new()
+            }
+            Err(err) => {
+                warn!(
+                    trace_id = %trace_id,
+                    error = %err,
+                    "bulk dumpsys package command failed while listing app versions"
+                );
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+
     let mut apps = Vec::new();
     for entry in parse_pm_list_packages_output(&output.stdout) {
-        let (version_name, version_code) = if include_versions {
-            let dump_args = vec![
-                "-s".to_string(),
-                serial.clone(),
-                "shell".to_string(),
-                "dumpsys".to_string(),
-                "package".to_string(),
-                entry.package_name.clone(),
-            ];
-            match run_command_with_timeout(
-                &adb_program,
-                &dump_args,
-                Duration::from_secs(10),
-                &trace_id,
-            ) {
-                Ok(out) => (
-                    parse_dumpsys_version_name(&out.stdout),
-                    parse_dumpsys_version_code(&out.stdout),
-                ),
-                Err(err) => {
-                    warn!(
-                        trace_id = %trace_id,
-                        package_name = %entry.package_name,
-                        error = %err,
-                        "dumpsys package failed while listing apps"
-                    );
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
+        let version = versions_by_package.get(&entry.package_name);
+        let version_name = version.and_then(|item| item.version_name.clone());
+        let version_code = version.and_then(|item| item.version_code.clone());
         apps.push(package_entry_to_app_info(entry, version_name, version_code));
     }
 

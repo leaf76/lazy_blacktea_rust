@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::app::models::AppInfo;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5,6 +7,12 @@ pub struct PackageEntry {
     pub package_name: String,
     pub apk_path: Option<String>,
     pub is_system: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackageVersionInfo {
+    pub version_name: Option<String>,
+    pub version_code: Option<String>,
 }
 
 pub fn parse_pm_list_packages_output(output: &str) -> Vec<PackageEntry> {
@@ -89,6 +97,62 @@ pub fn parse_dumpsys_version_code(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn parse_dumpsys_package_header(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("Package [")?;
+    let end = rest.find(']')?;
+    let package_name = rest[..end].trim();
+    if package_name.is_empty() {
+        return None;
+    }
+    Some(package_name.to_string())
+}
+
+pub fn parse_dumpsys_package_versions(output: &str) -> HashMap<String, PackageVersionInfo> {
+    let mut versions = HashMap::new();
+    let mut current_package: Option<String> = None;
+    let mut current_info = PackageVersionInfo::default();
+
+    let flush_current =
+        |package_name: &mut Option<String>,
+         info: &mut PackageVersionInfo,
+         versions: &mut HashMap<String, PackageVersionInfo>| {
+            let Some(package_name) = package_name.take() else {
+                return;
+            };
+            if info.version_name.is_some() || info.version_code.is_some() {
+                versions.insert(package_name, info.clone());
+            }
+            *info = PackageVersionInfo::default();
+        };
+
+    for raw in output.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(package_name) = parse_dumpsys_package_header(line) {
+            flush_current(&mut current_package, &mut current_info, &mut versions);
+            current_package = Some(package_name);
+            continue;
+        }
+
+        if current_package.is_none() {
+            continue;
+        }
+
+        if current_info.version_name.is_none() {
+            current_info.version_name = parse_dumpsys_version_name(line);
+        }
+        if current_info.version_code.is_none() {
+            current_info.version_code = parse_dumpsys_version_code(line);
+        }
+    }
+
+    flush_current(&mut current_package, &mut current_info, &mut versions);
+    versions
 }
 
 pub fn parse_dumpsys_first_install_time(output: &str) -> Option<String> {
@@ -344,6 +408,50 @@ mod tests {
         let output = "versionName=1.2.3\nversionCode=1000 minSdk=24\n";
         assert_eq!(parse_dumpsys_version_name(output).as_deref(), Some("1.2.3"));
         assert_eq!(parse_dumpsys_version_code(output).as_deref(), Some("1000"));
+    }
+
+    #[test]
+    fn parses_bulk_dumpsys_package_versions() {
+        let output = "\
+            Packages:\n\
+              Package [com.example.alpha] (123abc):\n\
+                userId=10123\n\
+                versionCode=42 minSdk=23 targetSdk=35\n\
+                versionName=1.2.3\n\
+              Package [com.example.beta] (456def):\n\
+                versionName='2.0.0'\n\
+                versionCode: 200 targetSdk=35\n\
+              Package [com.example.empty] (789abc):\n\
+                userId=10125\n\
+        ";
+
+        let versions = parse_dumpsys_package_versions(output);
+
+        assert_eq!(
+            versions
+                .get("com.example.alpha")
+                .and_then(|item| item.version_name.as_deref()),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            versions
+                .get("com.example.alpha")
+                .and_then(|item| item.version_code.as_deref()),
+            Some("42")
+        );
+        assert_eq!(
+            versions
+                .get("com.example.beta")
+                .and_then(|item| item.version_name.as_deref()),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            versions
+                .get("com.example.beta")
+                .and_then(|item| item.version_code.as_deref()),
+            Some("200")
+        );
+        assert!(!versions.contains_key("com.example.empty"));
     }
 
     #[test]

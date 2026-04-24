@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildNetTotalSeriesByUid,
   buildLinePath,
   extractNetSeries,
   sliceSnapshotsByWindowMs,
@@ -71,6 +72,35 @@ describe("netProfiler", () => {
     expect(series.txBps).toEqual([50, null]);
   });
 
+  it("buildNetTotalSeriesByUid precomputes row totals with zero for missing samples", () => {
+    const samples: NetProfilerSnapshot[] = [
+      {
+        ts_ms: 1000,
+        rows: [
+          { uid: 100, rx_bytes: 0, tx_bytes: 0, rx_bps: 100, tx_bps: 50 },
+          { uid: 101, rx_bytes: 0, tx_bytes: 0, rx_bps: 10, tx_bps: null },
+        ],
+        unsupported: false,
+      },
+      {
+        ts_ms: 2000,
+        rows: [{ uid: 100, rx_bytes: 0, tx_bytes: 0, rx_bps: 5, tx_bps: 1 }],
+        unsupported: false,
+      },
+      {
+        ts_ms: 3000,
+        rows: [{ uid: 102, rx_bytes: 0, tx_bytes: 0, rx_bps: null, tx_bps: 7 }],
+        unsupported: false,
+      },
+    ];
+
+    const seriesByUid = buildNetTotalSeriesByUid(samples);
+
+    expect(seriesByUid.get(100)).toEqual([150, 6, 0]);
+    expect(seriesByUid.get(101)).toEqual([10, 0, 0]);
+    expect(seriesByUid.get(102)).toEqual([0, 0, 7]);
+  });
+
   it("buildLinePath splits segments on null values", () => {
     const d = buildLinePath([0, 10, null, 5, 15], 100, 50, 15);
     expect(d).not.toBe("");
@@ -81,4 +111,3 @@ describe("netProfiler", () => {
     expect(buildLinePath([null, 5, null], 120, 30, 10)).toBe("");
   });
 });
-

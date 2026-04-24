@@ -169,7 +169,12 @@ import {
   buildDashboardPlainValueText,
   buildDashboardVisibleMarkdown,
 } from "./dashboardCopy";
-import { buildLinePath, extractNetSeries, sliceSnapshotsByWindowMs } from "./netProfiler";
+import {
+  buildLinePath,
+  buildNetTotalSeriesByUid,
+  extractNetSeries,
+  sliceSnapshotsByWindowMs,
+} from "./netProfiler";
 import {
   initialPairingState,
   pairingReducer,
@@ -387,6 +392,8 @@ type DeviceCatalogActionEntry = DeviceQuickMenuAction & {
 
 const TERMINAL_MAX_LINES = 500;
 const NET_PROFILER_MAX_SAMPLES = 180;
+const BUGREPORT_LOG_LOAD_PAGE_SIZE = 500;
+const BUGREPORT_LOG_LOAD_ALL_MAX_ROWS = 20_000;
 const APK_INSTALLER_STORAGE_KEY = "lazy_blacktea_apk_installer_v1";
 const SHARED_LOG_FILTERS_STORAGE_KEY = "lazy_blacktea_shared_log_filters_v1";
 const LOGCAT_PRESETS_STORAGE_KEY = "logcat_presets";
@@ -2038,6 +2045,7 @@ function App() {
   const [bugreportExtractPreparing, setBugreportExtractPreparing] = useState(false);
   const [bugreportLogError, setBugreportLogError] = useState<string | null>(null);
   const [bugreportLogLoadAllRunning, setBugreportLogLoadAllRunning] = useState(false);
+  const [bugreportLogLoadAllLimitReached, setBugreportLogLoadAllLimitReached] = useState(false);
   const [bugreportLogBuffer, setBugreportLogBuffer] = useState("");
   const [bugreportLogTag, setBugreportLogTag] = useState("");
   const [bugreportLogPid, setBugreportLogPid] = useState("");
@@ -11232,6 +11240,9 @@ function App() {
       if (bugreportLogRequestRef.current !== requestId) {
         return;
       }
+      if (!append) {
+        setBugreportLogLoadAllLimitReached(false);
+      }
       setBugreportLogRows((prev) => (append ? [...prev, ...response.data.rows] : response.data.rows));
       setBugreportLogHasMore(response.data.has_more);
       setBugreportLogOffset(response.data.next_offset);
@@ -11271,6 +11282,7 @@ function App() {
     setBugreportLogHasMore(false);
     setBugreportLogOffset(0);
     setBugreportLogBuffer("");
+    setBugreportLogLoadAllLimitReached(false);
 
     setBugreportLogBusy(true);
     setBugreportExtractPreparing(true);
@@ -11358,25 +11370,48 @@ function App() {
     const token = bugreportLogLoadAllTokenRef.current + 1;
     bugreportLogLoadAllTokenRef.current = token;
     setBugreportLogLoadAllRunning(true);
+    setBugreportLogLoadAllLimitReached(false);
 
     const reportId = bugreportLogSummary.report_id;
-    const pageSize = 2000;
+    const pageSize = BUGREPORT_LOG_LOAD_PAGE_SIZE;
     let offset = 0;
     let hasMore = true;
+    let loadedRows: BugreportLogRow[] = [];
+    let limitReached = false;
 
     try {
       while (hasMore && bugreportLogLoadAllTokenRef.current === token) {
-        const response = await queryBugreportLogcat(reportId, effectiveBugreportLogFilters, offset, pageSize);
+        const remaining = BUGREPORT_LOG_LOAD_ALL_MAX_ROWS - loadedRows.length;
+        if (remaining <= 0) {
+          limitReached = true;
+          break;
+        }
+
+        const response = await queryBugreportLogcat(
+          reportId,
+          effectiveBugreportLogFilters,
+          offset,
+          Math.min(pageSize, remaining),
+        );
         if (bugreportLogLoadAllTokenRef.current !== token) {
           return;
         }
-        setBugreportLogRows((prev) => (offset === 0 ? response.data.rows : [...prev, ...response.data.rows]));
-        setBugreportLogHasMore(response.data.has_more);
+        loadedRows = loadedRows.concat(response.data.rows.slice(0, remaining));
+        limitReached = loadedRows.length >= BUGREPORT_LOG_LOAD_ALL_MAX_ROWS && response.data.has_more;
+        setBugreportLogRows(loadedRows);
+        setBugreportLogHasMore(response.data.has_more || limitReached);
         setBugreportLogOffset(response.data.next_offset);
-        hasMore = response.data.has_more;
+        hasMore = response.data.has_more && !limitReached;
         offset = response.data.next_offset;
 
         await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
+      if (limitReached && bugreportLogLoadAllTokenRef.current === token) {
+        setBugreportLogLoadAllLimitReached(true);
+        pushToast(
+          `Loaded the first ${BUGREPORT_LOG_LOAD_ALL_MAX_ROWS.toLocaleString()} rows. Use filters or Load more for narrower follow-up pages.`,
+          "info",
+        );
       }
     } catch (error) {
       if (bugreportLogLoadAllTokenRef.current !== token) {
@@ -13007,6 +13042,10 @@ function App() {
     const netSnapshot: NetProfilerSnapshot | null =
       netState.samples[netState.samples.length - 1] ?? null;
     const netRows = netSnapshot?.rows ?? [];
+    const netTrendSeriesByUid = useMemo(
+      () => buildNetTotalSeriesByUid(netState.samples),
+      [netState.samples],
+    );
     const netQuery = netProfilerSearch.trim().toLowerCase();
     const netRowsFiltered = netQuery
       ? netRows.filter((row) => {
@@ -13331,14 +13370,7 @@ function App() {
                   </div>
                   <div className="net-profiler-cell net-profiler-trend" role="cell">
                     {renderNetTrendSparkline(
-                      netState.samples.map((sample) => {
-                        const sampleRow = sample.rows.find((candidate) => candidate.uid === row.uid) ?? null;
-                        const totalSample =
-                          sampleRow && (sampleRow.rx_bps != null || sampleRow.tx_bps != null)
-                            ? (sampleRow.rx_bps ?? 0) + (sampleRow.tx_bps ?? 0)
-                            : 0;
-                        return totalSample;
-                      }),
+                      netTrendSeriesByUid.get(row.uid) ?? [],
                     )}
                   </div>
                   <div className="net-profiler-cell net-profiler-number" role="cell">
@@ -16919,7 +16951,12 @@ function App() {
                             <button
                               className="ghost"
                               onClick={() => void handleBugreportLogLoadAll()}
-                              disabled={!bugreportLogSummary || bugreportLogBusy || !bugreportLogHasMore}
+                              disabled={
+                                !bugreportLogSummary ||
+                                bugreportLogBusy ||
+                                !bugreportLogHasMore ||
+                                bugreportLogLoadAllLimitReached
+                              }
                             >
                               Load all
                             </button>
@@ -16999,6 +17036,15 @@ function App() {
                       <div className="inline-alert info">
                         <strong>Loading all rows</strong>
                         <span>Fetching logcat pages in the background...</span>
+                      </div>
+                    )}
+                    {bugreportLogLoadAllLimitReached && (
+                      <div className="inline-alert info">
+                        <strong>Row limit reached</strong>
+                        <span>
+                          Showing the first {BUGREPORT_LOG_LOAD_ALL_MAX_ROWS.toLocaleString()} rows. Use filters or Load more
+                          for narrower follow-up pages.
+                        </span>
                       </div>
                     )}
                     {activeBugreportCustomViewSession && activeBugreportCustomView && (

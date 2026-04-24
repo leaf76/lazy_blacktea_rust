@@ -57,6 +57,23 @@ export const extractNetSeries = (
   };
 };
 
+export const buildNetTotalSeriesByUid = (
+  samples: NetProfilerSnapshot[],
+): Map<number, number[]> => {
+  const byUid = new Map<number, number[]>();
+  samples.forEach((sample, index) => {
+    sample.rows.forEach((row) => {
+      let series = byUid.get(row.uid);
+      if (!series) {
+        series = Array(samples.length).fill(0);
+        byUid.set(row.uid, series);
+      }
+      series[index] = (row.rx_bps ?? 0) + (row.tx_bps ?? 0);
+    });
+  });
+  return byUid;
+};
+
 export const buildLinePath = (
   values: (number | null)[],
   width: number,
