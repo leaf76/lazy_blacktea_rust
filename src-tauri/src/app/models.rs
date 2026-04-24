@@ -4,7 +4,82 @@ use std::collections::HashMap;
 use crate::app::adb::screen_record::ScreenRecordBackend;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DevicePlatform {
+    Android,
+    Ios,
+}
+
+fn default_device_platform() -> DevicePlatform {
+    DevicePlatform::Android
+}
+
+impl Default for DevicePlatform {
+    fn default() -> Self {
+        default_device_platform()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DeviceCapabilities {
+    #[serde(default)]
+    pub logs: bool,
+    #[serde(default)]
+    pub crash_reports: bool,
+    #[serde(default)]
+    pub shell: bool,
+    #[serde(default)]
+    pub files: bool,
+    #[serde(default)]
+    pub install_app: bool,
+    #[serde(default)]
+    pub screenshot: bool,
+    #[serde(default)]
+    pub screen_record: bool,
+    #[serde(default)]
+    pub mirror: bool,
+    #[serde(default)]
+    pub reboot: bool,
+    #[serde(default)]
+    pub connectivity: bool,
+}
+
+impl DeviceCapabilities {
+    pub fn android_default() -> Self {
+        Self {
+            logs: true,
+            crash_reports: false,
+            shell: true,
+            files: true,
+            install_app: true,
+            screenshot: true,
+            screen_record: true,
+            mirror: true,
+            reboot: true,
+            connectivity: true,
+        }
+    }
+
+    pub fn ios_observation(logs: bool, crash_reports: bool) -> Self {
+        Self {
+            logs,
+            crash_reports,
+            shell: false,
+            files: false,
+            install_app: false,
+            screenshot: false,
+            screen_record: false,
+            mirror: false,
+            reboot: false,
+            connectivity: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceSummary {
+    #[serde(default = "default_device_platform")]
+    pub platform: DevicePlatform,
     pub serial: String,
     pub state: String,
     pub model: Option<String>,
@@ -16,6 +91,11 @@ pub struct DeviceSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceDetail {
     pub serial: String,
+    pub os_version: Option<String>,
+    pub device_name: Option<String>,
+    pub product_type: Option<String>,
+    pub connection_type: Option<String>,
+    pub trust_status: Option<String>,
     pub name: Option<String>,
     pub brand: Option<String>,
     pub model: Option<String>,
@@ -40,6 +120,8 @@ pub struct DeviceDetail {
 pub struct DeviceInfo {
     pub summary: DeviceSummary,
     pub detail: Option<DeviceDetail>,
+    #[serde(default)]
+    pub capabilities: DeviceCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +154,23 @@ pub struct AdbInfo {
     pub version_output: String,
     pub command_path: String,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IosToolStatus {
+    pub available: bool,
+    pub command_path: String,
+    pub version_output: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IosToolsInfo {
+    pub devicectl: IosToolStatus,
+    pub idevice_id: IosToolStatus,
+    pub ideviceinfo: IosToolStatus,
+    pub idevicesyslog: IosToolStatus,
+    pub idevicecrashreport: IosToolStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

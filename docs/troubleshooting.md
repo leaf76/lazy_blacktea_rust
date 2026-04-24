@@ -15,6 +15,83 @@ Windows notes:
 
 - You may need an OEM USB driver for your device.
 
+## iOS Device Does Not Appear
+
+The iOS MVP depends on external Apple or libimobiledevice tools. The app does not bundle them.
+
+1. In the app, open **Settings -> iOS Tools -> Test iOS Tools**.
+2. On macOS, verify Xcode command line tools can locate `devicectl`:
+
+   ```bash
+   xcrun --find devicectl
+   ```
+
+3. On Linux Ubuntu/Debian, install libimobiledevice and start `usbmuxd`:
+
+   ```bash
+   sudo apt install usbmuxd libimobiledevice-utils
+   sudo systemctl enable --now usbmuxd
+   ```
+
+   `devicectl` is macOS/Xcode-only and is not required on Linux.
+
+4. If using libimobiledevice, verify the tools are in `PATH`:
+
+   ```bash
+   idevice_id -l
+   ideviceinfo -u "IOS_UDID"
+   ```
+
+5. Unlock the iPhone, reconnect USB, and accept the trust prompt.
+6. If the device is visible but details are missing, keep the phone unlocked and run `ideviceinfo -u "IOS_UDID"` to confirm the trust state.
+
+Common causes:
+
+- The iPhone is locked or has not trusted this computer.
+- Xcode command line tools are not installed or `xcode-select` points to the wrong developer directory.
+- libimobiledevice is not installed or not visible in `PATH`.
+- Developer Mode or pairing state is incomplete for the specific operation.
+
+Linux-specific checks:
+
+- If `idevice_id -l` returns nothing, confirm the USB cable, unlock the phone, accept trust, and verify `usbmuxd` is running:
+
+  ```bash
+  systemctl status usbmuxd
+  ```
+
+- If `ideviceinfo` fails with a pairing or lockdown error, reconnect the iPhone and accept the trust prompt again.
+- If USB access fails as a normal user, install your distro's iOS/libimobiledevice udev rules or test from a shell with the expected USB permissions.
+- If ADB is missing but libimobiledevice works, iOS devices should still appear. ADB is only required for Android functionality.
+
+## iOS Syslog Does Not Start
+
+1. Verify `idevicesyslog` is available:
+
+   ```bash
+   idevicesyslog --version
+   ```
+
+2. Confirm the iPhone is trusted and visible:
+
+   ```bash
+   idevice_id -l
+   ```
+
+3. Start Logs again in the app. Source filters are Android-only and are ignored for iOS syslog.
+
+If `idevicesyslog` is missing, the iPhone can still appear in Device Manager, but live iOS logs are disabled.
+
+## iOS Crash Report Export Fails
+
+Crash report export requires `idevicecrashreport`.
+
+```bash
+idevicecrashreport --version
+```
+
+Confirm the output folder is writable and the iPhone is trusted. The app writes crash reports only to the configured local output folder or an explicitly selected folder.
+
 ## macOS: App Blocked (Unsigned Build)
 
 If macOS says the app cannot be opened:

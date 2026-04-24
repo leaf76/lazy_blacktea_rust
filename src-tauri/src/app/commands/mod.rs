@@ -55,15 +55,16 @@ use crate::app::config::{
 };
 use crate::app::diagnostics;
 use crate::app::error::AppError;
+use crate::app::ios;
 use crate::app::models::{
     AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo,
     AppComponentsSummary, AppIcon, AppInfo, BugreportExtractIndexSummary, BugreportExtractQuery,
     BugreportExtractResult, BugreportLogAroundPage, BugreportLogFilters, BugreportLogPage,
     BugreportLogSearchResult, BugreportLogSummary, BugreportResult, CommandResponse, CommandResult,
-    DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult, LegacyLogcatPreset,
-    LogcatExportResult, LogcatStatus, NetProfilerSnapshot, PerfSnapshot, ScrcpyInfo,
-    ScreenRecordStartResult, ScreenRecordStatus, ScreenRecordStopResult, TerminalEvent,
-    TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
+    DeviceCapabilities, DeviceDetail, DeviceFileEntry, DeviceInfo, FilePreview, HostCommandResult,
+    IosToolsInfo, LegacyLogcatPreset, LogcatExportResult, LogcatStatus, NetProfilerSnapshot,
+    PerfSnapshot, ScrcpyInfo, ScreenRecordStartResult, ScreenRecordStatus, ScreenRecordStopResult,
+    TerminalEvent, TerminalSessionInfo, UiHierarchyCaptureResult, UiHierarchyExportResult,
 };
 use crate::app::net_profiler::parse::{
     parse_cmd_package_list_u, parse_dumpsys_netstats_app_uid_stats, parse_xt_qtaguid_stats,
@@ -2299,6 +2300,18 @@ pub fn check_adb(
 }
 
 #[tauri::command(async)]
+pub fn check_ios_tools(
+    trace_id: Option<String>,
+) -> Result<CommandResponse<IosToolsInfo>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    info!(trace_id = %trace_id, "check_ios_tools");
+    Ok(CommandResponse {
+        data: ios::check_ios_tools(&trace_id),
+        trace_id,
+    })
+}
+
+#[tauri::command(async)]
 pub fn export_diagnostics_bundle(
     output_dir: Option<String>,
     trace_id: Option<String>,
@@ -2655,101 +2668,128 @@ pub fn list_devices(
         .unwrap_or(500);
     let list_started = Instant::now();
 
-    let adb_program = get_adb_program(&trace_id)?;
-    let args = vec!["devices".to_string(), "-l".to_string()];
-    let devices_cmd_started = Instant::now();
-    let output = run_adb(&adb_program, &args, &trace_id)?;
-    let devices_cmd_elapsed_ms = devices_cmd_started.elapsed().as_millis() as u64;
-    if profile_devices && (profile_slow_ms == 0 || devices_cmd_elapsed_ms >= profile_slow_ms) {
-        info!(
-            trace_id = %trace_id,
-            step = "devices",
-            elapsed_ms = devices_cmd_elapsed_ms,
-            exit_code = ?output.exit_code,
-            "adb host command timing"
-        );
-    }
-    if output.exit_code.unwrap_or_default() != 0 {
-        return Err(AppError::dependency(
-            format!("adb devices failed: {}", output.stderr),
-            &trace_id,
-        ));
-    }
-    let summaries = parse_adb_devices(&output.stdout);
     let need_detail = detailed.unwrap_or(true);
-    let mut devices = Vec::with_capacity(summaries.len());
+    let android_result = (|| -> Result<Vec<DeviceInfo>, AppError> {
+        let adb_program = get_adb_program(&trace_id)?;
+        let args = vec!["devices".to_string(), "-l".to_string()];
+        let devices_cmd_started = Instant::now();
+        let output = run_adb(&adb_program, &args, &trace_id)?;
+        let devices_cmd_elapsed_ms = devices_cmd_started.elapsed().as_millis() as u64;
+        if profile_devices && (profile_slow_ms == 0 || devices_cmd_elapsed_ms >= profile_slow_ms) {
+            info!(
+                trace_id = %trace_id,
+                step = "devices",
+                elapsed_ms = devices_cmd_elapsed_ms,
+                exit_code = ?output.exit_code,
+                "adb host command timing"
+            );
+        }
+        if output.exit_code.unwrap_or_default() != 0 {
+            return Err(AppError::dependency(
+                format!("adb devices failed: {}", output.stderr),
+                &trace_id,
+            ));
+        }
+        let summaries = parse_adb_devices(&output.stdout);
+        let mut devices = Vec::with_capacity(summaries.len());
 
-    if need_detail && summaries.iter().any(|summary| summary.state == "device") {
-        let scheduler = Arc::clone(&state.scheduler);
-        let detail_slots: Arc<Vec<OnceLock<Option<DeviceDetail>>>> = Arc::new(
-            (0..summaries.len())
-                .map(|_| OnceLock::new())
-                .collect::<Vec<_>>(),
-        );
+        if need_detail && summaries.iter().any(|summary| summary.state == "device") {
+            let scheduler = Arc::clone(&state.scheduler);
+            let detail_slots: Arc<Vec<OnceLock<Option<DeviceDetail>>>> = Arc::new(
+                (0..summaries.len())
+                    .map(|_| OnceLock::new())
+                    .collect::<Vec<_>>(),
+            );
 
-        let mut handles = Vec::new();
-        for (index, summary) in summaries.iter().enumerate() {
-            if summary.state != "device" {
-                continue;
+            let mut handles = Vec::new();
+            for (index, summary) in summaries.iter().enumerate() {
+                if summary.state != "device" {
+                    continue;
+                }
+
+                let serial = summary.serial.clone();
+                let adb_program_spawn = adb_program.clone();
+                let trace_spawn = trace_id.clone();
+                let scheduler_spawn = Arc::clone(&scheduler);
+                let detail_slots = Arc::clone(&detail_slots);
+
+                handles.push(std::thread::spawn(move || {
+                    let run_scheduled = |args: &[String],
+                                         timeout: Duration,
+                                         _step: &'static str|
+                     -> Result<
+                        crate::app::adb::runner::CommandOutput,
+                        AppError,
+                    > {
+                        let _permit = scheduler_spawn.acquire_global();
+                        let device_lock = scheduler_spawn.device_lock(&serial);
+                        let _device_guard = device_lock.lock().map_err(|_| {
+                            warn!(trace_id = %trace_spawn, serial = %serial, "device lock poisoned");
+                            AppError::system(
+                                "Failed to access the device. Please try again.",
+                                &trace_spawn,
+                            )
+                        })?;
+                        run_command_with_timeout(&adb_program_spawn, args, timeout, &trace_spawn)
+                    };
+
+                    let detail = load_device_detail(
+                        &serial,
+                        &trace_spawn,
+                        profile_devices,
+                        profile_slow_ms,
+                        run_scheduled,
+                    );
+
+                    let _ = detail_slots[index].set(detail);
+                }));
             }
 
-            let serial = summary.serial.clone();
-            let adb_program_spawn = adb_program.clone();
-            let trace_spawn = trace_id.clone();
-            let scheduler_spawn = Arc::clone(&scheduler);
-            let detail_slots = Arc::clone(&detail_slots);
+            for handle in handles {
+                if handle.join().is_err() {
+                    warn!(
+                        trace_id = %trace_id,
+                        "device detail thread panicked"
+                    );
+                }
+            }
 
-            handles.push(std::thread::spawn(move || {
-                let run_scheduled = |args: &[String],
-                                     timeout: Duration,
-                                     _step: &'static str|
-                 -> Result<
-                    crate::app::adb::runner::CommandOutput,
-                    AppError,
-                > {
-                    let _permit = scheduler_spawn.acquire_global();
-                    let device_lock = scheduler_spawn.device_lock(&serial);
-                    let _device_guard = device_lock.lock().map_err(|_| {
-                        warn!(trace_id = %trace_spawn, serial = %serial, "device lock poisoned");
-                        AppError::system(
-                            "Failed to access the device. Please try again.",
-                            &trace_spawn,
-                        )
-                    })?;
-                    run_command_with_timeout(&adb_program_spawn, args, timeout, &trace_spawn)
-                };
-
-                let detail = load_device_detail(
-                    &serial,
-                    &trace_spawn,
-                    profile_devices,
-                    profile_slow_ms,
-                    run_scheduled,
-                );
-
-                let _ = detail_slots[index].set(detail);
-            }));
-        }
-
-        for handle in handles {
-            if handle.join().is_err() {
-                warn!(
-                    trace_id = %trace_id,
-                    "device detail thread panicked"
-                );
+            for (index, summary) in summaries.into_iter().enumerate() {
+                let detail = detail_slots[index].get().cloned().unwrap_or(None);
+                devices.push(DeviceInfo {
+                    summary,
+                    detail,
+                    capabilities: DeviceCapabilities::android_default(),
+                });
+            }
+        } else {
+            for summary in summaries {
+                devices.push(DeviceInfo {
+                    summary,
+                    detail: None,
+                    capabilities: DeviceCapabilities::android_default(),
+                });
             }
         }
+        Ok(devices)
+    })();
 
-        for (index, summary) in summaries.into_iter().enumerate() {
-            let detail = detail_slots[index].get().cloned().unwrap_or(None);
-            devices.push(DeviceInfo { summary, detail });
+    let mut devices = Vec::new();
+    let mut android_error = None;
+    match android_result {
+        Ok(mut android_devices) => devices.append(&mut android_devices),
+        Err(err) => {
+            warn!(trace_id = %trace_id, error = %err, "Android device discovery failed");
+            android_error = Some(err);
         }
-    } else {
-        for summary in summaries {
-            devices.push(DeviceInfo {
-                summary,
-                detail: None,
-            });
+    }
+
+    let mut ios_devices = ios::discover_ios_devices(&trace_id);
+    devices.append(&mut ios_devices);
+
+    if devices.is_empty() {
+        if let Some(err) = android_error {
+            return Err(err);
         }
     }
 
@@ -7109,6 +7149,93 @@ pub fn export_logcat(
             line_count: lines.len(),
         },
     })
+}
+
+#[tauri::command(async)]
+pub fn start_ios_syslog(
+    serial: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let tools = ios::check_ios_tools(&trace_id);
+    if !tools.idevicesyslog.available {
+        return Err(AppError::dependency(
+            "idevicesyslog is not available",
+            &trace_id,
+        ));
+    }
+    let trace_emit = trace_id.clone();
+    let emitter: LogcatEmitter = Arc::new(move |event: LogcatEvent| {
+        if let Err(err) = app.emit("logcat-line", event) {
+            warn!(trace_id = %trace_emit, error = %err, "failed to emit iOS syslog line");
+        }
+    });
+
+    start_logcat_inner(
+        serial,
+        None,
+        "idevicesyslog",
+        &state.ios_syslog_processes,
+        emitter,
+        &trace_id,
+        |program, serial, _filter, trace_id| {
+            Command::new(program)
+                .args(["-u", serial])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|err| {
+                    AppError::dependency(format!("Failed to start iOS syslog: {err}"), trace_id)
+                })
+        },
+    )?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub fn stop_ios_syslog(
+    serial: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    stop_logcat_inner(serial, &state.ios_syslog_processes, &trace_id)?;
+
+    Ok(CommandResponse {
+        trace_id,
+        data: true,
+    })
+}
+
+#[tauri::command(async)]
+pub fn get_ios_syslog_status(
+    serial: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<LogcatStatus>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let status = get_logcat_status_inner(serial, &state.ios_syslog_processes, &trace_id)?;
+    Ok(CommandResponse {
+        trace_id,
+        data: status,
+    })
+}
+
+#[tauri::command(async)]
+pub fn export_ios_crash_reports(
+    serial: String,
+    output_dir: Option<String>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<HostCommandResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let data = ios::export_crash_reports(&serial, output_dir, &trace_id)?;
+    Ok(CommandResponse { trace_id, data })
 }
 
 #[tauri::command(async)]

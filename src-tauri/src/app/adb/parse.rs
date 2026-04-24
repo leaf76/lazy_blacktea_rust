@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use regex::Regex;
 
-use crate::app::models::{DeviceDetail, DeviceFileEntry, DeviceSummary};
+use crate::app::models::{DeviceDetail, DeviceFileEntry, DevicePlatform, DeviceSummary};
 
 pub fn parse_adb_devices(output: &str) -> Vec<DeviceSummary> {
     output
@@ -33,6 +33,7 @@ pub fn parse_adb_devices(output: &str) -> Vec<DeviceSummary> {
                 }
             }
             Some(DeviceSummary {
+                platform: DevicePlatform::Android,
                 serial,
                 state,
                 model,
@@ -91,6 +92,11 @@ pub fn build_device_detail(serial: &str, getprop_map: &HashMap<String, String>) 
 
     DeviceDetail {
         serial: serial.to_string(),
+        os_version: clean_prop_value(getprop_map.get("ro.build.version.release")),
+        device_name: clean_prop_value(getprop_map.get("ro.product.name")),
+        product_type: clean_prop_value(getprop_map.get("ro.product.device")),
+        connection_type: Some("adb".to_string()),
+        trust_status: None,
         name: clean_prop_value(getprop_map.get("ro.product.name")),
         brand: clean_prop_value(getprop_map.get("ro.product.brand")),
         model: clean_prop_value(getprop_map.get("ro.product.model")),

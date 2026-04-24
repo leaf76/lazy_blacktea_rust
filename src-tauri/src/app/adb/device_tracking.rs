@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 use tracing::warn;
 
 use crate::app::adb::track_devices::TrackDevicesStreamParser;
-use crate::app::models::DeviceInfo;
+use crate::app::models::{DeviceCapabilities, DeviceInfo};
 
 pub const DEVICE_TRACKING_SNAPSHOT_EVENT: &str = "device-tracking-snapshot";
 
@@ -254,6 +254,7 @@ pub fn start_device_tracker(
                         .map(|summary| DeviceInfo {
                             summary,
                             detail: None,
+                            capabilities: DeviceCapabilities::android_default(),
                         })
                         .collect::<Vec<_>>();
                     let payload = serde_json::json!({
@@ -271,6 +272,7 @@ pub fn start_device_tracker(
                     .map(|summary| DeviceInfo {
                         summary,
                         detail: None,
+                        capabilities: DeviceCapabilities::android_default(),
                     })
                     .collect::<Vec<_>>();
                 let payload = serde_json::json!({

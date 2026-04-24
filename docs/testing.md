@@ -1,11 +1,12 @@
 # Testing
 
-This project is a Tauri v2 + React desktop app backed by a Rust backend that shells out to system `adb`.
+This project is a Tauri v2 + React desktop app backed by a Rust backend that shells out to system mobile tooling (`adb`, Xcode `devicectl`, and libimobiledevice when available).
 
 On macOS, you can reliably automate:
 - Web UI smoke checks (run the frontend in a plain browser).
 - Rust unit/integration tests.
 - Real-device ADB smoke checks (without UI automation).
+- Real-device iOS inventory checks when Xcode or libimobiledevice tools are installed.
 
 Full desktop UI automation on macOS is limited because the desktop WebView does not have the same WebDriver support story as Windows/Linux.
 
@@ -55,6 +56,62 @@ Include file I/O and UI dump:
 ```bash
 scripts/smoke_adb.sh --with-files --with-uiauto
 ```
+
+### Cross-Platform Device Inventory Smoke
+
+Use this when validating the Android + iOS device list MVP.
+
+1. Connect one Android device with USB debugging enabled and verify:
+
+```bash
+adb devices -l
+```
+
+2. Connect one trusted iPhone. Verify the matching iOS tool path works.
+
+macOS:
+
+```bash
+xcrun --find devicectl
+```
+
+Linux Ubuntu/Debian:
+
+```bash
+sudo apt install usbmuxd libimobiledevice-utils
+sudo systemctl enable --now usbmuxd
+idevice_id -l
+ideviceinfo -u "IOS_UDID"
+```
+
+3. Launch the app and open **Settings -> iOS Tools -> Test iOS Tools**. Expected result:
+
+- Available tools show `available`.
+- Missing tools show `missing`.
+- On Linux, missing `devicectl` is shown as macOS-only or not required.
+- Missing iOS tools do not break Android device refresh.
+
+4. Open **Device Manager** and click **Refresh Devices**. Expected result:
+
+- Android and iOS devices appear in the same list.
+- Rows show an Android or iOS badge.
+- iOS rows show the UDID, device name or product type, iOS version when available, and trust status when available.
+- Android-only actions such as Shell, APK Installer, File Browser, Reboot, Wi-Fi/Bluetooth controls, screen record, and mirroring are disabled or unavailable for iOS-only selections.
+
+5. Open **Logs** with the iPhone selected. Expected result:
+
+- If `idevicesyslog` is available, Start begins iOS syslog streaming and Stop terminates it.
+- Source filters are disabled for iOS and do not block syslog.
+- Export writes the visible log lines to the configured output folder.
+
+6. Negative checks:
+
+- Lock or untrust the iPhone and refresh. The UI should show a human-readable unavailable or missing-detail state.
+- Remove libimobiledevice tools from PATH or use a shell without them. Android refresh should still work.
+- Stop `usbmuxd` on Linux and refresh. Settings and troubleshooting docs should point the user to `sudo systemctl enable --now usbmuxd`.
+- Run with no ADB in PATH but with a trusted iPhone and libimobiledevice available. The iPhone should still appear in Device Manager.
+- Keep Android and iPhone connected while ADB tracking emits updates. The iPhone row should remain visible after Android state changes.
+- Select one iPhone with `idevicecrashreport` available. The device action menu should expose **Export iOS Crash Reports**.
 
 ### Samsung UI Inspector RCA Probe
 

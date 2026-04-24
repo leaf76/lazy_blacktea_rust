@@ -1,4 +1,20 @@
+export type DevicePlatform = "android" | "ios";
+
+export type DeviceCapabilities = {
+  logs?: boolean;
+  crash_reports?: boolean;
+  shell?: boolean;
+  files?: boolean;
+  install_app?: boolean;
+  screenshot?: boolean;
+  screen_record?: boolean;
+  mirror?: boolean;
+  reboot?: boolean;
+  connectivity?: boolean;
+};
+
 export type DeviceSummary = {
+  platform?: DevicePlatform;
   serial: string;
   state: string;
   model?: string | null;
@@ -9,6 +25,11 @@ export type DeviceSummary = {
 
 export type DeviceDetail = {
   serial: string;
+  os_version?: string | null;
+  device_name?: string | null;
+  product_type?: string | null;
+  connection_type?: string | null;
+  trust_status?: string | null;
   name?: string | null;
   brand?: string | null;
   model?: string | null;
@@ -32,6 +53,7 @@ export type DeviceDetail = {
 export type DeviceInfo = {
   summary: DeviceSummary;
   detail?: DeviceDetail | null;
+  capabilities?: DeviceCapabilities | null;
 };
 
 export type DeviceFileEntry = {
@@ -60,6 +82,21 @@ export type AdbInfo = {
   version_output: string;
   command_path: string;
   error?: string | null;
+};
+
+export type IosToolStatus = {
+  available: boolean;
+  command_path: string;
+  version_output: string;
+  error?: string | null;
+};
+
+export type IosToolsInfo = {
+  devicectl: IosToolStatus;
+  idevice_id: IosToolStatus;
+  ideviceinfo: IosToolStatus;
+  idevicesyslog: IosToolStatus;
+  idevicecrashreport: IosToolStatus;
 };
 
 export type UiHierarchyCaptureResult = {

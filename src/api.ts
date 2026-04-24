@@ -21,6 +21,7 @@ import type {
   DeviceInfo,
   FilePreview,
   HostCommandResult,
+  IosToolsInfo,
   LegacyLogcatPreset,
   LogcatExportResult,
   LogcatStatus,
@@ -51,6 +52,7 @@ const COMMAND_ERROR_META: Record<string, { title: string; source: string }> = {
   reset_config: { title: "Reset Settings", source: "settings.reset" },
   import_theme_background: { title: "Import Theme Background", source: "settings.theme.import_background" },
   check_adb: { title: "ADB Check", source: "adb.check" },
+  check_ios_tools: { title: "iOS Tools Check", source: "ios.tools.check" },
   list_devices: { title: "Refresh Devices", source: "devices.list" },
   adb_pair: { title: "Wireless Pair", source: "wireless.pair" },
   adb_connect: { title: "Wireless Connect", source: "wireless.connect" },
@@ -87,6 +89,10 @@ const COMMAND_ERROR_META: Record<string, { title: string; source: string }> = {
   load_legacy_logcat_presets: { title: "Load Logcat Presets", source: "logcat.presets.load" },
   clear_logcat: { title: "Clear Logcat", source: "logcat.clear" },
   export_logcat: { title: "Export Logcat", source: "logcat.export" },
+  start_ios_syslog: { title: "Start iOS Syslog", source: "ios.syslog.start" },
+  stop_ios_syslog: { title: "Stop iOS Syslog", source: "ios.syslog.stop" },
+  get_ios_syslog_status: { title: "iOS Syslog Status", source: "ios.syslog.status" },
+  export_ios_crash_reports: { title: "Export iOS Crash Reports", source: "ios.crash.export" },
   list_apps: { title: "List Apps", source: "apps.list" },
   get_app_basic_info: { title: "Load App Details", source: "apps.detail" },
   get_app_icon: { title: "Load App Icon", source: "apps.icon" },
@@ -181,6 +187,14 @@ export const checkAdb = async (commandPath?: string) => {
     payload.commandPath = commandPath;
   }
   return tauriInvoke<CommandResponse<AdbInfo>>("check_adb", payload);
+};
+
+export const checkIosTools = async () => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<IosToolsInfo>>("check_ios_tools", {
+    trace_id: traceId,
+    traceId,
+  });
 };
 
 export const exportDiagnosticsBundle = async (outputDir?: string) => {
@@ -630,6 +644,47 @@ export const startLogcat = async (serial: string, filter?: string) => {
     trace_id: traceId,
     traceId,
   });
+};
+
+export const startIosSyslog = async (serial: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<boolean>>("start_ios_syslog", {
+    serial,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const stopIosSyslog = async (serial: string) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<boolean>>("stop_ios_syslog", {
+    serial,
+    trace_id: traceId,
+    traceId,
+  });
+};
+
+export const getIosSyslogStatus = async (serial: string, options?: InvokeErrorOptions) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<LogcatStatus>>("get_ios_syslog_status", {
+    serial,
+    trace_id: traceId,
+    traceId,
+  }, options);
+};
+
+export const exportIosCrashReports = async (serial: string, outputDir?: string) => {
+  const traceId = createTraceId();
+  const payload: Record<string, unknown> = {
+    serial,
+    trace_id: traceId,
+    traceId,
+  };
+  if (outputDir?.trim()) {
+    payload.output_dir = outputDir;
+    payload.outputDir = outputDir;
+  }
+  return tauriInvoke<CommandResponse<HostCommandResult>>("export_ios_crash_reports", payload);
 };
 
 export const stopLogcat = async (serial: string) => {

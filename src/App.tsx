@@ -50,6 +50,7 @@ import type {
   DashboardFieldId,
   DashboardSettings,
   FilePreview,
+  IosToolsInfo,
   LegacyLogcatPreset,
   LogcatEvent,
   NetProfilerEvent,
@@ -70,12 +71,15 @@ import {
   captureScreenshot,
   captureUiHierarchy,
   checkAdb,
+  checkIosTools,
   checkScrcpy,
   clearAppData,
   clearLogcat,
   exportDiagnosticsBundle,
+  exportIosCrashReports,
   getAppBasicInfo,
   getAppIcon,
+  getIosSyslogStatus,
   getLogcatStatus,
   exportLogcat,
   exportUiHierarchy,
@@ -121,9 +125,11 @@ import {
   setBluetoothState,
   setWifiState,
   startBluetoothMonitor,
+  startIosSyslog,
   startLogcat,
   startScreenRecord,
   stopBluetoothMonitor,
+  stopIosSyslog,
   stopLogcat,
   stopScreenRecord,
   uninstallApp,
@@ -222,18 +228,26 @@ import {
   applyDeviceDetailPatch,
   buildDeviceInfoCopyItems,
   buildDeviceGroupOptions,
+  buildIosToolGuidanceRows,
   buildTopbarOverview,
   buildDeviceQuickMenuActions,
   computeContextMenuPosition,
   filterDevicesBySearch,
   flattenDeviceGroups,
+  formatDeviceApiLabel,
+  formatDevicePlatformLabel,
+  getIosCrashReportEligibleSerials,
   formatPrimaryDeviceLabel,
+  getDevicePlatform,
+  hasDeviceCapability,
   mergeDeviceDetails,
   reduceSelectionToOne,
   resolveDeviceQuickMenuSelection,
+  resolveHostOs,
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
+  splitDeviceSerialsByPlatform,
   withDeviceGroups,
   type DeviceContextActionId,
   type DeviceInfoCopyItem,
@@ -360,6 +374,12 @@ import appPackage from "../package.json";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
+const HOST_OS_LABELS = {
+  linux: "Linux",
+  macos: "macOS",
+  windows: "Windows",
+  unknown: "Unknown",
+};
 type BugreportProgress = { serial: string; progress: number; trace_id: string };
 type FileTransferProgress = {
   serial: string;
@@ -2107,6 +2127,7 @@ function App() {
   const [topActionsMenuOpen, setTopActionsMenuOpen] = useState(false);
   const [scrcpyInfo, setScrcpyInfo] = useState<ScrcpyInfo | null>(null);
   const [adbInfo, setAdbInfo] = useState<AdbInfo | null>(null);
+  const [iosToolsInfo, setIosToolsInfo] = useState<IosToolsInfo | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [dashboardConfigOpen, setDashboardConfigOpen] = useState(false);
   const [dashboardDraft, setDashboardDraft] = useState<DashboardSettings>(buildDefaultDashboardSettings());
@@ -2120,6 +2141,18 @@ function App() {
     errorRecordsReducer,
     undefined,
     () => createInitialErrorState(),
+  );
+  const hostOs = useMemo(
+    () =>
+      resolveHostOs(
+        typeof navigator === "undefined" ? "" : navigator.platform,
+        typeof navigator === "undefined" ? "" : navigator.userAgent,
+      ),
+    [],
+  );
+  const iosToolGuidanceRows = useMemo(
+    () => buildIosToolGuidanceRows(iosToolsInfo, hostOs),
+    [hostOs, iosToolsInfo],
   );
   const [githubReportPendingByKey, setGithubReportPendingByKey] = useState<Record<string, boolean>>({});
   const taskStateRef = useRef(taskState);
@@ -2476,6 +2509,7 @@ function App() {
     ],
   );
   const deviceStatus = activeDevice?.summary.state ?? "offline";
+  const activeDeviceIsIos = getDevicePlatform(activeDevice) === "ios";
   const selectedSummaryLabel =
     selectedCount === 0
       ? "No devices selected"
@@ -2517,6 +2551,7 @@ function App() {
   const canStartLogcat =
     !busy &&
     !!activeSerial &&
+    hasDeviceCapability(activeDevice, "logs") &&
     !activeLogcatStatusLoading &&
     !activeLogcatRunning;
   const canStopLogcat =
@@ -4288,8 +4323,9 @@ function App() {
     nextDevices: DeviceInfo[],
     options: { allowDetailRefresh: boolean; forceDetailRefresh?: boolean },
   ) => {
+    const previousAndroidDevices = devicesRef.current.filter((device) => getDevicePlatform(device) === "android");
     const prevBySerial = new Map(
-      devicesRef.current.map((device) => [device.summary.serial, device.summary.state] as const),
+      previousAndroidDevices.map((device) => [device.summary.serial, device.summary.state] as const),
     );
     const nextBySerial = new Map(
       nextDevices.map((device) => [device.summary.serial, device.summary.state] as const),
@@ -4300,8 +4336,12 @@ function App() {
     const shouldRefreshDetail = options.forceDetailRefresh === true || serialsChanged || statesChanged;
 
     // Tracking snapshots contain summaries only; keep the last known detail to avoid UI flicker.
-    setDevices((prev) => mergeDeviceDetails(prev, nextDevices, { preserveMissingDetail: true }));
-    setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, nextDevices));
+    const mergedDevices = mergeDeviceDetails(devicesRef.current, nextDevices, {
+      preserveMissingDetail: true,
+      preserveMissingPlatforms: ["ios"],
+    });
+    setDevices(mergedDevices);
+    setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, mergedDevices));
     if (options.allowDetailRefresh && shouldRefreshDetail) {
       scheduleDeviceDetailRefresh(800, { notifyOnError: false });
     }
@@ -4346,14 +4386,16 @@ function App() {
     const refreshId = ++refreshSeqRef.current;
     setBusy(true);
     try {
-      const adbResponse = await checkAdb();
-      if (refreshId !== refreshSeqRef.current) {
-        return;
+      try {
+        const adbResponse = await checkAdb();
+        if (refreshId !== refreshSeqRef.current) {
+          return;
+        }
+        setAdbInfo(adbResponse.data);
+      } catch (error) {
+        console.warn("ADB availability check failed.", error);
       }
-      setAdbInfo(adbResponse.data);
-      if (!adbResponse.data.available) {
-        setDevices([]);
-        setSelectedSerials([]);
+      if (refreshId !== refreshSeqRef.current) {
         return;
       }
       const response = await listDevices(false);
@@ -8354,7 +8396,11 @@ function App() {
     async (serial: string, options: { silent?: boolean } = {}) => {
       setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: true }));
       try {
-        const response = await getLogcatStatus(serial, { recordError: !options.silent });
+        const device = devices.find((item) => item.summary.serial === serial) ?? null;
+        const response =
+          getDevicePlatform(device) === "ios"
+            ? await getIosSyslogStatus(serial, { recordError: !options.silent })
+            : await getLogcatStatus(serial, { recordError: !options.silent });
         setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: response.data.running }));
         return response.data.running;
       } catch (error) {
@@ -8366,7 +8412,7 @@ function App() {
         setLogcatStatusLoadingBySerial((prev) => ({ ...prev, [serial]: false }));
       }
     },
-    [],
+    [devices],
   );
 
   const refreshScreenRecordStatuses = useCallback(
@@ -8591,14 +8637,20 @@ function App() {
         return { succeeded, failed };
       };
 
-      const [logcatResult, perfResult, netProfilerResult, terminalResult, bluetoothResult] =
+      const logTargets = splitDeviceSerialsByPlatform(devicesRef.current, targets.logcat);
+      const [androidLogResult, iosLogResult, perfResult, netProfilerResult, terminalResult, bluetoothResult] =
         await Promise.all([
-          stopBatch(targets.logcat, stopLogcat),
+          stopBatch(logTargets.android, stopLogcat),
+          stopBatch(logTargets.ios, stopIosSyslog),
           stopBatch(targets.perf, stopPerfMonitor),
           stopBatch(targets.netProfiler, stopNetProfiler),
           stopBatch(targets.terminal, stopTerminalSession),
           stopBatch(targets.bluetooth, stopBluetoothMonitor),
         ]);
+      const logcatResult = {
+        succeeded: [...androidLogResult.succeeded, ...iosLogResult.succeeded],
+        failed: [...androidLogResult.failed, ...iosLogResult.failed],
+      };
 
       if (logcatResult.succeeded.length) {
         setLogcatRunningBySerial((prev) => {
@@ -8744,12 +8796,16 @@ function App() {
       return;
     }
     if (logcatRunningBySerial[serial]) {
-      pushToast("Logcat is already running.", "info");
+      pushToast("Logs are already running.", "info");
       return;
     }
+    const targetDevice = devices.find((device) => device.summary.serial === serial) ?? null;
+    const isIosTarget = getDevicePlatform(targetDevice) === "ios";
     const sourceValue = logcatSourceValue.trim();
     let filter = "";
-    if (logcatSourceMode === "package") {
+    if (isIosTarget) {
+      filter = "";
+    } else if (logcatSourceMode === "package") {
       if (!sourceValue) {
         pushToast("Package name is required for package mode.", "error");
         return;
@@ -8780,16 +8836,20 @@ function App() {
 
     setBusy(true);
     try {
-      await startLogcat(serial, filter || undefined);
+      if (isIosTarget) {
+        await startIosSyslog(serial);
+      } else {
+        await startLogcat(serial, filter || undefined);
+      }
       setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: true }));
       void refreshLogcatStatus(serial, { silent: true });
       setLogcatActiveFilterSummary(filter || "All");
-      pushToast("Logcat started.", "info");
+      pushToast(isIosTarget ? "iOS syslog started." : "Logcat started.", "info");
     } catch (error) {
       const message = formatError(error);
       if (message.toLowerCase().includes("already running")) {
         setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: true }));
-        pushToast("Logcat is already running.", "info");
+        pushToast("Logs are already running.", "info");
       } else {
         pushToast(message, "error");
       }
@@ -8804,20 +8864,26 @@ function App() {
       return;
     }
     if (!logcatRunningBySerial[serial]) {
-      pushToast("Logcat is already stopped.", "info");
+      pushToast("Logs are already stopped.", "info");
       return;
     }
+    const targetDevice = devices.find((device) => device.summary.serial === serial) ?? null;
+    const isIosTarget = getDevicePlatform(targetDevice) === "ios";
     setBusy(true);
     try {
-      await stopLogcat(serial);
+      if (isIosTarget) {
+        await stopIosSyslog(serial);
+      } else {
+        await stopLogcat(serial);
+      }
       setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: false }));
       void refreshLogcatStatus(serial, { silent: true });
-      pushToast("Logcat stopped.", "info");
+      pushToast(isIosTarget ? "iOS syslog stopped." : "Logcat stopped.", "info");
     } catch (error) {
       const message = formatError(error);
       if (message.toLowerCase().includes("not running")) {
         setLogcatRunningBySerial((prev) => ({ ...prev, [serial]: false }));
-        pushToast("Logcat is already stopped.", "info");
+        pushToast("Logs are already stopped.", "info");
       } else {
         pushToast(message, "error");
       }
@@ -8846,6 +8912,13 @@ function App() {
       return;
     }
     const serial = logcatClearBufferModal.serial;
+    const targetDevice = devices.find((device) => device.summary.serial === serial) ?? null;
+    if (getDevicePlatform(targetDevice) === "ios") {
+      clearLogcatLocalCache(serial);
+      pushToast("iOS syslog view cleared.", "info");
+      closeLogcatClearBufferModal();
+      return;
+    }
     setBusy(true);
     try {
       await clearLogcat(serial);
@@ -11022,6 +11095,29 @@ function App() {
     setLogcatClearBufferModal({ serial: singleSerial });
   };
 
+  const handleExportIosCrashReports = async () => {
+    const serial = ensureSingleSelection("iOS crash report export");
+    if (!serial) {
+      return;
+    }
+    const targetDevice = devices.find((device) => device.summary.serial === serial) ?? null;
+    if (getDevicePlatform(targetDevice) !== "ios" || !hasDeviceCapability(targetDevice, "crash_reports")) {
+      pushToast("iOS crash report export is not available for this device.", "error");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const response = await exportIosCrashReports(serial, config?.file_gen_output_path || config?.output_path);
+      const detail = (response.data.stdout || response.data.stderr || "").trim();
+      pushToast(detail ? `iOS crash reports exported. ${detail}` : "iOS crash reports exported.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleConfirmReboot = async () => {
     closeRebootConfirm();
     await handleReboot(rebootConfirmMode === "normal" ? undefined : rebootConfirmMode);
@@ -11227,6 +11323,7 @@ function App() {
       setApkGrant(response.data.apk_install.grant_permissions);
       setApkAllowTest(response.data.apk_install.allow_test_packages);
       setAdbInfo(null);
+      setIosToolsInfo(null);
       pushToast("Settings reset.", "info");
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -11563,6 +11660,23 @@ function App() {
     }
   };
 
+  const handleCheckIosTools = async () => {
+    setBusy(true);
+    try {
+      const response = await checkIosTools();
+      setIosToolsInfo(response.data);
+      const availableCount = Object.values(response.data).filter((tool) => tool.available).length;
+      pushToast(
+        availableCount > 0 ? `iOS tools available: ${availableCount}/5.` : "No iOS tools are available.",
+        availableCount > 0 ? "info" : "error",
+      );
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const copyDeviceInfoValue = async (value: string, successMessage: string) => {
     try {
       await writeText(value);
@@ -11646,9 +11760,19 @@ function App() {
   const batchAvailabilityBySerial = useMemo(
     () =>
       Object.fromEntries(
-        devices.map((device) => [device.summary.serial, device.summary.state === "device"]),
+        devices.map((device) => [
+          device.summary.serial,
+          device.summary.state === "device" && getDevicePlatform(device) === "android",
+        ]),
       ),
     [devices],
+  );
+  const hasSelectedAndroidActionTarget = selectedSerials.some(
+    (serial) => batchAvailabilityBySerial[serial] === true,
+  );
+  const iosCrashReportEligibleSerials = useMemo(
+    () => getIosCrashReportEligibleSerials(selectedDevices),
+    [selectedDevices],
   );
   const wifiStateBySerial = useMemo(
     () =>
@@ -11808,7 +11932,7 @@ function App() {
       label: "Live Mirror",
       section: "control",
       scope: "both",
-      disabled: busy || selectedCount === 0,
+      disabled: busy || selectedCount === 0 || !hasSelectedAndroidActionTarget,
       onSelect: () => {
         void handleScrcpyLaunch();
       },
@@ -11863,11 +11987,22 @@ function App() {
       onSelect: handleQuickLogcatClear,
     },
     {
+      id: "ios_crash_reports",
+      label: "Export iOS Crash Reports",
+      section: "debug",
+      scope: "single",
+      hideWhenOutOfScope: true,
+      disabled: busy || selectedCount !== 1 || iosCrashReportEligibleSerials.length !== 1,
+      onSelect: () => {
+        void handleExportIosCrashReports();
+      },
+    },
+    {
       id: "apk_installer",
       label: "APK Installer",
       section: "more",
       scope: "both",
-      disabled: busy,
+      disabled: busy || (selectedCount > 0 && !hasSelectedAndroidActionTarget),
       onSelect: () => {
         navigate("/apk-installer");
       },
@@ -14617,13 +14752,14 @@ function App() {
                             visibleDevices.map((device, index) => {
                               const serial = device.summary.serial;
                               const detail = device.detail;
-                              const modelLabel = detail?.model ?? device.summary.model ?? serial;
+                              const devicePlatform = getDevicePlatform(device);
+                              const modelLabel =
+                                detail?.device_name ?? detail?.model ?? device.summary.model ?? serial;
                               const secondaryLabel =
                                 detail?.name && detail.name !== modelLabel ? detail.name : serial;
-                              const platformLabel = detail?.android_version
-                                ? `Android ${detail.android_version}`
-                                : "Android --";
-                              const apiLabel = detail?.api_level ? `API ${detail.api_level}` : "API --";
+                              const platformLabel = formatDevicePlatformLabel(device);
+                              const apiLabel = formatDeviceApiLabel(device);
+                              const trustLabel = detail?.trust_status;
                               const groupLabel = groupMap[serial] ?? null;
                               const wifi = detail?.wifi_is_on;
                               const bt = detail?.bt_is_on;
@@ -14681,6 +14817,7 @@ function App() {
                                     <div className="device-identity-main">
                                       <div className="device-identity-heading">
                                         <strong>{modelLabel}</strong>
+                                        <span className="badge">{devicePlatform === "ios" ? "iOS" : "Android"}</span>
                                         {isActive && <span className="device-active-badge">Primary</span>}
                                         {groupLabel && <span className="group-tag">{groupLabel}</span>}
                                       </div>
@@ -14696,6 +14833,7 @@ function App() {
                                     <div className="device-platform">
                                       <span>{platformLabel}</span>
                                       <span className="muted">{apiLabel}</span>
+                                      {trustLabel && <span className="muted">Trust: {trustLabel}</span>}
                                     </div>
                                     <div className="device-radios">
                                       <span
@@ -14813,7 +14951,7 @@ function App() {
                                 type="button"
                                 className="ghost"
                                 onClick={() => void handleScrcpyLaunch()}
-                                disabled={busy || selectedCount === 0}
+                                disabled={busy || selectedCount === 0 || !hasSelectedAndroidActionTarget}
                               >
                                 Live Mirror
                               </button>
@@ -16021,7 +16159,7 @@ function App() {
                 <div className="page-section page-section-stretch logcat-workspace">
                   <div className="page-header">
                     <div>
-                      <h1>Logcat</h1>
+                      <h1>Logs</h1>
                       <p className="muted">Filters, presets, and search for streaming logs.</p>
                     </div>
                   </div>
@@ -16029,7 +16167,7 @@ function App() {
 	                    <div className="panel-header">
                         <div className="logcat-header-main">
 	                      <div>
-	                        <h2>Logcat Stream</h2>
+	                        <h2>{activeDeviceIsIos ? "iOS Syslog Stream" : "Logcat Stream"}</h2>
 	                        <span>{selectedSummaryLabel}</span>
 	                      </div>
                           {!isLogcatPopupWindow && (
@@ -16072,7 +16210,7 @@ function App() {
                           </div>
                           <div className="logcat-button-group">
                             <button onClick={handleLogcatClearBuffer} disabled={busy || !activeSerial}>
-                              Clear Buffer
+                              {activeDeviceIsIos ? "Clear View" : "Clear Buffer"}
                             </button>
                             <button
                               className="ghost"
@@ -16100,10 +16238,17 @@ function App() {
                               Active: {logcatActiveFilterSummary || "All"}
                             </span>
                           </div>
+                          {activeDeviceIsIos && (
+                            <div className="inline-alert info">
+                              <strong>iOS syslog</strong>
+                              <span>Source filters are Android-only and will be ignored for iOS devices.</span>
+                            </div>
+                          )}
                           <div className="inline-row">
                             <select
                               className="logcat-select"
                               value={logcatSourceMode}
+                              disabled={activeDeviceIsIos}
                               onChange={(event) =>
                                 setLogcatSourceMode(event.target.value as LogcatSourceMode)
                               }
@@ -16114,6 +16259,7 @@ function App() {
                             </select>
                             <input
                               value={logcatSourceValue}
+                              disabled={activeDeviceIsIos}
                               onChange={(event) => setLogcatSourceValue(event.target.value)}
                               placeholder={
                                 logcatSourceMode === "raw"
@@ -17628,6 +17774,54 @@ function App() {
                               <span className="muted">Save Settings to apply this path globally.</span>
                             </div>
                           )}
+                        </div>
+                        <div className="settings-group settings-span-2">
+                          <h3>iOS Tools</h3>
+                          <div className="muted settings-hint">
+                            iOS device inventory uses Xcode <code>devicectl</code> on macOS or
+                            libimobiledevice with <code>usbmuxd</code> on Linux. These tools are not bundled with the app.
+                          </div>
+                          <div className="inline-alert info">
+                            <strong>Host setup</strong>
+                            <span>
+                              Detected host: <code>{HOST_OS_LABELS[hostOs]}</code>
+                            </span>
+                            {hostOs === "linux" ? (
+                              <>
+                                <span>Ubuntu/Debian setup commands:</span>
+                                <code>sudo apt install usbmuxd libimobiledevice-utils</code>
+                                <code>sudo systemctl enable --now usbmuxd</code>
+                                <code>idevice_id -l</code>
+                                <code>ideviceinfo -u "&lt;UDID&gt;"</code>
+                              </>
+                            ) : (
+                              <span className="muted">
+                                On macOS, install Xcode command line tools for <code>devicectl</code>. On Linux,
+                                install libimobiledevice tools and enable <code>usbmuxd</code>.
+                              </span>
+                            )}
+                            <span className="muted">
+                              Unlock the iPhone and accept the trust prompt before refreshing devices.
+                            </span>
+                          </div>
+                          <div className="button-row">
+                            <button type="button" className="ghost" onClick={handleCheckIosTools} disabled={busy}>
+                              Test iOS Tools
+                            </button>
+                          </div>
+                          <div className="inline-alert info">
+                            <strong>iOS tool status</strong>
+                            {iosToolGuidanceRows.map((row) => (
+                              <span key={row.id}>
+                                {row.label}: <code>{row.status}</code> <span className="muted">({row.role})</span>
+                                <span className="muted"> · {row.detail}</span>
+                                {row.error ? <span className="muted"> · {row.error}</span> : null}
+                              </span>
+                            ))}
+                            <span className="muted">
+                              Linux does not use Xcode <code>devicectl</code>; missing devicectl is expected there.
+                            </span>
+                          </div>
                         </div>
                         <div className="settings-group settings-span-2 appearance-settings-group">
                           <h3>Appearance</h3>

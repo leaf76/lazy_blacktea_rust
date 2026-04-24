@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildDeviceInfoCopyItems,
+  buildIosToolGuidanceRows,
   applyGroupAssignment,
   applyDeviceDetailPatch,
   buildDeviceQuickMenuActions,
@@ -11,14 +12,21 @@ import {
   expandDeviceGroups,
   filterDevicesBySearch,
   flattenDeviceGroups,
+  formatDeviceApiLabel,
+  formatDevicePlatformLabel,
   formatPrimaryDeviceLabel,
   formatDeviceInfoMarkdown,
+  getDevicePlatform,
+  getIosCrashReportEligibleSerials,
+  hasDeviceCapability,
   mergeDeviceDetails,
   reduceSelectionToOne,
   resolveDeviceQuickMenuSelection,
+  resolveHostOs,
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
+  splitDeviceSerialsByPlatform,
   shouldEnableConnectivityForSelection,
   selectSerialsForGroup,
   withDeviceGroups,
@@ -75,6 +83,40 @@ describe("deviceUtils", () => {
     const merged = mergeDeviceDetails(current, incoming, { preserveMissingDetail: true });
 
     expect(merged[0].detail?.wifi_is_on).toBe(true);
+  });
+
+  it("preserves missing iOS devices when merging Android tracking snapshots", () => {
+    const current: DeviceInfo[] = [
+      {
+        summary: { platform: "android", serial: "emulator-5554", state: "device" },
+        detail: { serial: "emulator-5554", android_version: "14" },
+        capabilities: { logs: true, shell: true },
+      },
+      {
+        summary: { platform: "ios", serial: "ios-udid", state: "device", model: "iPhone15,2" },
+        detail: { serial: "ios-udid", os_version: "17.4", trust_status: "trusted" },
+        capabilities: { logs: true, crash_reports: true, shell: false },
+      },
+    ];
+
+    const incoming: DeviceInfo[] = [
+      {
+        summary: { platform: "android", serial: "emulator-5554", state: "device" },
+        detail: null,
+        capabilities: { logs: true, shell: true },
+      },
+    ];
+
+    const merged = mergeDeviceDetails(current, incoming, {
+      preserveMissingDetail: true,
+      preserveMissingPlatforms: ["ios"],
+    });
+
+    expect(merged.map((device) => device.summary.serial)).toEqual(["emulator-5554", "ios-udid"]);
+    expect(merged[0].detail?.android_version).toBe("14");
+    expect(merged[0].capabilities?.shell).toBe(true);
+    expect(merged[1].summary.platform).toBe("ios");
+    expect(merged[1].capabilities?.crash_reports).toBe(true);
   });
 
   it("applies detail patches only to targeted devices", () => {
@@ -222,6 +264,126 @@ describe("deviceUtils", () => {
     expect(filterDevicesBySearch(devices, "ALPHA")).toEqual([devices[0]]);
     expect(filterDevicesBySearch(devices, "pixel")).toEqual([devices[0]]);
     expect(filterDevicesBySearch(devices, "  nexus  ")).toEqual([devices[1]]);
+  });
+
+  it("formats iOS device platform fields and capabilities", () => {
+    const device: DeviceInfo = {
+      summary: {
+        platform: "ios",
+        serial: "00008030-001C195E0E82802E",
+        state: "device",
+        model: "iPhone15,2",
+      },
+      detail: {
+        serial: "00008030-001C195E0E82802E",
+        device_name: "Lab iPhone",
+        os_version: "17.4",
+        product_type: "iPhone15,2",
+        trust_status: "trusted",
+      },
+      capabilities: {
+        logs: true,
+        crash_reports: true,
+        shell: false,
+        install_app: false,
+      },
+    };
+
+    expect(getDevicePlatform(device)).toBe("ios");
+    expect(formatPrimaryDeviceLabel(device.summary.serial, device)).toBe(
+      "Lab iPhone (00008030-001C195E0E82802E)",
+    );
+    expect(formatDevicePlatformLabel(device)).toBe("iOS 17.4");
+    expect(formatDeviceApiLabel(device)).toBe("iPhone15,2");
+    expect(hasDeviceCapability(device, "logs")).toBe(true);
+    expect(hasDeviceCapability(device, "shell")).toBe(false);
+    expect(filterDevicesBySearch([device], "iphone")).toEqual([device]);
+    expect(formatDeviceInfoMarkdown(device)).toContain("**Platform:** iOS");
+    expect(buildDeviceInfoCopyItems(device).map((item) => item.id)).toContain("trust");
+  });
+
+  it("builds Linux iOS tool guidance without treating devicectl as required", () => {
+    expect(resolveHostOs("Linux x86_64", "Mozilla/5.0")).toBe("linux");
+
+    const rows = buildIosToolGuidanceRows(
+      {
+        devicectl: {
+          available: false,
+          command_path: "xcrun devicectl",
+          version_output: "",
+          error: "devicectl was not found by xcrun",
+        },
+        idevice_id: {
+          available: true,
+          command_path: "idevice_id",
+          version_output: "idevice_id 1.4.0",
+        },
+        ideviceinfo: {
+          available: false,
+          command_path: "ideviceinfo",
+          version_output: "",
+          error: "command not found",
+        },
+        idevicesyslog: {
+          available: false,
+          command_path: "idevicesyslog",
+          version_output: "",
+          error: "command not found",
+        },
+        idevicecrashreport: {
+          available: false,
+          command_path: "idevicecrashreport",
+          version_output: "",
+          error: "command not found",
+        },
+      },
+      "linux",
+    );
+
+    expect(rows.find((row) => row.id === "devicectl")?.status).toBe("not_required");
+    expect(rows.find((row) => row.id === "devicectl")?.detail).toContain("macOS-only");
+    expect(rows.find((row) => row.id === "usbmuxd")?.role).toBe("required");
+    expect(rows.find((row) => row.id === "idevice_id")?.status).toBe("available");
+    expect(rows.find((row) => row.id === "ideviceinfo")?.status).toBe("missing");
+  });
+
+  it("selects only online iOS devices with crash report capability for export", () => {
+    const devices: DeviceInfo[] = [
+      {
+        summary: { platform: "ios", serial: "ios-ready", state: "device" },
+        detail: null,
+        capabilities: { crash_reports: true },
+      },
+      {
+        summary: { platform: "ios", serial: "ios-no-crash-tool", state: "device" },
+        detail: null,
+        capabilities: { crash_reports: false },
+      },
+      {
+        summary: { platform: "ios", serial: "ios-offline", state: "offline" },
+        detail: null,
+        capabilities: { crash_reports: true },
+      },
+      {
+        summary: { platform: "android", serial: "android-ready", state: "device" },
+        detail: null,
+        capabilities: { crash_reports: true },
+      },
+    ];
+
+    expect(getIosCrashReportEligibleSerials(devices)).toEqual(["ios-ready"]);
+  });
+
+  it("splits monitoring serials by platform and treats unknown serials as Android", () => {
+    const devices: DeviceInfo[] = [
+      { summary: { platform: "android", serial: "android-1", state: "device" }, detail: null },
+      { summary: { platform: "ios", serial: "ios-1", state: "device" }, detail: null },
+    ];
+
+    expect(splitDeviceSerialsByPlatform(devices, ["ios-1", "android-1", "missing"])).toEqual({
+      android: ["android-1", "missing"],
+      ios: ["ios-1"],
+    });
   });
 
   it("selects serials by group, keeping device order and supporting all-devices preset", () => {

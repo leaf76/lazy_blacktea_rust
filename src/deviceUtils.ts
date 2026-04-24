@@ -1,10 +1,21 @@
-import type { AppConfig, DeviceDetail, DeviceInfo } from "./types";
+import type { AppConfig, DeviceDetail, DeviceInfo, DevicePlatform, IosToolsInfo } from "./types";
 import { formatBytes } from "./perf";
 
 type DeviceDetailPatch = Partial<Omit<DeviceDetail, "serial">>;
 type DeviceValue = string | number | boolean | null | undefined;
 type ConnectivityFlagKey = "wifi_is_on" | "bt_is_on";
 type TopbarTone = "ok" | "error" | "warn";
+export type HostOs = "linux" | "macos" | "windows" | "unknown";
+export type IosToolGuidanceStatus = "available" | "missing" | "not_required" | "not_checked";
+export type IosToolGuidanceRole = "required" | "optional" | "macos_only";
+export type IosToolGuidanceRow = {
+  id: keyof IosToolsInfo | "usbmuxd";
+  label: string;
+  status: IosToolGuidanceStatus;
+  role: IosToolGuidanceRole;
+  detail: string;
+  error?: string | null;
+};
 export type DeviceQuickMenuSource = "device_manager" | "quick_actions" | "task";
 export type DeviceContextMenuScopeKind = "single" | "multi";
 export type DeviceContextActionId =
@@ -19,6 +30,7 @@ export type DeviceContextActionId =
   | "bluetooth_enable"
   | "bluetooth_disable"
   | "logcat_clear"
+  | "ios_crash_reports"
   | "mirror"
   | "apk_installer";
 export type DeviceContextActionSectionId =
@@ -113,6 +125,158 @@ const formatDeviceValue = (value: DeviceValue): string => {
   return String(value);
 };
 
+export const resolveHostOs = (platform = "", userAgent = ""): HostOs => {
+  const value = `${platform} ${userAgent}`.toLowerCase();
+  if (value.includes("linux")) {
+    return "linux";
+  }
+  if (value.includes("mac") || value.includes("darwin")) {
+    return "macos";
+  }
+  if (value.includes("win")) {
+    return "windows";
+  }
+  return "unknown";
+};
+
+const toGuidanceStatus = (available: boolean | undefined): IosToolGuidanceStatus => {
+  if (available === undefined) {
+    return "not_checked";
+  }
+  return available ? "available" : "missing";
+};
+
+export const buildIosToolGuidanceRows = (
+  tools: IosToolsInfo | null,
+  hostOs: HostOs,
+): IosToolGuidanceRow[] => {
+  const isLinux = hostOs === "linux";
+  const isMacos = hostOs === "macos";
+
+  return [
+    {
+      id: "devicectl",
+      label: "Xcode devicectl",
+      status: isLinux ? "not_required" : toGuidanceStatus(tools?.devicectl.available),
+      role: "macos_only",
+      detail: isLinux
+        ? "macOS-only; not required on Linux."
+        : "Use Xcode command line tools on macOS for Apple device discovery.",
+      error: tools?.devicectl.error,
+    },
+    {
+      id: "usbmuxd",
+      label: "usbmuxd service",
+      status: "not_checked",
+      role: isLinux ? "required" : "optional",
+      detail: isLinux
+        ? "Required on Ubuntu/Debian for USB communication with iOS devices."
+        : "Used by libimobiledevice for USB communication.",
+    },
+    {
+      id: "idevice_id",
+      label: "idevice_id",
+      status: toGuidanceStatus(tools?.idevice_id.available),
+      role: isLinux ? "required" : "optional",
+      detail: isLinux
+        ? "Required on Linux to list connected iOS device UDIDs."
+        : "Lists connected iOS device UDIDs through libimobiledevice.",
+      error: tools?.idevice_id.error,
+    },
+    {
+      id: "ideviceinfo",
+      label: "ideviceinfo",
+      status: toGuidanceStatus(tools?.ideviceinfo.available),
+      role: isLinux ? "required" : isMacos ? "optional" : "required",
+      detail: isLinux
+        ? "Required on Linux to read iPhone name, product type, iOS version, and trust state."
+        : "Reads iOS device details through libimobiledevice.",
+      error: tools?.ideviceinfo.error,
+    },
+    {
+      id: "idevicesyslog",
+      label: "idevicesyslog",
+      status: toGuidanceStatus(tools?.idevicesyslog.available),
+      role: "optional",
+      detail: "Optional; enables live iOS syslog in Logs.",
+      error: tools?.idevicesyslog.error,
+    },
+    {
+      id: "idevicecrashreport",
+      label: "idevicecrashreport",
+      status: toGuidanceStatus(tools?.idevicecrashreport.available),
+      role: "optional",
+      detail: "Optional; enables iOS crash report export.",
+      error: tools?.idevicecrashreport.error,
+    },
+  ];
+};
+
+export const getDevicePlatform = (device: DeviceInfo | null | undefined): DevicePlatform =>
+  device?.summary.platform ?? "android";
+
+export const hasDeviceCapability = (
+  device: DeviceInfo | null | undefined,
+  capability: keyof NonNullable<DeviceInfo["capabilities"]>,
+): boolean => {
+  const platform = getDevicePlatform(device);
+  const value = device?.capabilities?.[capability];
+  if (value != null) {
+    return value === true;
+  }
+  if (platform === "android") {
+    return capability !== "crash_reports";
+  }
+  return false;
+};
+
+export const getIosCrashReportEligibleSerials = (devices: DeviceInfo[]): string[] =>
+  devices
+    .filter(
+      (device) =>
+        device.summary.state === "device" &&
+        getDevicePlatform(device) === "ios" &&
+        hasDeviceCapability(device, "crash_reports"),
+    )
+    .map((device) => device.summary.serial);
+
+export const splitDeviceSerialsByPlatform = (
+  devices: DeviceInfo[],
+  serials: string[],
+): { android: string[]; ios: string[] } => {
+  const platformBySerial = new Map(
+    devices.map((device) => [device.summary.serial, getDevicePlatform(device)] as const),
+  );
+  return serials.reduce(
+    (acc, serial) => {
+      if (platformBySerial.get(serial) === "ios") {
+        acc.ios.push(serial);
+      } else {
+        acc.android.push(serial);
+      }
+      return acc;
+    },
+    { android: [] as string[], ios: [] as string[] },
+  );
+};
+
+export const formatDevicePlatformLabel = (device: DeviceInfo): string => {
+  const platform = getDevicePlatform(device);
+  if (platform === "ios") {
+    const version = device.detail?.os_version;
+    return version ? `iOS ${version}` : "iOS --";
+  }
+  const version = device.detail?.android_version ?? device.detail?.os_version;
+  return version ? `Android ${version}` : "Android --";
+};
+
+export const formatDeviceApiLabel = (device: DeviceInfo): string => {
+  if (getDevicePlatform(device) === "ios") {
+    return device.detail?.product_type ?? device.summary.product ?? "Apple device";
+  }
+  return device.detail?.api_level ? `API ${device.detail.api_level}` : "API --";
+};
+
 export const resolveSelectedSerials = (previous: string[], devices: DeviceInfo[]): string[] => {
   if (!devices.length) {
     return [];
@@ -138,7 +302,8 @@ export const formatPrimaryDeviceLabel = (
   if (!serial) {
     return "Unknown device";
   }
-  const name = device?.detail?.model ?? device?.summary.model ?? "";
+  const name =
+    device?.detail?.device_name ?? device?.detail?.model ?? device?.summary.model ?? "";
   if (!name || name === serial) {
     return serial;
   }
@@ -168,12 +333,16 @@ export const setPrimarySelection = (previous: string[], serial: string): string[
 export const formatDeviceInfoMarkdown = (device: DeviceInfo): string => {
   const detail = device.detail;
   const lines = [
+    `- **Platform:** ${getDevicePlatform(device) === "ios" ? "iOS" : "Android"}`,
     `- **Serial:** ${formatDeviceValue(device.summary.serial)}`,
     `- **State:** ${formatDeviceValue(device.summary.state)}`,
-    `- **Name:** ${formatDeviceValue(detail?.name)}`,
+    `- **Name:** ${formatDeviceValue(detail?.device_name ?? detail?.name)}`,
     `- **Brand:** ${formatDeviceValue(detail?.brand)}`,
     `- **Model:** ${formatDeviceValue(detail?.model ?? device.summary.model)}`,
     `- **Serial Number:** ${formatDeviceValue(detail?.serial_number)}`,
+    `- **OS:** ${formatDeviceValue(detail?.os_version ?? detail?.android_version)}`,
+    `- **Product Type:** ${formatDeviceValue(detail?.product_type ?? device.summary.product)}`,
+    `- **Trust:** ${formatDeviceValue(detail?.trust_status)}`,
     `- **Android:** ${formatDeviceValue(detail?.android_version)}`,
     `- **API:** ${formatDeviceValue(detail?.api_level)}`,
     `- **Processor:** ${formatDeviceValue(detail?.processor)}`,
@@ -196,13 +365,17 @@ export const buildDeviceInfoCopyItems = (device: DeviceInfo): DeviceInfoCopyItem
   const detail = device.detail;
   return [
     { id: "all", label: "All Device Info", value: formatDeviceInfoMarkdown(device) },
+    { id: "platform", label: "Platform", value: getDevicePlatform(device) === "ios" ? "iOS" : "Android" },
     { id: "serial", label: "Serial", value: formatDeviceValue(device.summary.serial) },
     { id: "state", label: "State", value: formatDeviceValue(device.summary.state) },
-    { id: "name", label: "Name", value: formatDeviceValue(detail?.name) },
+    { id: "name", label: "Name", value: formatDeviceValue(detail?.device_name ?? detail?.name) },
     { id: "brand", label: "Brand", value: formatDeviceValue(detail?.brand) },
     { id: "model", label: "Model", value: formatDeviceValue(detail?.model ?? device.summary.model) },
     { id: "serial_number", label: "Serial Number", value: formatDeviceValue(detail?.serial_number) },
     { id: "android", label: "Android", value: formatDeviceValue(detail?.android_version) },
+    { id: "os", label: "OS", value: formatDeviceValue(detail?.os_version ?? detail?.android_version) },
+    { id: "product_type", label: "Product Type", value: formatDeviceValue(detail?.product_type) },
+    { id: "trust", label: "Trust", value: formatDeviceValue(detail?.trust_status) },
     { id: "api", label: "API", value: formatDeviceValue(detail?.api_level) },
     { id: "processor", label: "Processor", value: formatDeviceValue(detail?.processor) },
     { id: "resolution", label: "Resolution", value: formatDeviceValue(detail?.resolution) },
@@ -226,9 +399,10 @@ export const buildDeviceInfoCopyItems = (device: DeviceInfo): DeviceInfoCopyItem
 export const mergeDeviceDetails = (
   current: DeviceInfo[],
   incoming: DeviceInfo[],
-  options: { preserveMissingDetail?: boolean } = {},
+  options: { preserveMissingDetail?: boolean; preserveMissingPlatforms?: DevicePlatform[] } = {},
 ): DeviceInfo[] => {
-  if (!incoming.length) {
+  const preserveMissingPlatforms = new Set(options.preserveMissingPlatforms ?? []);
+  if (!incoming.length && preserveMissingPlatforms.size === 0) {
     return [];
   }
   if (!current.length) {
@@ -238,13 +412,25 @@ export const mergeDeviceDetails = (
   const currentBySerial = new Map(current.map((device) => [device.summary.serial, device]));
   const preserveMissingDetail = options.preserveMissingDetail ?? false;
 
-  return incoming.map((device) => {
+  const incomingSerials = new Set(incoming.map((device) => device.summary.serial));
+  const merged: DeviceInfo[] = incoming.map((device) => {
     const existing = currentBySerial.get(device.summary.serial);
     return {
       summary: device.summary,
       detail: device.detail ?? (preserveMissingDetail ? existing?.detail : null) ?? null,
+      capabilities: device.capabilities ?? existing?.capabilities ?? null,
     };
   });
+
+  if (preserveMissingPlatforms.size > 0) {
+    current.forEach((device) => {
+      if (!incomingSerials.has(device.summary.serial) && preserveMissingPlatforms.has(getDevicePlatform(device))) {
+        merged.push(device);
+      }
+    });
+  }
+
+  return merged;
 };
 
 export const applyDeviceDetailPatch = (
@@ -283,7 +469,14 @@ export const filterDevicesBySearch = (devices: DeviceInfo[], searchText: string)
   return devices.filter((device) => {
     const serial = device.summary.serial;
     const model = device.detail?.model ?? device.summary.model ?? "";
-    return serial.toLowerCase().includes(search) || model.toLowerCase().includes(search);
+    const name = device.detail?.device_name ?? device.detail?.name ?? "";
+    const platform = getDevicePlatform(device);
+    return (
+      serial.toLowerCase().includes(search) ||
+      model.toLowerCase().includes(search) ||
+      name.toLowerCase().includes(search) ||
+      platform.toLowerCase().includes(search)
+    );
   });
 };
 

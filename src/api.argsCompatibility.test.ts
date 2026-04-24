@@ -85,6 +85,24 @@ describe("api command args compatibility", () => {
     );
   });
 
+  it("sends trace args for checkIosTools", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: null });
+
+    const { checkIosTools } = await import("./api");
+    await checkIosTools();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "check_ios_tools",
+      expect.objectContaining({
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
+
   it("sends both snake_case and camelCase keys for startNetProfiler pinnedUids", async () => {
     const invokeMock = invoke as unknown as {
       mockResolvedValue: (value: unknown) => void;
@@ -147,6 +165,64 @@ describe("api command args compatibility", () => {
       "get_logcat_status",
       expect.objectContaining({
         serial: "emulator-5554",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
+
+  it("sends trace args for iOS syslog commands", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: true });
+
+    const { startIosSyslog, stopIosSyslog, getIosSyslogStatus } = await import("./api");
+    await startIosSyslog("ios-udid");
+    await stopIosSyslog("ios-udid");
+    await getIosSyslogStatus("ios-udid");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "start_ios_syslog",
+      expect.objectContaining({
+        serial: "ios-udid",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "stop_ios_syslog",
+      expect.objectContaining({
+        serial: "ios-udid",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "get_ios_syslog_status",
+      expect.objectContaining({
+        serial: "ios-udid",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+  });
+
+  it("sends both snake_case and camelCase keys for exportIosCrashReports", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: { stdout: "", stderr: "" } });
+
+    const { exportIosCrashReports } = await import("./api");
+    await exportIosCrashReports("ios-udid", "/tmp/crashes");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "export_ios_crash_reports",
+      expect.objectContaining({
+        serial: "ios-udid",
+        output_dir: "/tmp/crashes",
+        outputDir: "/tmp/crashes",
         trace_id: "trace-123",
         traceId: "trace-123",
       }),
