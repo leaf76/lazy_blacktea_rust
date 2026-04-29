@@ -230,9 +230,12 @@ import {
   type TaskCompletionNotice,
 } from "./taskNotificationRules";
 import {
+  DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS,
+  DEVICE_ITEM_INFO_FIELD_OPTIONS,
   applyGroupAssignment,
   applyDeviceDetailPatch,
   buildDeviceInfoCopyItems,
+  buildDeviceItemInfoFields,
   buildDeviceGroupOptions,
   buildIosToolGuidanceRows,
   buildTopbarOverview,
@@ -241,14 +244,13 @@ import {
   computeContextSubmenuLayout,
   filterDevicesBySearch,
   flattenDeviceGroups,
-  formatDeviceApiLabel,
-  formatDevicePlatformLabel,
   getIosConfigurationProfileEligibleSerials,
   getIosCrashReportEligibleSerials,
   formatPrimaryDeviceLabel,
   getDevicePlatform,
   hasDeviceCapability,
   mergeDeviceDetails,
+  normalizeDeviceItemInfoFieldIds,
   reduceSelectionToOne,
   resolveDeviceQuickMenuSelection,
   resolveHostOs,
@@ -259,6 +261,7 @@ import {
   withDeviceGroups,
   type DeviceContextActionId,
   type DeviceInfoCopyItem,
+  type DeviceItemInfoFieldId,
   type DeviceQuickMenuAction,
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
@@ -1661,6 +1664,7 @@ function App() {
   const developerOptionsSelectionSignatureRef = useRef<string | null>(null);
   type DeviceSelectionMode = "single" | "multi";
   const DEVICE_SELECTION_MODE_STORAGE_KEY = "lazy_blacktea_device_selection_mode_v1";
+  const DEVICE_ITEM_INFO_FIELDS_STORAGE_KEY = "lazy_blacktea_device_item_info_fields_v1";
   const [deviceSelectionMode, setDeviceSelectionMode] = useState<DeviceSelectionMode>(() => {
     try {
       const raw = localStorage.getItem(DEVICE_SELECTION_MODE_STORAGE_KEY);
@@ -1668,6 +1672,15 @@ function App() {
     } catch (error) {
       console.warn("Failed to load device selection mode from storage.", error);
       return "multi";
+    }
+  });
+  const [deviceItemInfoFieldIds, setDeviceItemInfoFieldIds] = useState<DeviceItemInfoFieldId[]>(() => {
+    try {
+      const raw = localStorage.getItem(DEVICE_ITEM_INFO_FIELDS_STORAGE_KEY);
+      return raw ? normalizeDeviceItemInfoFieldIds(JSON.parse(raw)) : [...DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS];
+    } catch (error) {
+      console.warn("Failed to load device item info fields from storage.", error);
+      return [...DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS];
     }
   });
   const [terminalBySerial, setTerminalBySerial] = useState<Record<string, TerminalDeviceState>>({});
@@ -2157,6 +2170,7 @@ function App() {
   const [profileInstalling, setProfileInstalling] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("connectivity");
+  const [activeDashboardCardId, setActiveDashboardCardId] = useState<DashboardCardId>("overview");
   const [dashboardConfigOpen, setDashboardConfigOpen] = useState(false);
   const [dashboardDraft, setDashboardDraft] = useState<DashboardSettings>(buildDefaultDashboardSettings());
   const [dashboardCopiedKey, setDashboardCopiedKey] = useState<string | null>(null);
@@ -2991,11 +3005,38 @@ function App() {
     }
   }, [DEVICE_SELECTION_MODE_STORAGE_KEY, deviceSelectionMode]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEVICE_ITEM_INFO_FIELDS_STORAGE_KEY, JSON.stringify(deviceItemInfoFieldIds));
+    } catch (error) {
+      console.warn("Failed to persist device item info fields to storage.", error);
+    }
+  }, [DEVICE_ITEM_INFO_FIELDS_STORAGE_KEY, deviceItemInfoFieldIds]);
+
   const handleSetDeviceSelectionMode = (mode: DeviceSelectionMode) => {
     setDeviceSelectionMode(mode);
     if (mode === "single") {
       setSelectedSerials((prev) => (prev.length > 0 ? [prev[0]] : []));
     }
+  };
+
+  const selectedDeviceItemInfoFieldSet = useMemo(
+    () => new Set(deviceItemInfoFieldIds),
+    [deviceItemInfoFieldIds],
+  );
+  const handleToggleDeviceItemInfoField = (fieldId: DeviceItemInfoFieldId, checked: boolean) => {
+    setDeviceItemInfoFieldIds((prev) => {
+      if (checked) {
+        return normalizeDeviceItemInfoFieldIds([...prev, fieldId]);
+      }
+      if (prev.length <= 1 && prev.includes(fieldId)) {
+        return prev;
+      }
+      return normalizeDeviceItemInfoFieldIds(prev.filter((item) => item !== fieldId));
+    });
+  };
+  const handleResetDeviceItemInfoFields = () => {
+    setDeviceItemInfoFieldIds([...DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS]);
   };
 
   const handleSelectActiveSerial = (serial: string) => {
@@ -3013,19 +3054,6 @@ function App() {
       return "warn";
     }
     return "warn";
-  };
-
-  const getBatteryTone = (level: number | null | undefined) => {
-    if (level == null) {
-      return "unknown";
-    }
-    if (level <= 20) {
-      return "error";
-    }
-    if (level <= 45) {
-      return "warn";
-    }
-    return "ok";
   };
 
   useEffect(() => {
@@ -12321,6 +12349,7 @@ function App() {
       {
         devices,
         selectedSerials,
+        dashboardSerials: devices.map((device) => device.summary.serial),
         activeSerial,
         runningTaskCount,
         selectedConnectedCount,
@@ -12329,8 +12358,54 @@ function App() {
       },
       dashboardSettings,
     );
+    const activeDashboardCard =
+      dashboardCards.find((card) => card.id === activeDashboardCardId) ?? dashboardCards[0] ?? null;
+    const visibleDashboardCards = activeDashboardCard ? [activeDashboardCard] : [];
     const primaryDeviceParts = resolveDashboardPrimaryDeviceParts(devices, selectedSerials, activeSerial);
     const editableCards = normalizeDashboardSettings(dashboardDraft).cards;
+    const dashboardDeviceSections = activeDashboardCard
+      ? devices
+          .map((device) => {
+            const serial = device.summary.serial;
+            const title = device.detail?.model ?? device.summary.model ?? serial;
+            const alias =
+              device.detail?.device_name && device.detail.device_name !== title
+                ? device.detail.device_name
+                : null;
+            const fields = activeDashboardCard.fields.flatMap((field) => {
+              const deviceValue = field.deviceValues?.find((item) => item.serial === serial);
+              return deviceValue ? [{ field, deviceValue }] : [];
+            });
+            return { serial, title, alias, state: device.summary.state, fields };
+          })
+          .filter((section) => section.fields.length > 0)
+      : [];
+    const handleDashboardTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || dashboardCards.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      const currentIndex = activeDashboardCard
+        ? dashboardCards.findIndex((card) => card.id === activeDashboardCard.id)
+        : 0;
+      const safeIndex = currentIndex >= 0 ? currentIndex : 0;
+      const nextIndex =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? dashboardCards.length - 1
+            : event.key === "ArrowLeft"
+              ? (safeIndex - 1 + dashboardCards.length) % dashboardCards.length
+              : (safeIndex + 1) % dashboardCards.length;
+      const nextCard = dashboardCards[nextIndex];
+
+      if (!nextCard) {
+        return;
+      }
+      setActiveDashboardCardId(nextCard.id);
+      event.currentTarget.querySelector<HTMLButtonElement>(`[data-dashboard-tab="${nextCard.id}"]`)?.focus();
+    };
     const handleCopyDashboardField = (card: DashboardCardView, field: DashboardCardView["fields"][number]) => {
       const key = `field:${card.id}:${field.id}`;
       const value = buildDashboardPlainValueText(field.value);
@@ -12376,6 +12451,12 @@ function App() {
       void copyDashboardText(serial, "Serial copied.", key);
     };
 
+    const handleCopyDashboardDeviceSerial = (serial: string) => {
+      const key = `device-serial:${serial}`;
+      const value = buildDashboardPlainValueText(serial);
+      void copyDashboardText(value, "Serial copied.", key);
+    };
+
     const handleCopyDashboardPrimaryName = () => {
       if (!primaryDeviceParts) {
         return;
@@ -12403,7 +12484,7 @@ function App() {
     };
 
     const handleCopyDashboardVisible = () => {
-      const markdown = buildDashboardVisibleMarkdown(dashboardCards, {
+      const markdown = buildDashboardVisibleMarkdown(visibleDashboardCards, {
         isFieldVariantVisible: isDashboardVariantVisible,
       });
       if (!markdown) {
@@ -12490,7 +12571,7 @@ function App() {
             <p className="muted">Overview and device health.</p>
           </div>
           <div className="page-actions">
-            <button onClick={handleCopyDashboardVisible} disabled={dashboardCards.length === 0}>
+            <button onClick={handleCopyDashboardVisible} disabled={visibleDashboardCards.length === 0}>
               {dashboardCopiedKey === "visible" ? "Copied" : "Copy Visible"}
             </button>
             <button className="ghost" onClick={openDashboardConfig} disabled={busy || !config}>
@@ -12504,7 +12585,7 @@ function App() {
         {selectedSerials.length === 0 && (
           <div className="inline-alert info">
             <strong>No devices selected</strong>
-            <span className="muted">Select one or more devices from the top device picker to populate dashboard cards.</span>
+            <span className="muted">Select one or more devices from the top device picker to set the operation target and primary device.</span>
           </div>
         )}
         <div className="dashboard-toolbar" role="status" aria-live="polite">
@@ -12524,11 +12605,55 @@ function App() {
           </div>
           <p className="muted">Click any value or copy button to copy that information.</p>
         </div>
+        {dashboardCards.length > 0 && (
+          <div
+            className="dashboard-tabs"
+            role="tablist"
+            aria-label="Dashboard sections"
+            onKeyDown={handleDashboardTabKeyDown}
+          >
+            {dashboardCards.map((card) => {
+              const isActiveTab = activeDashboardCard?.id === card.id;
+              return (
+                <button
+                  key={card.id}
+                  type="button"
+                  role="tab"
+                  id={`dashboard-tab-${card.id}`}
+                  className="dashboard-tab"
+                  aria-selected={isActiveTab}
+                  aria-controls={`dashboard-panel-${card.id}`}
+                  tabIndex={isActiveTab ? 0 : -1}
+                  data-dashboard-tab={card.id}
+                  onClick={() => setActiveDashboardCardId(card.id)}
+                >
+                  <span>{card.title}</span>
+                  <span className="badge">{card.fields.length}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="dashboard-grid">
-          {dashboardCards.map((card) => (
+          {visibleDashboardCards.length === 0 && (
+            <section className="panel card dashboard-info-card dashboard-tab-panel">
+              <div className="card-header dashboard-card-header">
+                <div>
+                  <h2>No dashboard sections enabled</h2>
+                  <p className="muted">Open Configure to enable at least one dashboard section.</p>
+                </div>
+              </div>
+            </section>
+          )}
+          {visibleDashboardCards.map((card) => (
             <section
               key={card.id}
-              className={`panel card dashboard-info-card ${dashboardCardClassMap[card.id] ?? ""}`}
+              id={`dashboard-panel-${card.id}`}
+              className={`panel card dashboard-info-card dashboard-tab-panel ${
+                dashboardCardClassMap[card.id] ?? ""
+              }`}
+              role="tabpanel"
+              aria-labelledby={`dashboard-tab-${card.id}`}
             >
               <div className="card-header dashboard-card-header">
                 <div>
@@ -12548,6 +12673,60 @@ function App() {
               </div>
               {card.fields.length === 0 ? (
                 <p className="muted">No fields enabled for this card. Open Configure to enable fields.</p>
+              ) : dashboardDeviceSections.length > 0 ? (
+                <div className="dashboard-device-sections">
+                  {dashboardDeviceSections.map((section) => (
+                    <article key={section.serial} className="dashboard-device-block">
+                      <div className="dashboard-device-block-header">
+                        <div className="dashboard-device-title">
+                          <strong>{section.title}</strong>
+                          {section.alias && <span className="dashboard-device-alias">{section.alias}</span>}
+                          <button
+                            type="button"
+                            className={`dashboard-device-serial ${dashboardCopiedKey === `device-serial:${section.serial}` ? "is-copied" : ""}`}
+                            onClick={() => handleCopyDashboardDeviceSerial(section.serial)}
+                            aria-label={`Copy serial ${section.serial}`}
+                          >
+                            {section.serial}
+                          </button>
+                        </div>
+                        <span className={`status-pill ${getDeviceTone(section.state)}`}>{section.state}</span>
+                      </div>
+                      <div className="dashboard-device-fields">
+                        {section.fields.map(({ field, deviceValue }) => {
+                          const variantCopyKey = `variant:${card.id}:${field.id}:${section.serial}`;
+                          const variantValueKey = `variant-value:${card.id}:${field.id}:${section.serial}`;
+                          const isVariantCopied =
+                            dashboardCopiedKey === variantCopyKey || dashboardCopiedKey === variantValueKey;
+                          return (
+                            <div
+                              key={field.id}
+                              className={`dashboard-device-field ${isVariantCopied ? "is-copied" : ""}`}
+                            >
+                              <span className="dashboard-device-field-label">{field.label}</span>
+                              <button
+                                type="button"
+                                className={`dashboard-device-field-value ${dashboardCopiedKey === variantValueKey ? "is-copied" : ""}`}
+                                onClick={() => handleCopyDashboardVariantValue(card, field, deviceValue)}
+                                aria-label={`Copy ${field.label} for ${section.serial}`}
+                              >
+                                {deviceValue.value}
+                              </button>
+                              <button
+                                type="button"
+                                className={`ghost dashboard-copy-button ${dashboardCopiedKey === variantCopyKey ? "is-copied" : ""}`}
+                                onClick={() => handleCopyDashboardVariant(card, field, deviceValue)}
+                                aria-label={`Copy ${field.label} value for ${section.serial}`}
+                              >
+                                {dashboardCopiedKey === variantCopyKey ? "Copied" : "Copy"}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </article>
+                  ))}
+                </div>
               ) : (
                 <div className="dashboard-fields-grid">
                   {card.fields.map((field) => {
@@ -15149,6 +15328,50 @@ function App() {
                                 Multi
                               </button>
                             </div>
+                            <details className="device-field-picker">
+                              <summary aria-label="Customize device item info fields">
+                                Fields
+                                <span className="badge">{deviceItemInfoFieldIds.length}</span>
+                              </summary>
+                              <div className="device-field-picker-menu">
+                                <div className="device-field-picker-header">
+                                  <strong>Item Info</strong>
+                                  <button
+                                    type="button"
+                                    className="ghost"
+                                    onClick={handleResetDeviceItemInfoFields}
+                                    disabled={
+                                      deviceItemInfoFieldIds.length === DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS.length &&
+                                      DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS.every(
+                                        (fieldId, index) => fieldId === deviceItemInfoFieldIds[index],
+                                      )
+                                    }
+                                  >
+                                    Reset
+                                  </button>
+                                </div>
+                                <div className="device-field-options">
+                                  {DEVICE_ITEM_INFO_FIELD_OPTIONS.map((field) => {
+                                    const checked = selectedDeviceItemInfoFieldSet.has(field.id);
+                                    const isLastChecked = checked && deviceItemInfoFieldIds.length <= 1;
+                                    return (
+                                      <label key={field.id} className="device-field-option">
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={isLastChecked}
+                                          title={isLastChecked ? "At least one field must remain visible." : undefined}
+                                          onChange={(event) =>
+                                            handleToggleDeviceItemInfoField(field.id, event.target.checked)
+                                          }
+                                        />
+                                        <span>{field.label}</span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </details>
                             <button onClick={selectAllVisible} disabled={busy}>
                               Select Visible
                             </button>
@@ -15168,7 +15391,7 @@ function App() {
                           <div className="device-list-header">
                             <span />
                             <span>Identity</span>
-                            <span>Capability</span>
+                            <span>Info</span>
                             <span>Status & Actions</span>
                           </div>
                           {visibleDevices.length === 0 ? (
@@ -15211,16 +15434,8 @@ function App() {
                                 detail?.name && detail.name !== modelLabel ? detail.name : serial;
                               const showSecondaryLabel = secondaryLabel !== modelLabel;
                               const showSerialMeta = serial !== modelLabel && serial !== secondaryLabel;
-                              const platformLabel = formatDevicePlatformLabel(device);
-                              const apiLabel = formatDeviceApiLabel(device);
-                              const trustLabel = detail?.trust_status;
+                              const itemInfoFields = buildDeviceItemInfoFields(device, deviceItemInfoFieldIds);
                               const groupLabel = groupMap[serial] ?? null;
-                              const wifi = detail?.wifi_is_on;
-                              const bt = detail?.bt_is_on;
-                              const batteryLevel = detail?.battery_level;
-                              const batteryPercent =
-                                batteryLevel == null ? 0 : Math.max(0, Math.min(100, batteryLevel));
-                              const batteryTone = getBatteryTone(batteryLevel);
                               const isSelected = selectedSerials.includes(serial);
                               const isActive = serial === activeSerial;
                               const stateTone = getDeviceTone(device.summary.state);
@@ -15288,35 +15503,15 @@ function App() {
                                     )}
                                   </div>
                                   <div className="device-cell device-capability">
-                                    <div className="device-platform">
-                                      <span>{platformLabel}</span>
-                                      <span className="muted">{apiLabel}</span>
-                                      {trustLabel && <span className="muted">Trust: {trustLabel}</span>}
-                                    </div>
-                                    <div className="device-radios">
-                                      <span
-                                        className={`status-icon ${wifi == null ? "unknown" : wifi ? "ok" : "off"}`}
-                                        title={wifi == null ? "WiFi Unknown" : wifi ? "WiFi On" : "WiFi Off"}
-                                      >
-                                        WiFi
-                                      </span>
-                                      <span
-                                        className={`status-icon ${bt == null ? "unknown" : bt ? "ok" : "off"}`}
-                                        title={bt == null ? "Bluetooth Unknown" : bt ? "Bluetooth On" : "Bluetooth Off"}
-                                      >
-                                        BT
-                                      </span>
-                                    </div>
-                                    <div className="device-battery">
-                                      <span className="device-battery-value">
-                                        {batteryLevel != null ? `${batteryLevel}%` : "--"}
-                                      </span>
-                                      <span className="device-battery-track" aria-hidden="true">
-                                        <span
-                                          className={`device-battery-fill ${batteryTone}`}
-                                          style={{ width: `${batteryPercent}%` }}
-                                        />
-                                      </span>
+                                    <div className="device-info-fields" aria-label={`${modelLabel} device info`}>
+                                      {itemInfoFields.map((field) => (
+                                        <span key={field.id} className={`device-info-field device-info-field-${field.id}`}>
+                                          <span className="device-info-label">{field.label}</span>
+                                          <span className="device-info-value" title={field.value}>
+                                            {field.value}
+                                          </span>
+                                        </span>
+                                      ))}
                                     </div>
                                   </div>
                                   <div className="device-cell device-status-actions">

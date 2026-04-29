@@ -153,6 +153,87 @@ describe("dashboardConfig", () => {
     expect(model?.variants).toHaveLength(2);
   });
 
+  it("uses dashboard serials for device details without changing selected primary summary", () => {
+    const devices: DeviceInfo[] = [
+      buildDevice("A", { detail: { serial: "A", model: "Pixel 8" } }),
+      buildDevice("B", {
+        summary: { serial: "B", state: "offline", model: "Pixel 9" },
+        detail: { serial: "B", model: "Pixel 9" },
+      }),
+    ];
+
+    const cards = buildDashboardCardViews(
+      {
+        devices,
+        selectedSerials: ["A"],
+        dashboardSerials: ["A", "B"],
+        activeSerial: "A",
+        runningTaskCount: 0,
+        selectedConnectedCount: 1,
+        adbAvailable: true,
+        scrcpyAvailable: true,
+      },
+      undefined,
+    );
+
+    const overview = cards.find((card) => card.id === "overview");
+    const profile = cards.find((card) => card.id === "device_profile");
+    const selected = overview?.fields.find((field) => field.id === "selected_count");
+    const primary = overview?.fields.find((field) => field.id === "primary_device");
+    const online = overview?.fields.find((field) => field.id === "online_count");
+    const offline = overview?.fields.find((field) => field.id === "offline_count");
+    const model = profile?.fields.find((field) => field.id === "model");
+
+    expect(selected?.value).toBe("1");
+    expect(primary?.value).toBe("Pixel 8 (A)");
+    expect(online?.value).toBe("1");
+    expect(offline?.value).toBe("1");
+    expect(model?.value).toBe("2 variants");
+    expect(model?.variants).toEqual([
+      { serial: "A", value: "Pixel 8" },
+      { serial: "B", value: "Pixel 9" },
+    ]);
+    expect(model?.deviceValues).toEqual([
+      { serial: "A", value: "Pixel 8" },
+      { serial: "B", value: "Pixel 9" },
+    ]);
+  });
+
+  it("keeps per-device field values even when the aggregate value is not a variant", () => {
+    const devices: DeviceInfo[] = [
+      buildDevice("A", {
+        detail: { serial: "A", model: "Pixel 8", android_version: "15" },
+      }),
+      buildDevice("B", {
+        detail: { serial: "B", model: "Pixel 9", android_version: "15" },
+      }),
+    ];
+
+    const cards = buildDashboardCardViews(
+      {
+        devices,
+        selectedSerials: ["A"],
+        dashboardSerials: ["A", "B"],
+        activeSerial: "A",
+        runningTaskCount: 0,
+        selectedConnectedCount: 1,
+        adbAvailable: true,
+        scrcpyAvailable: true,
+      },
+      undefined,
+    );
+
+    const profile = cards.find((card) => card.id === "device_profile");
+    const android = profile?.fields.find((field) => field.id === "android_version");
+
+    expect(android?.value).toBe("15");
+    expect(android?.variants).toEqual([]);
+    expect(android?.deviceValues).toEqual([
+      { serial: "A", value: "15" },
+      { serial: "B", value: "15" },
+    ]);
+  });
+
   it("supports disabling fields through toggle", () => {
     const defaults = buildDefaultDashboardSettings();
     const next = toggleDashboardField(defaults, "overview", "running_tasks", false);

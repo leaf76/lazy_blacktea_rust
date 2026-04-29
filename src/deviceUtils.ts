@@ -69,6 +69,11 @@ export type DeviceInfoCopyItem = {
   label: string;
   value: string;
 };
+export type DeviceItemInfoField = {
+  id: DeviceItemInfoFieldId;
+  label: string;
+  value: string;
+};
 export type DeviceGroupOption = {
   name: string;
   count: number;
@@ -321,6 +326,92 @@ export const formatDeviceApiLabel = (device: DeviceInfo): string => {
     return device.detail?.product_type ?? device.summary.product ?? "Apple device";
   }
   return device.detail?.api_level ? `API ${device.detail.api_level}` : "API --";
+};
+
+export const DEVICE_ITEM_INFO_FIELD_OPTIONS = [
+  { id: "platform", label: "Platform" },
+  { id: "api", label: "API / Type" },
+  { id: "trust", label: "Trust" },
+  { id: "battery", label: "Battery" },
+  { id: "wifi", label: "WiFi" },
+  { id: "bluetooth", label: "Bluetooth" },
+  { id: "storage", label: "Storage" },
+  { id: "memory", label: "Memory" },
+  { id: "brand", label: "Brand" },
+  { id: "processor", label: "Processor" },
+  { id: "resolution", label: "Resolution" },
+  { id: "gms", label: "GMS" },
+] as const;
+
+export type DeviceItemInfoFieldId = (typeof DEVICE_ITEM_INFO_FIELD_OPTIONS)[number]["id"];
+
+export const DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS: DeviceItemInfoFieldId[] = [
+  "platform",
+  "api",
+  "gms",
+  "battery",
+  "wifi",
+  "bluetooth",
+];
+
+const DEVICE_ITEM_INFO_FIELD_ID_SET = new Set<DeviceItemInfoFieldId>(
+  DEVICE_ITEM_INFO_FIELD_OPTIONS.map((field) => field.id),
+);
+
+export const normalizeDeviceItemInfoFieldIds = (input: unknown): DeviceItemInfoFieldId[] => {
+  const raw = Array.isArray(input) ? input : DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS;
+  const normalized: DeviceItemInfoFieldId[] = [];
+
+  raw.forEach((item) => {
+    if (
+      typeof item === "string" &&
+      DEVICE_ITEM_INFO_FIELD_ID_SET.has(item as DeviceItemInfoFieldId) &&
+      !normalized.includes(item as DeviceItemInfoFieldId)
+    ) {
+      normalized.push(item as DeviceItemInfoFieldId);
+    }
+  });
+
+  return normalized.length > 0 ? normalized : [...DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS];
+};
+
+export const buildDeviceItemInfoFields = (
+  device: DeviceInfo,
+  fieldIds: DeviceItemInfoFieldId[] = DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS,
+): DeviceItemInfoField[] => {
+  const detail = device.detail;
+  const fields: Record<DeviceItemInfoFieldId, DeviceItemInfoField> = {
+    platform: { id: "platform", label: "Platform", value: formatDevicePlatformLabel(device) },
+    api: {
+      id: "api",
+      label: getDevicePlatform(device) === "ios" ? "Type" : "API",
+      value: formatDeviceApiLabel(device),
+    },
+    trust: { id: "trust", label: "Trust", value: formatDeviceValue(detail?.trust_status) },
+    battery: {
+      id: "battery",
+      label: "Battery",
+      value: detail?.battery_level != null ? `${detail.battery_level}%` : "Unknown",
+    },
+    wifi: { id: "wifi", label: "WiFi", value: formatDeviceValue(detail?.wifi_is_on) },
+    bluetooth: { id: "bluetooth", label: "Bluetooth", value: formatDeviceValue(detail?.bt_is_on) },
+    storage: {
+      id: "storage",
+      label: "Storage",
+      value: detail?.storage_total_bytes != null ? formatBytes(detail.storage_total_bytes) : "Unknown",
+    },
+    memory: {
+      id: "memory",
+      label: "Memory",
+      value: detail?.memory_total_bytes != null ? formatBytes(detail.memory_total_bytes) : "Unknown",
+    },
+    brand: { id: "brand", label: "Brand", value: formatDeviceValue(detail?.brand) },
+    processor: { id: "processor", label: "Processor", value: formatDeviceValue(detail?.processor) },
+    resolution: { id: "resolution", label: "Resolution", value: formatDeviceValue(detail?.resolution) },
+    gms: { id: "gms", label: "GMS", value: formatDeviceValue(detail?.gms_version) },
+  };
+
+  return normalizeDeviceItemInfoFieldIds(fieldIds).map((fieldId) => fields[fieldId]);
 };
 
 export const resolveSelectedSerials = (previous: string[], devices: DeviceInfo[]): string[] => {

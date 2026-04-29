@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS,
   buildDeviceInfoCopyItems,
+  buildDeviceItemInfoFields,
   buildIosToolGuidanceRows,
   applyGroupAssignment,
   applyDeviceDetailPatch,
@@ -23,6 +25,7 @@ import {
   getIosCrashReportEligibleSerials,
   hasDeviceCapability,
   mergeDeviceDetails,
+  normalizeDeviceItemInfoFieldIds,
   reduceSelectionToOne,
   resolveDeviceQuickMenuSelection,
   resolveHostOs,
@@ -237,6 +240,37 @@ describe("deviceUtils", () => {
     expect(items).toContainEqual({ id: "memory", label: "Memory", value: "8.00 GB" });
     expect(items).toContainEqual({ id: "wifi", label: "WiFi", value: "On" });
     expect(items).toContainEqual({ id: "bluetooth", label: "Bluetooth", value: "Off" });
+  });
+
+  it("normalizes device item info field ids for stored preferences", () => {
+    expect(DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS).toEqual(["platform", "api", "gms", "battery", "wifi", "bluetooth"]);
+    expect(normalizeDeviceItemInfoFieldIds(["wifi", "api", "wifi", "missing"])).toEqual(["wifi", "api"]);
+    expect(normalizeDeviceItemInfoFieldIds(["missing"])).toEqual(DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS);
+    expect(normalizeDeviceItemInfoFieldIds("wifi")).toEqual(DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS);
+  });
+
+  it("builds customizable device item info fields in the requested order", () => {
+    const device: DeviceInfo = {
+      summary: { serial: "alpha", state: "device", model: "Pixel" },
+      detail: {
+        serial: "alpha",
+        brand: "google",
+        android_version: "15",
+        api_level: "35",
+        battery_level: 88,
+        wifi_is_on: true,
+        bt_is_on: false,
+        storage_total_bytes: 137_438_953_472,
+        memory_total_bytes: 8 * 1024 * 1024 * 1024,
+      },
+    };
+
+    expect(buildDeviceItemInfoFields(device, ["storage", "wifi", "battery", "api"])).toEqual([
+      { id: "storage", label: "Storage", value: "128 GB" },
+      { id: "wifi", label: "WiFi", value: "On" },
+      { id: "battery", label: "Battery", value: "88%" },
+      { id: "api", label: "API", value: "API 35" },
+    ]);
   });
 
   it("reduces selection to one device while keeping the primary when possible", () => {

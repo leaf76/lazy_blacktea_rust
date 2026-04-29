@@ -1455,6 +1455,10 @@ textarea {
   grid-column: span 4;
 }
 
+.dashboard-tab-panel {
+  grid-column: span 12;
+}
+
 .dashboard-toolbar {
   border: 1px solid var(--dashboard-hero-border);
   border-radius: 12px;
@@ -1491,6 +1495,46 @@ textarea {
 .dashboard-toolbar-stat span {
   font-size: 11px;
   color: var(--color-text-muted);
+}
+
+.dashboard-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.dashboard-tab {
+  min-height: 36px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--surface-panel-bg);
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.dashboard-tab[aria-selected="true"] {
+  background: var(--surface-active-bg);
+  border-color: var(--nav-active-border);
+  color: var(--nav-active-text);
+  font-weight: 600;
+}
+
+.dashboard-tab:hover {
+  background: var(--surface-subtle-bg);
+}
+
+.dashboard-tab[aria-selected="true"]:hover {
+  background: var(--surface-active-bg);
+}
+
+.dashboard-tab:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .dashboard-page .page-actions > button:first-child {
@@ -1598,6 +1642,142 @@ textarea {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.dashboard-device-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-device-block {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--surface-subtle-bg), var(--surface-panel-bg));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.dashboard-device-block-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dashboard-device-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dashboard-device-title strong {
+  display: block;
+  min-width: 0;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-device-alias {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-device-serial {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-code);
+  font-size: 11px;
+  line-height: 1.3;
+  min-width: 0;
+  padding: 2px 4px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-device-serial:hover {
+  border-color: var(--dashboard-hero-border);
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.dashboard-device-serial:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.dashboard-device-serial.is-copied {
+  color: var(--color-success);
+}
+
+.dashboard-device-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.dashboard-device-field {
+  display: grid;
+  grid-template-columns: minmax(78px, 0.75fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--surface-panel-bg);
+}
+
+.dashboard-device-field.is-copied {
+  border-color: rgba(22, 163, 74, 0.45);
+  box-shadow: 0 0 0 1px rgba(22, 163, 74, 0.25);
+}
+
+.dashboard-device-field-label {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  line-height: 1.25;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-device-field-value {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 1.35;
+  min-width: 0;
+  padding: 3px 5px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.dashboard-device-field-value:hover {
+  border-color: var(--dashboard-hero-border);
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.dashboard-device-field-value:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.dashboard-device-field-value.is-copied {
+  color: var(--color-success);
 }
 
 .dashboard-variants {
@@ -2011,6 +2191,8 @@ textarea {
   border-radius: 12px;
   border: 1px solid var(--color-border);
   background: var(--surface-subtle-bg);
+  position: relative;
+  z-index: 3;
 }
 
 .device-filter-main {
@@ -2036,6 +2218,8 @@ textarea {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  position: relative;
+  z-index: 4;
 }
 
 .device-selection-toggle {
@@ -2050,6 +2234,80 @@ textarea {
 .device-selection-count {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.device-field-picker {
+  position: relative;
+  flex: 0 0 auto;
+  z-index: 5;
+}
+
+.device-field-picker summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.device-field-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+.device-field-picker[open] summary {
+  border-color: var(--nav-active-border);
+  background: var(--surface-active-bg);
+}
+
+.device-field-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 6;
+  width: min(260px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--surface-panel-bg);
+  box-shadow: var(--shadow-card);
+}
+
+.device-field-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.device-field-picker-header .ghost {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.device-field-options {
+  display: grid;
+  gap: 6px;
+}
+
+.device-field-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  font-size: 12px;
+  color: var(--color-text);
+}
+
+.device-field-option input {
+  margin: 0;
 }
 
 .device-list {
@@ -2268,6 +2526,43 @@ button.ghost.icon-only {
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   min-width: 0;
+}
+
+.device-info-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 10px;
+  min-width: 0;
+}
+
+.device-info-field {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.device-info-label {
+  flex: 0 0 auto;
+  max-width: 86px;
+  color: var(--color-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-info-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+  font-weight: 600;
 }
 
 .device-platform {
@@ -2629,6 +2924,11 @@ button.ghost.icon-only {
   .device-filter-actions {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .device-field-picker-menu {
+    left: 0;
+    right: auto;
   }
 
   .device-group-card {
@@ -6718,6 +7018,23 @@ textarea:disabled {
 
   .dashboard-page .page-actions > button {
     flex: 1 1 160px;
+  }
+
+  .dashboard-device-sections {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-device-block-header {
+    flex-wrap: wrap;
+  }
+
+  .dashboard-device-field {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .dashboard-device-field .dashboard-copy-button {
+    justify-self: flex-start;
   }
 
   .dashboard-variant-row {

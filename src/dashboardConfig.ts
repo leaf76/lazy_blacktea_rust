@@ -18,6 +18,7 @@ export type DashboardFieldView = {
   label: string;
   value: string;
   variants: DashboardValueVariant[];
+  deviceValues?: DashboardValueVariant[];
 };
 
 export type DashboardCardView = {
@@ -30,6 +31,7 @@ export type DashboardCardView = {
 export type DashboardAggregationInput = {
   devices: DeviceInfo[];
   selectedSerials: string[];
+  dashboardSerials?: string[];
   activeSerial?: string | null;
   runningTaskCount: number;
   selectedConnectedCount: number;
@@ -328,21 +330,22 @@ export const resolveDashboardPrimaryDeviceParts = (
 const aggregateSelectedValues = (
   selectedDevices: DeviceInfo[],
   resolver: (device: DeviceInfo) => string,
-): { value: string; variants: DashboardValueVariant[] } => {
+): { value: string; variants: DashboardValueVariant[]; deviceValues: DashboardValueVariant[] } => {
   if (!selectedDevices.length) {
-    return { value: "--", variants: [] };
+    return { value: "--", variants: [], deviceValues: [] };
   }
-  const variants = selectedDevices.map((device) => ({
+  const deviceValues = selectedDevices.map((device) => ({
     serial: device.summary.serial,
     value: resolver(device),
   }));
-  const uniqueValues = Array.from(new Set(variants.map((item) => item.value)));
+  const uniqueValues = Array.from(new Set(deviceValues.map((item) => item.value)));
   if (uniqueValues.length <= 1) {
-    return { value: uniqueValues[0] ?? "--", variants: [] };
+    return { value: uniqueValues[0] ?? "--", variants: [], deviceValues };
   }
   return {
     value: `${uniqueValues.length} variants`,
-    variants,
+    variants: deviceValues,
+    deviceValues,
   };
 };
 
@@ -363,11 +366,13 @@ const buildFieldValue = (
   fieldId: DashboardFieldId,
   input: DashboardAggregationInput,
   selectedDevices: DeviceInfo[],
-): { value: string; variants: DashboardValueVariant[] } => {
+  dashboardDevices: DeviceInfo[],
+): { value: string; variants: DashboardValueVariant[]; deviceValues?: DashboardValueVariant[] } => {
   const selectedCount = selectedDevices.length;
-  const onlineCount = selectedDevices.filter((device) => device.summary.state === "device").length;
-  const unauthorizedCount = selectedDevices.filter((device) => device.summary.state === "unauthorized").length;
-  const offlineCount = selectedDevices.filter((device) => device.summary.state === "offline").length;
+  const selectedOnlineCount = selectedDevices.filter((device) => device.summary.state === "device").length;
+  const onlineCount = dashboardDevices.filter((device) => device.summary.state === "device").length;
+  const unauthorizedCount = dashboardDevices.filter((device) => device.summary.state === "unauthorized").length;
+  const offlineCount = dashboardDevices.filter((device) => device.summary.state === "offline").length;
 
   switch (fieldId) {
     case "selected_count":
@@ -383,39 +388,39 @@ const buildFieldValue = (
     case "running_tasks":
       return { value: input.runningTaskCount > 0 ? `${input.runningTaskCount} running` : "Idle", variants: [] };
     case "brand":
-      return aggregateSelectedValues(selectedDevices, (device) => formatOptional(device.detail?.brand));
+      return aggregateSelectedValues(dashboardDevices, (device) => formatOptional(device.detail?.brand));
     case "model":
-      return aggregateSelectedValues(selectedDevices, (device) =>
+      return aggregateSelectedValues(dashboardDevices, (device) =>
         formatOptional(device.detail?.model ?? device.summary.model),
       );
     case "android_version":
-      return aggregateSelectedValues(selectedDevices, (device) =>
+      return aggregateSelectedValues(dashboardDevices, (device) =>
         formatOptional(device.detail?.android_version),
       );
     case "api_level":
-      return aggregateSelectedValues(selectedDevices, (device) => formatOptional(device.detail?.api_level));
+      return aggregateSelectedValues(dashboardDevices, (device) => formatOptional(device.detail?.api_level));
     case "processor":
-      return aggregateSelectedValues(selectedDevices, (device) => formatOptional(device.detail?.processor));
+      return aggregateSelectedValues(dashboardDevices, (device) => formatOptional(device.detail?.processor));
     case "resolution":
-      return aggregateSelectedValues(selectedDevices, (device) => formatOptional(device.detail?.resolution));
+      return aggregateSelectedValues(dashboardDevices, (device) => formatOptional(device.detail?.resolution));
     case "battery_level":
-      return aggregateSelectedValues(selectedDevices, (device) =>
+      return aggregateSelectedValues(dashboardDevices, (device) =>
         device.detail?.battery_level == null ? "--" : `${device.detail.battery_level}%`,
       );
     case "memory_total":
-      return aggregateSelectedValues(selectedDevices, (device) =>
+      return aggregateSelectedValues(dashboardDevices, (device) =>
         device.detail?.memory_total_bytes == null ? "--" : formatBytes(device.detail.memory_total_bytes),
       );
     case "storage_total":
-      return aggregateSelectedValues(selectedDevices, (device) =>
+      return aggregateSelectedValues(dashboardDevices, (device) =>
         device.detail?.storage_total_bytes == null ? "--" : formatBytes(device.detail.storage_total_bytes),
       );
     case "wifi_state":
-      return aggregateSelectedValues(selectedDevices, (device) => formatBooleanState(device.detail?.wifi_is_on));
+      return aggregateSelectedValues(dashboardDevices, (device) => formatBooleanState(device.detail?.wifi_is_on));
     case "bt_state":
-      return aggregateSelectedValues(selectedDevices, (device) => formatBooleanState(device.detail?.bt_is_on));
+      return aggregateSelectedValues(dashboardDevices, (device) => formatBooleanState(device.detail?.bt_is_on));
     case "gms_version":
-      return aggregateSelectedValues(selectedDevices, (device) => formatOptional(device.detail?.gms_version));
+      return aggregateSelectedValues(dashboardDevices, (device) => formatOptional(device.detail?.gms_version));
     case "adb_status":
       return {
         value:
@@ -443,7 +448,7 @@ const buildFieldValue = (
       };
     case "selected_ready_ratio":
       return {
-        value: selectedCount ? `${onlineCount}/${selectedCount}` : "0/0",
+        value: selectedCount ? `${selectedOnlineCount}/${selectedCount}` : "0/0",
         variants: [],
       };
     default:
@@ -457,6 +462,10 @@ export const buildDashboardCardViews = (
 ): DashboardCardView[] => {
   const normalized = normalizeDashboardSettings(settings);
   const selectedDevices = selectedDevicesFromSerials(input.devices, input.selectedSerials);
+  const dashboardDevices = selectedDevicesFromSerials(
+    input.devices,
+    input.dashboardSerials ?? input.selectedSerials,
+  );
 
   return normalized.cards
     .filter((card) => card.enabled)
@@ -467,12 +476,13 @@ export const buildDashboardCardViews = (
         .filter((field) => field.enabled)
         .sort(compareByOrder)
         .map((field) => {
-          const fieldValue = buildFieldValue(field.id, input, selectedDevices);
+          const fieldValue = buildFieldValue(field.id, input, selectedDevices, dashboardDevices);
           return {
             id: field.id,
             label: getDashboardFieldLabel(field.id),
             value: fieldValue.value,
             variants: fieldValue.variants,
+            deviceValues: fieldValue.deviceValues,
           };
         });
 
