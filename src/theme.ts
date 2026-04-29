@@ -1,4 +1,5 @@
 import type {
+  AppConfig,
   ThemeBackgroundFit,
   ThemeBackgroundKind,
   ThemeBackgroundSource,
@@ -268,17 +269,13 @@ export const normalizeThemeStyleSettings = (
     typeof settings?.background_source?.path === "string"
       ? settings.background_source.path.trim().slice(0, 2048)
       : "";
-  const normalizedBackgroundKind =
-    (backgroundKind === "local_path" || backgroundKind === "managed_path") && !backgroundPath
-      ? defaults.background_source.kind
-      : backgroundKind;
 
   return {
     preset_id: THEME_PRESETS.some((preset) => preset.id === presetId) ? presetId : defaults.preset_id,
     background_source: {
-      kind: normalizedBackgroundKind,
+      kind: backgroundKind,
       path:
-        normalizedBackgroundKind === "local_path" || normalizedBackgroundKind === "managed_path"
+        backgroundKind === "local_path" || backgroundKind === "managed_path"
           ? backgroundPath
           : "",
     },
@@ -307,6 +304,31 @@ export const normalizeThemeStyleSettings = (
 };
 
 export const normalizeThemeFontSize = (value: unknown): number => Math.round(clamp(value, 10, 18, 13));
+
+export const buildConfigWithThemeStyleUpdate = (
+  config: AppConfig,
+  updater: (current: ThemeStyleSettings) => ThemeStyleSettings,
+): AppConfig => {
+  const current = normalizeThemeStyleSettings(config.ui.theme_style);
+  return {
+    ...config,
+    ui: {
+      ...config.ui,
+      theme_style: normalizeThemeStyleSettings(updater(current)),
+    },
+  };
+};
+
+export const mergeSavedThemeBackgroundSourceIntoDraft = (
+  draftConfig: AppConfig,
+  savedConfig: AppConfig,
+): AppConfig => {
+  const savedTheme = normalizeThemeStyleSettings(savedConfig.ui.theme_style);
+  return buildConfigWithThemeStyleUpdate(draftConfig, (current) => ({
+    ...current,
+    background_source: savedTheme.background_source,
+  }));
+};
 
 export const resolveThemeCopy = (settings?: Partial<ThemeStyleSettings> | null) => {
   const normalized = normalizeThemeStyleSettings(settings);

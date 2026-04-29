@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildConfigWithThemeStyleUpdate,
   buildThemeCssVariables,
   getContrastRatio,
+  mergeSavedThemeBackgroundSourceIntoDraft,
   normalizeThemeStyleSettings,
   resolveThemeBackgroundImage,
   resolveThemeCopy,
 } from "./theme";
-import type { ThemeStyleSettings, UiSettings } from "./types";
+import type { AppConfig, ThemeStyleSettings, UiSettings } from "./types";
 
 const baseUi = (themeStyle: Partial<ThemeStyleSettings> = {}): UiSettings => ({
   window_width: 1280,
@@ -110,6 +112,88 @@ describe("theme settings", () => {
         convertFileSrc: (path) => `asset://${path}`,
       }),
     ).toBe('url("asset:///Users/me/Pictures/bg.png")');
+  });
+
+  it("keeps an empty local background source editable before a path is entered", () => {
+    const settings = normalizeThemeStyleSettings({
+      preset_id: "graphite",
+      background_source: {
+        kind: "local_path",
+        path: "",
+      },
+    });
+
+    expect(settings.background_source).toEqual({ kind: "local_path", path: "" });
+    expect(
+      resolveThemeBackgroundImage(settings, {
+        isTauriRuntime: true,
+        convertFileSrc: (path) => `asset://${path}`,
+      }),
+    ).toContain("linear-gradient");
+  });
+
+  it("builds a persistable config when theme background source changes", () => {
+    const config = {
+      ui: baseUi({
+        preset_id: "graphite",
+        background_source: { kind: "preset", path: "" },
+        background_fit: "contain",
+        background_opacity: 0.6,
+      }),
+    } as unknown as AppConfig;
+
+    const updated = buildConfigWithThemeStyleUpdate(config, (current) => ({
+      ...current,
+      background_source: {
+        kind: "managed_path",
+        path: "/Users/me/.lazy_blacktea/themes/backgrounds/theme-background-test.png",
+      },
+    }));
+
+    expect(updated).not.toBe(config);
+    expect(updated.ui).not.toBe(config.ui);
+    expect(updated.ui.theme_style.background_source).toEqual({
+      kind: "managed_path",
+      path: "/Users/me/.lazy_blacktea/themes/backgrounds/theme-background-test.png",
+    });
+    expect(updated.ui.theme_style.background_fit).toBe("contain");
+    expect(updated.ui.theme_style.background_opacity).toBe(0.6);
+    expect(config.ui.theme_style.background_source).toEqual({ kind: "preset", path: "" });
+  });
+
+  it("merges saved background source into the current draft without saving unrelated draft settings", () => {
+    const draft = {
+      adb: { command_path: "/draft/adb" },
+      ui: baseUi({
+        preset_id: "terminal",
+        background_source: { kind: "preset", path: "" },
+        background_fit: "contain",
+        background_opacity: 0.6,
+      }),
+    } as unknown as AppConfig;
+    const saved = {
+      adb: { command_path: "/persisted/adb" },
+      ui: baseUi({
+        preset_id: "graphite",
+        background_source: {
+          kind: "managed_path",
+          path: "/Users/me/.lazy_blacktea/themes/backgrounds/theme-background-test.png",
+        },
+        background_fit: "cover",
+        background_opacity: 1,
+      }),
+    } as unknown as AppConfig;
+
+    const merged = mergeSavedThemeBackgroundSourceIntoDraft(draft, saved);
+
+    expect(merged.adb.command_path).toBe("/draft/adb");
+    expect(merged.ui.theme_style.preset_id).toBe("terminal");
+    expect(merged.ui.theme_style.background_fit).toBe("contain");
+    expect(merged.ui.theme_style.background_opacity).toBe(0.6);
+    expect(merged.ui.theme_style.background_source).toEqual({
+      kind: "managed_path",
+      path: "/Users/me/.lazy_blacktea/themes/backgrounds/theme-background-test.png",
+    });
   });
 
   it("resolves copy overrides with defaults", () => {

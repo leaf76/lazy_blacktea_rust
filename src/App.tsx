@@ -64,6 +64,7 @@ import type {
   TerminalEvent,
   ThemeBackgroundFit,
   ThemeBackgroundKind,
+  ThemeBackgroundSource,
   ThemeStyleSettings,
   ScrcpyInfo,
 } from "./types";
@@ -264,13 +265,16 @@ import {
 import { DeviceGroupPanel } from "./DeviceGroupPanel";
 import {
   THEME_PRESETS,
+  buildConfigWithThemeStyleUpdate,
   buildDefaultThemeStyleSettings,
   buildThemeCssVariables,
+  mergeSavedThemeBackgroundSourceIntoDraft,
   normalizeThemeFontSize,
   normalizeThemeStyleSettings,
   resolveThemeCopy,
 } from "./theme";
 import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
+import { parseIntegerSettingInput } from "./settingsInput";
 import {
   LOGCAT_INACTIVITY_EVENTS,
   LOGCAT_INACTIVITY_TIMEOUT_MS,
@@ -11230,15 +11234,27 @@ function App() {
       if (!prev) {
         return prev;
       }
-      const current = normalizeThemeStyleSettings(prev.ui.theme_style);
-      return {
-        ...prev,
-        ui: {
-          ...prev.ui,
-          theme_style: normalizeThemeStyleSettings(updater(current)),
-        },
-      };
+      return buildConfigWithThemeStyleUpdate(prev, updater);
     });
+  };
+
+  const persistThemeBackgroundSource = async (
+    backgroundSource: ThemeBackgroundSource,
+    successMessage: string,
+  ) => {
+    if (!config) {
+      throw new Error("Settings are still loading. Try again in a moment.");
+    }
+    const latestSaved = await getConfig();
+    const updated = buildConfigWithThemeStyleUpdate(latestSaved.data, (current) => ({
+      ...current,
+      background_source: backgroundSource,
+    }));
+    const response = await saveConfig(updated);
+    setConfig((prev) =>
+      prev ? mergeSavedThemeBackgroundSourceIntoDraft(prev, response.data) : response.data,
+    );
+    pushToast(successMessage, "info");
   };
 
   const updateThemeColor = (key: keyof ThemeStyleSettings["colors"], value: string) => {
@@ -11421,15 +11437,18 @@ function App() {
       if (!selected || Array.isArray(selected)) {
         return;
       }
-      updateThemeStyle((current) => ({
-        ...current,
-        background_source: {
+      setBusy(true);
+      await persistThemeBackgroundSource(
+        {
           kind: "local_path",
           path: selected,
         },
-      }));
+        "Theme background selected and saved.",
+      );
     } catch (error) {
       pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -11572,14 +11591,13 @@ function App() {
       }
       setBusy(true);
       const response = await importThemeBackground(selected);
-      updateThemeStyle((current) => ({
-        ...current,
-        background_source: {
+      await persistThemeBackgroundSource(
+        {
           kind: "managed_path",
           path: response.data,
         },
-      }));
-      pushToast("Theme background imported.", "info");
+        "Theme background imported and saved.",
+      );
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -18220,11 +18238,13 @@ function App() {
                             <input
                               placeholder="/path/to/platform-tools/adb or C:\\Android\\platform-tools\\adb.exe"
                               value={config.adb.command_path}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                const commandPath = event.target.value;
                                 setConfig((prev) =>
-                                  prev ? { ...prev, adb: { ...prev.adb, command_path: event.target.value } } : prev,
-                                )
-                              }
+                                  prev ? { ...prev, adb: { ...prev.adb, command_path: commandPath } } : prev,
+                                );
+                                setAdbInfo(null);
+                              }}
                             />
                           </label>
                           <div className="muted settings-hint">
@@ -18915,24 +18935,28 @@ function App() {
                             </div>
 	                          <label>
 	                            Refresh interval (sec)
-	                            <input
-	                              type="number"
-	                              min={1}
-	                              value={config.device.refresh_interval}
-	                              onChange={(event) =>
-	                                setConfig((prev) =>
-	                                  prev
-	                                    ? {
-	                                        ...prev,
-	                                        device: {
-	                                          ...prev.device,
-	                                          refresh_interval: Math.max(1, Number(event.target.value)),
-	                                        },
-	                                      }
-	                                    : prev,
-	                                )
-	                              }
-	                            />
+		                            <input
+		                              type="number"
+		                              min={1}
+		                              value={config.device.refresh_interval}
+		                              onChange={(event) =>
+                                setConfig((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        device: {
+                                          ...prev.device,
+                                          refresh_interval: parseIntegerSettingInput(
+                                            event.target.value,
+                                            prev.device.refresh_interval,
+                                            { min: 1 },
+                                          ),
+                                        },
+                                      }
+                                    : prev,
+                                )
+		                              }
+		                            />
                           </label>
                           <div className="muted settings-hint">
                               Refresh interval for tracker recovery checks. Also used for detail sync when auto-refresh is enabled. Minimum 1 second.
@@ -18946,20 +18970,27 @@ function App() {
 	                          <h3>Commands</h3>
 	                          <label>
 	                            Timeout (sec)
-                            <input
-                              type="number"
-                              value={config.command.command_timeout}
+	                            <input
+	                              type="number"
+	                              value={config.command.command_timeout}
                               onChange={(event) =>
                                 setConfig((prev) =>
                                   prev
                                     ? {
                                         ...prev,
-                                        command: { ...prev.command, command_timeout: Number(event.target.value) },
+                                        command: {
+                                          ...prev.command,
+                                          command_timeout: parseIntegerSettingInput(
+                                            event.target.value,
+                                            prev.command.command_timeout,
+                                            { min: 1 },
+                                          ),
+                                        },
                                       }
                                     : prev,
                                 )
                               }
-                            />
+	                            />
                           </label>
                           <div className="muted settings-hint">
                             Shell Commands timeout in seconds. Increase if your <code>adb shell</code> commands are cut
@@ -18991,21 +19022,28 @@ function App() {
                           <h3>Screenshot</h3>
                           <label>
                             Display ID
-                            <input
-                              type="number"
-                              min={-1}
-                              value={config.screenshot.display_id}
+	                            <input
+	                              type="number"
+	                              min={-1}
+	                              value={config.screenshot.display_id}
                               onChange={(event) =>
                                 setConfig((prev) =>
                                   prev
                                     ? {
                                         ...prev,
-                                        screenshot: { ...prev.screenshot, display_id: Number(event.target.value) },
+                                        screenshot: {
+                                          ...prev.screenshot,
+                                          display_id: parseIntegerSettingInput(
+                                            event.target.value,
+                                            prev.screenshot.display_id,
+                                            { min: -1 },
+                                          ),
+                                        },
                                       }
                                     : prev,
                                 )
                               }
-                            />
+	                            />
                           </label>
                           <div className="muted settings-hint">
                             Use <code>-1</code> for the default display. Use <code>0+</code> to target a specific
@@ -19060,17 +19098,21 @@ function App() {
                               value={config.screen_record.time_limit_sec}
                               onChange={(event) =>
                                 setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        screen_record: {
+	                                  prev
+	                                    ? {
+	                                        ...prev,
+	                                        screen_record: {
                                           ...prev.screen_record,
-                                          time_limit_sec: Math.max(0, Number(event.target.value) || 0),
+                                          time_limit_sec: parseIntegerSettingInput(
+                                            event.target.value,
+                                            prev.screen_record.time_limit_sec,
+                                            { min: 0 },
+                                          ),
                                         },
                                       }
                                     : prev,
-                                )
-                              }
+	                                )
+	                              }
                             />
                           </label>
                           <div className="muted settings-hint">
@@ -19085,17 +19127,21 @@ function App() {
                               value={config.screen_record.display_id}
                               onChange={(event) =>
                                 setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
+	                                  prev
+	                                    ? {
+	                                        ...prev,
                                         screen_record: {
                                           ...prev.screen_record,
-                                          display_id: Number(event.target.value),
+                                          display_id: parseIntegerSettingInput(
+                                            event.target.value,
+                                            prev.screen_record.display_id,
+                                            { min: -1 },
+                                          ),
                                         },
                                       }
                                     : prev,
-                                )
-                              }
+	                                )
+	                              }
                             />
                           </label>
                           <div className="muted settings-hint">
@@ -19280,18 +19326,28 @@ function App() {
                           </div>
                           <label>
                             Max size
-                            <input
-                              type="number"
-                              min={0}
-                              value={config.scrcpy.max_size}
+	                            <input
+	                              type="number"
+	                              min={0}
+	                              value={config.scrcpy.max_size}
                               onChange={(event) =>
                                 setConfig((prev) =>
                                   prev
-                                    ? { ...prev, scrcpy: { ...prev.scrcpy, max_size: Math.max(0, Number(event.target.value)) } }
+                                    ? {
+                                          ...prev,
+                                          scrcpy: {
+                                            ...prev.scrcpy,
+                                            max_size: parseIntegerSettingInput(
+                                              event.target.value,
+                                              prev.scrcpy.max_size,
+                                              { min: 0 },
+                                            ),
+                                          },
+                                        }
                                     : prev,
                                 )
                               }
-                            />
+	                            />
                           </label>
                           <div className="muted settings-hint">
                             Limit the max video dimension in pixels (<code>0</code> = no limit).
