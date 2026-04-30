@@ -3110,6 +3110,32 @@ pub fn persist_terminal_state(
     })
 }
 
+fn terminal_shell_args(serial: &str) -> Vec<String> {
+    vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "-t".to_string(),
+        "-t".to_string(),
+    ]
+}
+
+fn running_terminal_session_response(
+    existing: &TerminalSession,
+    trace_id: &str,
+) -> Option<CommandResponse<TerminalSessionInfo>> {
+    if !existing.is_running() {
+        return None;
+    }
+    Some(CommandResponse {
+        trace_id: trace_id.to_string(),
+        data: TerminalSessionInfo {
+            serial: existing.serial.clone(),
+            session_id: existing.session_id.clone(),
+        },
+    })
+}
+
 #[tauri::command(async)]
 pub fn start_terminal_session(
     serial: String,
@@ -3126,22 +3152,14 @@ pub fn start_terminal_session(
         .lock()
         .map_err(|_| AppError::system("Terminal registry locked", &trace_id))?;
     if let Some(existing) = guard.get(&serial) {
-        if existing.is_running() {
-            return Err(AppError::validation(
-                "Terminal session already running",
-                &trace_id,
-            ));
+        if let Some(response) = running_terminal_session_response(existing, &trace_id) {
+            return Ok(response);
         }
-        guard.remove(&serial);
     }
+    guard.remove(&serial);
 
     let session_id = Uuid::new_v4().to_string();
-    let args = vec![
-        "-s".to_string(),
-        serial.clone(),
-        "shell".to_string(),
-        "-t".to_string(),
-    ];
+    let args = terminal_shell_args(&serial);
 
     let app_emit = app.clone();
     let trace_emit = trace_id.clone();

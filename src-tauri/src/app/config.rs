@@ -218,6 +218,72 @@ impl Default for CommandSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AdbCommandLibraryCommand {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    pub command: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub risk: String,
+}
+
+impl Default for AdbCommandLibraryCommand {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            title: String::new(),
+            category: "General".to_string(),
+            command: String::new(),
+            description: String::new(),
+            tags: Vec::new(),
+            risk: "normal".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AdbCommandLibraryPack {
+    pub version: i32,
+    pub id: String,
+    pub name: String,
+    pub commands: Vec<AdbCommandLibraryCommand>,
+}
+
+impl Default for AdbCommandLibraryPack {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            id: String::new(),
+            name: String::new(),
+            commands: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AdbCommandLibrarySettings {
+    pub custom_commands: Vec<AdbCommandLibraryCommand>,
+    pub imported_packs: Vec<AdbCommandLibraryPack>,
+    pub favorite_ids: Vec<String>,
+}
+
+const ADB_COMMAND_LIBRARY_MAX_PACKS: usize = 20;
+const ADB_COMMAND_LIBRARY_MAX_COMMANDS_PER_PACK: usize = 200;
+const ADB_COMMAND_LIBRARY_MAX_CUSTOM_COMMANDS: usize = 200;
+const ADB_COMMAND_LIBRARY_MAX_FAVORITES: usize = 500;
+const ADB_COMMAND_LIBRARY_MAX_ID_CHARS: usize = 64;
+const ADB_COMMAND_LIBRARY_MAX_TITLE_CHARS: usize = 80;
+const ADB_COMMAND_LIBRARY_MAX_CATEGORY_CHARS: usize = 40;
+const ADB_COMMAND_LIBRARY_MAX_DESCRIPTION_CHARS: usize = 240;
+const ADB_COMMAND_LIBRARY_MAX_COMMAND_CHARS: usize = 500;
+const ADB_COMMAND_LIBRARY_MAX_TAGS: usize = 8;
+const ADB_COMMAND_LIBRARY_MAX_TAG_CHARS: usize = 32;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AdbSettings {
     pub command_path: String,
@@ -550,6 +616,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub command: CommandSettings,
     #[serde(default)]
+    pub adb_command_library: AdbCommandLibrarySettings,
+    #[serde(default)]
     pub adb: AdbSettings,
     #[serde(default)]
     pub logging: LoggingSettings,
@@ -590,6 +658,7 @@ impl Default for AppConfig {
             ui: UiSettings::default(),
             device: DeviceSettings::default(),
             command: CommandSettings::default(),
+            adb_command_library: AdbCommandLibrarySettings::default(),
             adb: AdbSettings::default(),
             logging: LoggingSettings::default(),
             logcat: LogcatSettings::default(),
@@ -826,6 +895,92 @@ fn validate_theme_style(mut settings: ThemeStyleSettings) -> ThemeStyleSettings 
     settings
 }
 
+fn trim_chars(value: String, max_chars: usize) -> String {
+    value.trim().chars().take(max_chars).collect()
+}
+
+fn normalize_adb_command_risk(value: String) -> String {
+    if value == "dangerous" {
+        "dangerous".to_string()
+    } else {
+        "normal".to_string()
+    }
+}
+
+fn normalize_adb_command_library_command(
+    mut command: AdbCommandLibraryCommand,
+) -> Option<AdbCommandLibraryCommand> {
+    command.id = trim_chars(command.id, ADB_COMMAND_LIBRARY_MAX_ID_CHARS);
+    command.title = trim_chars(command.title, ADB_COMMAND_LIBRARY_MAX_TITLE_CHARS);
+    command.category = trim_chars(command.category, ADB_COMMAND_LIBRARY_MAX_CATEGORY_CHARS);
+    command.command = trim_chars(command.command, ADB_COMMAND_LIBRARY_MAX_COMMAND_CHARS);
+    command.description = trim_chars(
+        command.description,
+        ADB_COMMAND_LIBRARY_MAX_DESCRIPTION_CHARS,
+    );
+    command.risk = normalize_adb_command_risk(command.risk);
+    command.tags = command
+        .tags
+        .into_iter()
+        .map(|tag| trim_chars(tag, ADB_COMMAND_LIBRARY_MAX_TAG_CHARS))
+        .filter(|tag| !tag.is_empty())
+        .take(ADB_COMMAND_LIBRARY_MAX_TAGS)
+        .collect();
+    if command.category.is_empty() {
+        command.category = "General".to_string();
+    }
+    if command.id.is_empty() || command.title.is_empty() || command.command.is_empty() {
+        return None;
+    }
+    Some(command)
+}
+
+fn normalize_adb_command_library_pack(
+    mut pack: AdbCommandLibraryPack,
+) -> Option<AdbCommandLibraryPack> {
+    pack.version = 1;
+    pack.id = trim_chars(pack.id, ADB_COMMAND_LIBRARY_MAX_ID_CHARS);
+    pack.name = trim_chars(pack.name, ADB_COMMAND_LIBRARY_MAX_TITLE_CHARS);
+    pack.commands = pack
+        .commands
+        .into_iter()
+        .take(ADB_COMMAND_LIBRARY_MAX_COMMANDS_PER_PACK)
+        .filter_map(normalize_adb_command_library_command)
+        .collect();
+    if pack.id.is_empty() || pack.name.is_empty() || pack.commands.is_empty() {
+        return None;
+    }
+    Some(pack)
+}
+
+fn normalize_adb_command_library_settings(
+    mut settings: AdbCommandLibrarySettings,
+) -> AdbCommandLibrarySettings {
+    let mut favorite_ids_seen = std::collections::HashSet::new();
+    settings.custom_commands = settings
+        .custom_commands
+        .into_iter()
+        .take(ADB_COMMAND_LIBRARY_MAX_CUSTOM_COMMANDS)
+        .filter_map(normalize_adb_command_library_command)
+        .collect();
+    settings.imported_packs = settings
+        .imported_packs
+        .into_iter()
+        .take(ADB_COMMAND_LIBRARY_MAX_PACKS)
+        .filter_map(normalize_adb_command_library_pack)
+        .collect();
+    settings.favorite_ids = settings
+        .favorite_ids
+        .into_iter()
+        .map(|favorite_id| trim_chars(favorite_id, ADB_COMMAND_LIBRARY_MAX_ID_CHARS * 3))
+        .filter(|favorite_id| {
+            !favorite_id.is_empty() && favorite_ids_seen.insert(favorite_id.clone())
+        })
+        .take(ADB_COMMAND_LIBRARY_MAX_FAVORITES)
+        .collect();
+    settings
+}
+
 fn validate_config(mut config: AppConfig) -> AppConfig {
     if !(0.5..=3.0).contains(&config.ui.ui_scale) {
         config.ui.ui_scale = 1.0;
@@ -856,6 +1011,7 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     if config.command.max_history_size == 0 {
         config.command.max_history_size = 50;
     }
+    config.adb_command_library = normalize_adb_command_library_settings(config.adb_command_library);
     if config.output_path.trim().is_empty() {
         config.output_path = default_output_dir();
     }
@@ -1135,6 +1291,135 @@ mod tests {
         assert_eq!(parsed.screen_record.bit_rate, "4000000");
         assert_eq!(parsed.screen_record.time_limit_sec, 180);
         assert_eq!(parsed.screen_record.display_id, 2);
+    }
+
+    #[test]
+    fn adb_command_library_defaults_when_missing() {
+        let parsed: AppConfig =
+            serde_json::from_value(serde_json::json!({})).expect("config should deserialize");
+        assert!(parsed.adb_command_library.custom_commands.is_empty());
+        assert!(parsed.adb_command_library.imported_packs.is_empty());
+        assert!(parsed.adb_command_library.favorite_ids.is_empty());
+    }
+
+    #[test]
+    fn adb_command_library_round_trips() {
+        let value = serde_json::json!({
+            "adb_command_library": {
+                "custom_commands": [{
+                    "id": "custom-one",
+                    "title": "Custom One",
+                    "category": "Custom",
+                    "command": "id",
+                    "description": "Run id",
+                    "tags": ["identity"],
+                    "risk": "normal"
+                }],
+                "imported_packs": [{
+                    "version": 1,
+                    "id": "pack-one",
+                    "name": "Pack One",
+                    "commands": [{
+                        "id": "wm-size",
+                        "title": "Show screen size",
+                        "category": "Display",
+                        "command": "wm size",
+                        "description": "",
+                        "tags": ["display"],
+                        "risk": "dangerous"
+                    }]
+                }],
+                "favorite_ids": ["custom:custom-one"]
+            }
+        });
+        let parsed: AppConfig = serde_json::from_value(value).expect("config should deserialize");
+        let serialized = serde_json::to_value(parsed).expect("serialize config");
+        assert_eq!(
+            serialized["adb_command_library"]["custom_commands"][0]["command"],
+            "id"
+        );
+        assert_eq!(
+            serialized["adb_command_library"]["imported_packs"][0]["commands"][0]["risk"],
+            "dangerous"
+        );
+        assert_eq!(
+            serialized["adb_command_library"]["favorite_ids"][0],
+            "custom:custom-one"
+        );
+    }
+
+    #[test]
+    fn validates_adb_command_library_limits_and_required_fields() {
+        let mut config = AppConfig::default();
+        config.adb_command_library.custom_commands = vec![
+            AdbCommandLibraryCommand {
+                id: " valid ".to_string(),
+                title: " Valid ".to_string(),
+                category: "".to_string(),
+                command: "x".repeat(600),
+                description: "d".repeat(300),
+                tags: vec![
+                    " one ".to_string(),
+                    "two".to_string(),
+                    "three".to_string(),
+                    "four".to_string(),
+                    "five".to_string(),
+                    "six".to_string(),
+                    "seven".to_string(),
+                    "eight".to_string(),
+                    "nine".to_string(),
+                ],
+                risk: "unknown".to_string(),
+            },
+            AdbCommandLibraryCommand {
+                id: "".to_string(),
+                title: "Missing id".to_string(),
+                category: "Custom".to_string(),
+                command: "id".to_string(),
+                description: "".to_string(),
+                tags: vec![],
+                risk: "normal".to_string(),
+            },
+        ];
+        config.adb_command_library.imported_packs = vec![AdbCommandLibraryPack {
+            version: 99,
+            id: " pack ".to_string(),
+            name: " Pack ".to_string(),
+            commands: vec![AdbCommandLibraryCommand {
+                id: "cmd".to_string(),
+                title: "Cmd".to_string(),
+                category: "General".to_string(),
+                command: "whoami".to_string(),
+                description: "".to_string(),
+                tags: vec![],
+                risk: "dangerous".to_string(),
+            }],
+        }];
+        config.adb_command_library.favorite_ids =
+            (0..600).map(|index| format!("favorite-{index}")).collect();
+
+        let validated = validate_config(config);
+        assert_eq!(validated.adb_command_library.custom_commands.len(), 1);
+        let command = &validated.adb_command_library.custom_commands[0];
+        assert_eq!(command.id, "valid");
+        assert_eq!(command.title, "Valid");
+        assert_eq!(command.category, "General");
+        assert_eq!(
+            command.command.chars().count(),
+            ADB_COMMAND_LIBRARY_MAX_COMMAND_CHARS
+        );
+        assert_eq!(
+            command.description.chars().count(),
+            ADB_COMMAND_LIBRARY_MAX_DESCRIPTION_CHARS
+        );
+        assert_eq!(command.tags.len(), ADB_COMMAND_LIBRARY_MAX_TAGS);
+        assert_eq!(command.risk, "normal");
+        assert_eq!(validated.adb_command_library.imported_packs[0].version, 1);
+        assert_eq!(validated.adb_command_library.imported_packs[0].id, "pack");
+        assert_eq!(
+            validated.adb_command_library.favorite_ids.len(),
+            ADB_COMMAND_LIBRARY_MAX_FAVORITES
+        );
     }
 
     #[test]

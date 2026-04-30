@@ -38,6 +38,7 @@ import type {
   AdbInfo,
   AppConfig,
   AppBasicInfo,
+  AdbCommandLibrarySettings,
   AppInfo,
   BugreportExtractIndexSummary,
   BugreportExtractTemplateKind,
@@ -140,6 +141,14 @@ import {
   uninstallApp,
   validateMobileconfig,
 } from "./api";
+import { AdbCommandLibraryPanel } from "./AdbCommandLibraryPanel";
+import {
+  buildAdbCommandRunErrorResult,
+  buildAdbCommandRunResult,
+  normalizeAdbCommandLibrarySettings,
+  type AdbCommandRunResult,
+  type AdbCommandLibraryEntry,
+} from "./adbCommandLibrary";
 import {
   appendRetainedLogcatEntries,
   buildLogcatFilter,
@@ -443,6 +452,11 @@ const SETTINGS_TABS = [
   { id: "operations", label: "Operations" },
 ] as const;
 type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+const ACTIONS_SHELL_TABS = [
+  { id: "adb-shell", label: "ADB Shell" },
+  { id: "shell", label: "Shell" },
+] as const;
+type ActionsShellTabId = (typeof ACTIONS_SHELL_TABS)[number]["id"];
 
 const TERMINAL_MAX_LINES = 500;
 const NET_PROFILER_MAX_SAMPLES = 180;
@@ -1686,6 +1700,7 @@ function App() {
   const [terminalBySerial, setTerminalBySerial] = useState<Record<string, TerminalDeviceState>>({});
   const [terminalBroadcast, setTerminalBroadcast] = useState("");
   const [terminalActiveSerials, setTerminalActiveSerials] = useState<string[]>([]);
+  const [activeActionsShellTab, setActiveActionsShellTab] = useState<ActionsShellTabId>("adb-shell");
   const terminalSessionIdBySerialRef = useRef<Record<string, string | null>>({});
   const terminalActiveSerialsRef = useRef<string[]>([]);
   const terminalBySerialRef = useRef<Record<string, TerminalDeviceState>>({});
@@ -2295,6 +2310,22 @@ function App() {
   const isUiInspectorView = location.pathname === "/ui-inspector";
   const isDeveloperOptionsView = location.pathname === "/developer-options";
   useEffect(() => {
+    if (location.pathname === "/actions") {
+      setActiveActionsShellTab("adb-shell");
+    }
+  }, [location.key, location.pathname]);
+  useEffect(() => {
+    const handleActionsHashEntry = () => {
+      const hashPath = window.location.hash.replace(/^#/, "").split("?")[0];
+      if (hashPath === "/actions") {
+        setActiveActionsShellTab("adb-shell");
+      }
+    };
+
+    window.addEventListener("hashchange", handleActionsHashEntry);
+    return () => window.removeEventListener("hashchange", handleActionsHashEntry);
+  }, []);
+  useEffect(() => {
     const handleRecordedError = (event: Event) => {
       const detail = (event as CustomEvent<ErrorRecord>).detail;
       if (!detail?.id) {
@@ -2496,6 +2527,18 @@ function App() {
         const summary = devices.find((device) => device.summary.serial === serial)?.summary;
         return total + (summary?.state === "device" ? 1 : 0);
       }, 0),
+    [devices, selectedSerials],
+  );
+  const adbCommandTargetSerials = useMemo(
+    () =>
+      selectedSerials.filter((serial) => {
+        const device = devices.find((item) => item.summary.serial === serial);
+        return (
+          device?.summary.state === "device" &&
+          getDevicePlatform(device) === "android" &&
+          hasDeviceCapability(device, "shell")
+        );
+      }),
     [devices, selectedSerials],
   );
   const perfRunningSerialsSignature = useMemo(
@@ -6202,6 +6245,159 @@ function App() {
     try {
       await Promise.all(targets.map((serial) => handleWriteTerminal(serial, command, true)));
       setTerminalBroadcast("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveAdbCommandLibrary = async (
+    nextLibrary: AdbCommandLibrarySettings,
+    message: string,
+  ): Promise<boolean> => {
+    if (!config) {
+      pushToast("Settings are still loading.", "error");
+      return false;
+    }
+    setBusy(true);
+    try {
+      const latest = await getConfig();
+      const updated = {
+        ...latest.data,
+        adb_command_library: normalizeAdbCommandLibrarySettings(nextLibrary),
+      };
+      const response = await saveConfig(updated);
+      setConfig((prev) =>
+        prev
+          ? {
+              ...prev,
+              adb_command_library: response.data.adb_command_library,
+            }
+          : response.data,
+      );
+      pushToast(message, "info");
+      return true;
+    } catch (error) {
+      pushToast(formatError(error), "error");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyAdbCommandLibraryText = async (text: string, successMessage: string) => {
+    try {
+      await writeText(text);
+      pushToast(successMessage, "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    }
+  };
+
+  const handleRunAdbCommandLibraryEntry = async (
+    entry: AdbCommandLibraryEntry,
+    startedAt: string,
+  ): Promise<AdbCommandRunResult | null> => {
+    const targetSerials = adbCommandTargetSerials;
+    if (!targetSerials.length) {
+      pushToast("Select at least one online Android device.", "error");
+      return null;
+    }
+    if (
+      entry.risk === "dangerous" &&
+      !window.confirm(`Run "${entry.title}" on ${targetSerials.length} selected device${targetSerials.length > 1 ? "s" : ""}?`)
+    ) {
+      return null;
+    }
+
+    const taskId = beginTask({
+      kind: "shell",
+      title: `ADB Command: ${entry.title}`,
+      serials: targetSerials,
+    });
+    targetSerials.forEach((serial) => {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: { status: "running", message: "Running command..." },
+      });
+    });
+
+    setBusy(true);
+    try {
+      const response = await runShell(
+        targetSerials,
+        quoteShellCommandForAdbSh(entry.command),
+        true,
+        { recordError: false },
+      );
+      dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+
+      const runResult = buildAdbCommandRunResult({
+        entry,
+        targetSerials,
+        commandResults: response.data,
+        traceId: response.trace_id,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      });
+      let successCount = 0;
+      let failureCount = 0;
+      runResult.devices.forEach((device) => {
+        if (device.status === "success") {
+          successCount += 1;
+        } else {
+          failureCount += 1;
+        }
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial: device.serial,
+          patch: {
+            status: device.status === "success" ? "success" : "error",
+            message: device.message,
+            stdout: device.stdout,
+            stderr: device.stderr,
+            exit_code: device.exit_code,
+          },
+        });
+      });
+      dispatchTasks({ type: "TASK_RECOMPUTE_STATUS", id: taskId });
+
+      if (failureCount === 0) {
+        pushToast(
+          `Ran ${entry.title} on ${successCount} device${successCount > 1 ? "s" : ""}.`,
+          "info",
+        );
+      } else if (successCount > 0) {
+        pushToast(
+          `Ran ${entry.title} on ${successCount} device${successCount > 1 ? "s" : ""}; ${failureCount} failed.`,
+          "error",
+        );
+      } else {
+        pushToast(`Failed to run ${entry.title}.`, "error");
+      }
+      return runResult;
+    } catch (error) {
+      const message = formatError(error);
+      const runResult = buildAdbCommandRunErrorResult({
+        entry,
+        targetSerials,
+        message,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      });
+      runResult.devices.forEach((device) => {
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial: device.serial,
+          patch: { status: "error", message: device.message },
+        });
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
+      pushToast(message, "error");
+      return runResult;
     } finally {
       setBusy(false);
     }
@@ -14619,6 +14815,30 @@ function App() {
   const activeSettingsTabIndex = SETTINGS_TABS.findIndex((tab) => tab.id === activeSettingsTab);
   const activeSettingsTabConfig =
     SETTINGS_TABS[activeSettingsTabIndex >= 0 ? activeSettingsTabIndex : 0] ?? SETTINGS_TABS[0];
+  const activeActionsShellTabIndex = ACTIONS_SHELL_TABS.findIndex((tab) => tab.id === activeActionsShellTab);
+  const activeActionsShellTabConfig =
+    ACTIONS_SHELL_TABS[activeActionsShellTabIndex >= 0 ? activeActionsShellTabIndex : 0] ??
+    ACTIONS_SHELL_TABS[0];
+  const handleActionsShellTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    const currentIndex = activeActionsShellTabIndex >= 0 ? activeActionsShellTabIndex : 0;
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? ACTIONS_SHELL_TABS.length - 1
+          : event.key === "ArrowLeft"
+            ? (currentIndex - 1 + ACTIONS_SHELL_TABS.length) % ACTIONS_SHELL_TABS.length
+            : (currentIndex + 1) % ACTIONS_SHELL_TABS.length;
+    const nextTab = ACTIONS_SHELL_TABS[nextIndex];
+
+    setActiveActionsShellTab(nextTab.id);
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-actions-shell-tab="${nextTab.id}"]`)?.focus();
+  };
   const handleSettingsTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
@@ -14677,7 +14897,9 @@ function App() {
             <NavLink to="/files">File Explorer</NavLink>
             <NavLink to="/apk-installer">APK Installer</NavLink>
             <NavLink to="/profiles">Profiles</NavLink>
-            <NavLink to="/actions">Shell Commands</NavLink>
+            <NavLink to="/actions" onClick={() => setActiveActionsShellTab("adb-shell")}>
+              Shell Commands
+            </NavLink>
           </div>
           <div className="nav-group">
             <span className="nav-title">System</span>
@@ -15752,7 +15974,7 @@ function App() {
             <Route
               path="/actions"
               element={
-                <div className="page-section">
+                <div className="page-section shell-actions-page">
                   <div className="page-header">
                     <div>
                       <h1>Shell Commands</h1>
@@ -15760,6 +15982,54 @@ function App() {
                     </div>
                   </div>
                   <div className="stack">
+                    <div
+                      className="shell-actions-tabs"
+                      role="tablist"
+                      aria-label="Shell command modes"
+                      onKeyDown={handleActionsShellTabKeyDown}
+                    >
+                      {ACTIONS_SHELL_TABS.map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          role="tab"
+                          id={`actions-shell-tab-${tab.id}`}
+                          className="shell-actions-tab"
+                          aria-selected={activeActionsShellTab === tab.id}
+                          aria-controls={`actions-shell-panel-${tab.id}`}
+                          tabIndex={activeActionsShellTab === tab.id ? 0 : -1}
+                          data-actions-shell-tab={tab.id}
+                          onClick={() => setActiveActionsShellTab(tab.id)}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                    {activeActionsShellTabConfig.id === "adb-shell" && (
+                      <div
+                        id="actions-shell-panel-adb-shell"
+                        className="shell-actions-tab-panel"
+                        role="tabpanel"
+                        aria-labelledby="actions-shell-tab-adb-shell"
+                      >
+                        <AdbCommandLibraryPanel
+                          library={config?.adb_command_library}
+                          targetSerials={adbCommandTargetSerials}
+                          disabled={busy || !config}
+                          onSaveLibrary={handleSaveAdbCommandLibrary}
+                          onRunCommand={handleRunAdbCommandLibraryEntry}
+                          onCopyText={copyAdbCommandLibraryText}
+                          onNotify={pushToast}
+                        />
+                      </div>
+                    )}
+                    {activeActionsShellTabConfig.id === "shell" && (
+                      <div
+                        id="actions-shell-panel-shell"
+                        className="shell-actions-tab-panel shell-actions-terminal-panel"
+                        role="tabpanel"
+                        aria-labelledby="actions-shell-tab-shell"
+                      >
                     <section className="panel settings-panel shell-terminal-header">
                       <div className="panel-header">
                         <h2>Terminal Sessions</h2>
@@ -15923,6 +16193,8 @@ function App() {
                         )}
                       </div>
                     </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               }

@@ -652,6 +652,31 @@ export type CommandSettings = {
   parallel_execution: boolean;
 };
 
+export type AdbCommandRisk = "normal" | "dangerous";
+
+export type AdbCommandLibraryCommand = {
+  id: string;
+  title: string;
+  category: string;
+  command: string;
+  description: string;
+  tags: string[];
+  risk: AdbCommandRisk;
+};
+
+export type AdbCommandLibraryPack = {
+  version: number;
+  id: string;
+  name: string;
+  commands: AdbCommandLibraryCommand[];
+};
+
+export type AdbCommandLibrarySettings = {
+  custom_commands: AdbCommandLibraryCommand[];
+  imported_packs: AdbCommandLibraryPack[];
+  favorite_ids: string[];
+};
+
 export type AdbSettings = {
   command_path: string;
 };
@@ -776,6 +801,7 @@ export type AppConfig = {
   ui: UiSettings;
   device: DeviceSettings;
   command: CommandSettings;
+  adb_command_library: AdbCommandLibrarySettings;
   adb: AdbSettings;
   logging: LoggingSettings;
   logcat: LogcatSettings;

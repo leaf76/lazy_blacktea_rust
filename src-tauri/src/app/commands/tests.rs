@@ -1666,3 +1666,39 @@ fn capture_ui_hierarchy_returns_user_safe_screenshot_error() {
 
     clear_fake_adb_env();
 }
+
+#[test]
+fn terminal_shell_args_force_remote_pty_with_piped_stdin() {
+    assert_eq!(
+        terminal_shell_args("SERIAL-PTY"),
+        vec!["-s", "SERIAL-PTY", "shell", "-t", "-t"]
+    );
+}
+
+#[test]
+fn running_terminal_session_response_reuses_existing_session() {
+    let emitter: Arc<dyn Fn(TerminalEvent) + Send + Sync> = Arc::new(|_| {});
+    let (program, args): (&str, Vec<String>) = if cfg!(windows) {
+        ("cmd.exe", vec!["/Q".to_string(), "/K".to_string()])
+    } else {
+        ("cat", vec![])
+    };
+    let session = TerminalSession::spawn(
+        program,
+        &args,
+        "SERIAL-EXISTING".to_string(),
+        "session-existing".to_string(),
+        "trace-existing".to_string(),
+        emitter,
+    )
+    .expect("spawn terminal session");
+
+    let response = running_terminal_session_response(&session, "trace-reuse")
+        .expect("running session should be reusable");
+
+    assert_eq!(response.trace_id, "trace-reuse");
+    assert_eq!(response.data.serial, "SERIAL-EXISTING");
+    assert_eq!(response.data.session_id, "session-existing");
+
+    session.stop();
+}

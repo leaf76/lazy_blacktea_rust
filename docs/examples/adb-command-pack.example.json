@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "lazy-blacktea-example-pack",
+  "name": "Lazy Blacktea Example Pack",
+  "commands": [
+    {
+      "id": "screen-size",
+      "title": "Show screen size",
+      "category": "Display",
+      "command": "wm size",
+      "description": "Print the current physical and override display size.",
+      "tags": [
+        "display",
+        "wm"
+      ],
+      "risk": "normal"
+    },
+    {
+      "id": "battery-status",
+      "title": "Show battery status",
+      "category": "Device",
+      "command": "adb shell dumpsys battery",
+      "description": "Print battery, power, and charging state.",
+      "tags": [
+        "battery",
+        "dumpsys"
+      ],
+      "risk": "normal"
+    }
+  ]
+}
