@@ -1,7 +1,7 @@
 {
   "name": "lazy-blacktea",
   "private": true,
-  "version": "0.0.81",
+  "version": "0.0.82",
   "type": "module",
   "scripts": {
     "dev": "vite",
