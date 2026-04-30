@@ -45,6 +45,7 @@
   --dashboard-hero-accent: rgba(37, 99, 235, 0.08);
   --dashboard-hero-border: rgba(37, 99, 235, 0.25);
   --modal-backdrop: rgba(15, 23, 42, 0.45);
+  --theme-color-scheme: light;
   --theme-background-image: radial-gradient(circle at top left, #e9efff 0%, var(--color-bg-app) 45%, #f8fbff 100%);
   --theme-background-size: cover;
   --theme-background-repeat: no-repeat;
@@ -119,6 +120,7 @@
     --dashboard-hero-accent: rgba(96, 165, 250, 0.12);
     --dashboard-hero-border: rgba(96, 165, 250, 0.28);
     --modal-backdrop: rgba(2, 6, 23, 0.65);
+    --theme-color-scheme: dark;
     --shadow-card: 0 8px 20px rgba(2, 6, 23, 0.6);
   }
 }
@@ -171,6 +173,7 @@ textarea {
   grid-template-columns: 220px 1fr;
   background: var(--color-bg-app);
   color: var(--color-text);
+  color-scheme: var(--theme-color-scheme);
   font-size: var(--theme-font-size);
   overflow: hidden;
   position: relative;

@@ -9,9 +9,12 @@ import type {
   UiSettings,
 } from "./types";
 
+export type ThemeMode = "light" | "dark";
+
 export type ThemePreset = {
   id: string;
   label: string;
+  mode: ThemeMode;
   backgroundImage: string;
   colors: {
     app: string;
@@ -36,6 +39,7 @@ export const THEME_PRESETS: ThemePreset[] = [
   {
     id: "system",
     label: "System",
+    mode: "light",
     backgroundImage:
       "radial-gradient(circle at top left, rgba(233, 239, 255, 0.95), rgba(244, 247, 251, 0.9) 45%, rgba(248, 251, 255, 0.95))",
     colors: {
@@ -54,6 +58,7 @@ export const THEME_PRESETS: ThemePreset[] = [
   {
     id: "midnight",
     label: "Midnight",
+    mode: "dark",
     backgroundImage:
       "radial-gradient(circle at 18% 8%, rgba(14, 165, 233, 0.22), transparent 26%), linear-gradient(135deg, #09111f 0%, #101827 48%, #13221f 100%)",
     colors: {
@@ -72,6 +77,7 @@ export const THEME_PRESETS: ThemePreset[] = [
   {
     id: "terminal",
     label: "Terminal",
+    mode: "dark",
     backgroundImage:
       "linear-gradient(rgba(34, 197, 94, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(34, 197, 94, 0.06) 1px, transparent 1px), linear-gradient(135deg, #07100c 0%, #101914 55%, #141710 100%)",
     colors: {
@@ -90,6 +96,7 @@ export const THEME_PRESETS: ThemePreset[] = [
   {
     id: "graphite",
     label: "Graphite",
+    mode: "dark",
     backgroundImage:
       "radial-gradient(circle at 80% 12%, rgba(250, 204, 21, 0.18), transparent 24%), linear-gradient(145deg, #18181b 0%, #27272a 45%, #1f2937 100%)",
     colors: {
@@ -108,6 +115,7 @@ export const THEME_PRESETS: ThemePreset[] = [
   {
     id: "daylight",
     label: "Daylight",
+    mode: "light",
     backgroundImage:
       "radial-gradient(circle at 20% 10%, rgba(20, 184, 166, 0.16), transparent 26%), linear-gradient(135deg, #fff7ed 0%, #f8fafc 50%, #ecfeff 100%)",
     colors: {
@@ -124,6 +132,83 @@ export const THEME_PRESETS: ThemePreset[] = [
     },
   },
 ];
+
+const THEME_MODE_TOKENS: Record<ThemeMode, Record<string, string>> = {
+  light: {
+    "--theme-color-scheme": "light",
+    "--color-success": "#16a34a",
+    "--color-warning": "#d97706",
+    "--color-danger": "#dc2626",
+    "--color-logcat-bg": "#0f172a",
+    "--color-logcat-text": "#e2e8f0",
+    "--pill-idle-bg": "#eef2f7",
+    "--pill-idle-text": "#334155",
+    "--pill-ok-bg": "#dcfce7",
+    "--pill-ok-text": "#166534",
+    "--pill-warn-bg": "#fef3c7",
+    "--pill-warn-text": "#92400e",
+    "--pill-error-bg": "#fee2e2",
+    "--pill-error-text": "#991b1b",
+    "--nav-active-bg": "#e0e7ff",
+    "--nav-active-border": "#c7d2fe",
+    "--nav-active-text": "#1e293b",
+    "--badge-bg": "#e5e7eb",
+    "--badge-text": "#111827",
+    "--tag-bg": "#e0e7ff",
+    "--tag-text": "#3730a3",
+    "--toggle-active-bg": "#e0e7ff",
+    "--toggle-active-border": "#c7d2fe",
+    "--toggle-active-text": "#1f2937",
+    "--progress-track": "#e5e7eb",
+    "--alert-error-border": "rgba(220, 38, 38, 0.4)",
+    "--alert-error-bg": "rgba(220, 38, 38, 0.08)",
+    "--alert-error-text": "#7f1d1d",
+    "--alert-info-border": "rgba(37, 99, 235, 0.3)",
+    "--alert-info-bg": "rgba(37, 99, 235, 0.08)",
+    "--alert-info-text": "#1e3a8a",
+    "--dashboard-hero-accent": "rgba(37, 99, 235, 0.08)",
+    "--dashboard-hero-border": "rgba(37, 99, 235, 0.25)",
+    "--modal-backdrop": "rgba(15, 23, 42, 0.45)",
+    "--shadow-card": "0 8px 20px var(--color-shadow)",
+  },
+  dark: {
+    "--theme-color-scheme": "dark",
+    "--color-success": "#22c55e",
+    "--color-warning": "#fbbf24",
+    "--color-danger": "#f87171",
+    "--color-logcat-bg": "#0b1220",
+    "--color-logcat-text": "#dbeafe",
+    "--pill-idle-bg": "#1e293b",
+    "--pill-idle-text": "#e2e8f0",
+    "--pill-ok-bg": "#064e3b",
+    "--pill-ok-text": "#a7f3d0",
+    "--pill-warn-bg": "#78350f",
+    "--pill-warn-text": "#fde68a",
+    "--pill-error-bg": "#7f1d1d",
+    "--pill-error-text": "#fecaca",
+    "--nav-active-bg": "#1e2a44",
+    "--nav-active-border": "#334155",
+    "--nav-active-text": "#e2e8f0",
+    "--badge-bg": "#1f2937",
+    "--badge-text": "#e2e8f0",
+    "--tag-bg": "#1e293b",
+    "--tag-text": "#c7d2fe",
+    "--toggle-active-bg": "#1e2a44",
+    "--toggle-active-border": "#334155",
+    "--toggle-active-text": "#e2e8f0",
+    "--progress-track": "#1f2a44",
+    "--alert-error-border": "rgba(248, 113, 113, 0.45)",
+    "--alert-error-bg": "rgba(248, 113, 113, 0.12)",
+    "--alert-error-text": "#fecaca",
+    "--alert-info-border": "rgba(96, 165, 250, 0.35)",
+    "--alert-info-bg": "rgba(96, 165, 250, 0.12)",
+    "--alert-info-text": "#bfdbfe",
+    "--dashboard-hero-accent": "rgba(96, 165, 250, 0.12)",
+    "--dashboard-hero-border": "rgba(96, 165, 250, 0.28)",
+    "--modal-backdrop": "rgba(2, 6, 23, 0.65)",
+    "--shadow-card": "0 8px 20px var(--color-shadow)",
+  },
+};
 
 const DEFAULT_COLORS: ThemeColorSettings = {
   primary: "",
@@ -376,6 +461,7 @@ export const buildThemeCssVariables = (
   const textColor = ensureReadableColor(colors.text, preset.colors.text, panelColor, 4.5);
   const mutedTextColor = ensureReadableColor(colors.muted_text, preset.colors.muted, panelColor, 3);
   return {
+    ...THEME_MODE_TOKENS[preset.mode],
     "--color-bg-app": preset.colors.app,
     "--color-bg-panel": panelColor,
     "--color-bg-subtle": preset.colors.subtle,
@@ -395,6 +481,13 @@ export const buildThemeCssVariables = (
     "--theme-background-opacity-percent": `${Math.round(theme.background_opacity * 100)}%`,
     "--theme-panel-opacity": String(theme.panel_opacity),
     "--theme-panel-opacity-percent": `${Math.round(theme.panel_opacity * 100)}%`,
+    "--surface-panel-bg": "color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent)",
+    "--surface-subtle-bg": "color-mix(in srgb, var(--color-bg-subtle) var(--theme-panel-opacity-percent), transparent)",
+    "--surface-control-bg": "color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent)",
+    "--surface-popover-bg": "color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent)",
+    "--surface-active-bg": "color-mix(in srgb, var(--nav-active-bg) var(--theme-panel-opacity-percent), transparent)",
+    "--surface-badge-bg": "color-mix(in srgb, var(--badge-bg) var(--theme-panel-opacity-percent), transparent)",
+    "--surface-tag-bg": "color-mix(in srgb, var(--tag-bg) var(--theme-panel-opacity-percent), transparent)",
     "--theme-font-size": `${normalizeThemeFontSize(ui.font_size)}px`,
   };
 };

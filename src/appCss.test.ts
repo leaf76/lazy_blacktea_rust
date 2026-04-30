@@ -13,6 +13,10 @@ describe("app shell theme cascade", () => {
     expect(readCssRule(".app-shell")).toContain("color: var(--color-text)");
   });
 
+  it("sets native control color scheme from the active theme", () => {
+    expect(readCssRule(".app-shell")).toContain("color-scheme: var(--theme-color-scheme)");
+  });
+
   it("routes major surfaces through the user-controlled panel opacity tokens", () => {
     const rootRule = readCssRule(":root");
 

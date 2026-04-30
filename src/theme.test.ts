@@ -92,8 +92,45 @@ describe("theme settings", () => {
 
     expect(css["--color-bg-panel"]).toBe("#0f172a");
     expect(css["--color-text"]).toBe("#e2e8f0");
+    expect(css["--theme-color-scheme"]).toBe("dark");
     expect(css["--theme-background-image"]).toContain("#09111f");
     expect(getContrastRatio(css["--color-text"], css["--color-bg-panel"])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps Daylight tokens light even when the legacy context is dark", () => {
+    const css = buildThemeCssVariables(baseUi({ preset_id: "daylight" }), { isTauriRuntime: false });
+
+    expect(css["--theme-color-scheme"]).toBe("light");
+    expect(css["--color-bg-panel"]).toBe("#ffffff");
+    expect(css["--color-text"]).toBe("#111827");
+    expect(css["--nav-active-bg"]).toBe("#e0e7ff");
+    expect(css["--badge-bg"]).toBe("#e5e7eb");
+    expect(css["--alert-info-text"]).toBe("#1e3a8a");
+    expect(css["--modal-backdrop"]).toBe("rgba(15, 23, 42, 0.45)");
+    expect(css["--surface-panel-bg"]).toBe(
+      "color-mix(in srgb, var(--color-bg-panel) var(--theme-panel-opacity-percent), transparent)",
+    );
+    expect(css["--surface-active-bg"]).toBe(
+      "color-mix(in srgb, var(--nav-active-bg) var(--theme-panel-opacity-percent), transparent)",
+    );
+  });
+
+  it("keeps dark preset tokens dark even when the legacy context is light", () => {
+    for (const presetId of ["midnight", "terminal", "graphite"]) {
+      const css = buildThemeCssVariables(
+        {
+          ...baseUi({ preset_id: presetId }),
+          theme: "light",
+        },
+        { isTauriRuntime: false },
+      );
+
+      expect(css["--theme-color-scheme"]).toBe("dark");
+      expect(css["--pill-idle-bg"]).toBe("#1e293b");
+      expect(css["--badge-bg"]).toBe("#1f2937");
+      expect(css["--alert-info-text"]).toBe("#bfdbfe");
+      expect(css["--modal-backdrop"]).toBe("rgba(2, 6, 23, 0.65)");
+    }
   });
 
   it("uses converted local images only in Tauri and falls back otherwise", () => {
