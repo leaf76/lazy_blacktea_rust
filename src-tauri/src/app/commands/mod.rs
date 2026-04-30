@@ -1424,8 +1424,8 @@ fn run_adb_transfer_with_progress(
 fn get_adb_program(trace_id: &str) -> Result<String, AppError> {
     let config = load_config(trace_id)?;
     let program = resolve_adb_program(&config.adb.command_path);
-    if let Err(message) = validate_adb_program(&program) {
-        return Err(AppError::validation(message, trace_id));
+    if let Err(error) = validate_adb_program(&program) {
+        return Err(AppError::validation(error.message, trace_id));
     }
     Ok(program)
 }
@@ -2240,17 +2240,19 @@ pub fn check_adb(
         .as_deref()
         .map(normalize_command_path)
         .filter(|value| !value.is_empty())
+        .map(|value| resolve_adb_program(&value))
         .unwrap_or_else(|| resolve_adb_program(&config.adb.command_path));
 
-    if let Err(message) = validate_adb_program(&program) {
-        warn!(trace_id = %trace_id, error = %message, "adb validation failed");
+    if let Err(error) = validate_adb_program(&program) {
+        warn!(trace_id = %trace_id, error = %error.message, "adb validation failed");
         return Ok(CommandResponse {
             trace_id,
             data: AdbInfo {
                 available: false,
                 version_output: String::new(),
                 command_path: program,
-                error: Some(message),
+                error: Some(error.message),
+                issue_code: error.issue_code,
             },
         });
     }
@@ -2268,6 +2270,7 @@ pub fn check_adb(
                     version_output: String::new(),
                     command_path: program,
                     error: Some(err.error),
+                    issue_code: None,
                 },
             });
         }
@@ -2296,6 +2299,7 @@ pub fn check_adb(
             } else {
                 Some(output.stderr.trim().to_string())
             },
+            issue_code: None,
         },
     })
 }

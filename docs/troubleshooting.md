@@ -15,6 +15,33 @@ Windows notes:
 
 - You may need an OEM USB driver for your device.
 
+## macOS: ADB Blocked by Gatekeeper
+
+If macOS shows "`adb` can't be opened because it was not downloaded from the App Store",
+Lazy Blacktea may report ADB as unavailable before any Android device can be listed. This
+usually means the selected `adb` executable is quarantined by macOS.
+
+Check the selected binary without running it:
+
+```bash
+xattr -l "/path/to/adb"
+spctl --assess --type execute --verbose=4 "/path/to/adb"
+```
+
+Safer recovery options:
+
+1. In Lazy Blacktea, open **Settings -> ADB** and select a trusted Android SDK
+   `platform-tools/adb` binary, such as `~/Library/Android/sdk/platform-tools/adb`.
+2. Reinstall Android Platform Tools from Android Studio SDK Manager or Homebrew, then test
+   the new `adb` path.
+3. Only if you trust the exact binary, remove quarantine yourself:
+
+   ```bash
+   xattr -d com.apple.quarantine "/path/to/adb"
+   ```
+
+Lazy Blacktea does not remove quarantine automatically.
+
 ## iOS Device Does Not Appear
 
 The iOS MVP depends on external Apple or libimobiledevice tools. The app does not bundle them.

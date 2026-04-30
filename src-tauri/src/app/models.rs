@@ -158,6 +158,7 @@ pub struct AdbInfo {
     pub version_output: String,
     pub command_path: String,
     pub error: Option<String>,
+    pub issue_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

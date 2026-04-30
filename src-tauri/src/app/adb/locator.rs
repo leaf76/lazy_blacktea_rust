@@ -1,6 +1,33 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+pub const ADB_ISSUE_MACOS_GATEKEEPER_QUARANTINE: &str = "macos_gatekeeper_quarantine";
+
+#[cfg(target_os = "macos")]
+const MACOS_QUARANTINE_ATTR: &str = "com.apple.quarantine";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdbProgramValidationError {
+    pub message: String,
+    pub issue_code: Option<String>,
+}
+
+impl AdbProgramValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            issue_code: None,
+        }
+    }
+
+    fn with_issue(message: impl Into<String>, issue_code: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            issue_code: Some(issue_code.into()),
+        }
+    }
+}
+
 pub fn normalize_command_path(value: &str) -> String {
     let trimmed = value.trim();
     if let Some(inner) = trimmed
@@ -27,20 +54,44 @@ pub fn resolve_adb_program(config_command_path: &str) -> String {
     }
 }
 
-pub fn validate_adb_program(program: &str) -> Result<(), String> {
+pub fn validate_adb_program(program: &str) -> Result<(), AdbProgramValidationError> {
     if program.trim().is_empty() {
-        return Err("ADB command is empty".to_string());
+        return Err(AdbProgramValidationError::new("ADB command is empty"));
     }
     if program == "adb" {
         return Ok(());
     }
     let path = Path::new(program);
     if path.is_dir() {
-        return Err("ADB path must point to an executable file".to_string());
+        return Err(AdbProgramValidationError::new(
+            "ADB path must point to an executable file",
+        ));
     }
     if !path.exists() {
-        return Err("ADB executable not found at the configured path".to_string());
+        return Err(AdbProgramValidationError::new(
+            "ADB executable not found at the configured path",
+        ));
     }
+    validate_macos_quarantine(path)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_quarantine(path: &Path) -> Result<(), AdbProgramValidationError> {
+    match xattr::get(path, MACOS_QUARANTINE_ATTR) {
+        Ok(Some(_)) => Err(AdbProgramValidationError::with_issue(
+            "macOS blocked this ADB executable because it is quarantined. Choose a trusted Android SDK platform-tools adb path in Settings, reinstall Android Platform Tools, or approve this exact binary in macOS Privacy & Security after you trust it.",
+            ADB_ISSUE_MACOS_GATEKEEPER_QUARANTINE,
+        )),
+        Ok(None) => Ok(()),
+        Err(err) => Err(AdbProgramValidationError::new(format!(
+            "Failed to inspect ADB quarantine metadata: {err}"
+        ))),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn validate_macos_quarantine(_path: &Path) -> Result<(), AdbProgramValidationError> {
     Ok(())
 }
 
@@ -189,7 +240,38 @@ mod tests {
     #[test]
     fn validates_nonexistent_path() {
         let err = validate_adb_program("/this/path/should/not/exist/adb").unwrap_err();
-        assert!(err.to_lowercase().contains("not found"));
+        assert!(err.message.to_lowercase().contains("not found"));
+        assert_eq!(err.issue_code, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn validates_quarantined_macos_adb_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = test_temp_dir();
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let adb_path = temp_dir.join(adb_binary_name());
+        fs::write(&adb_path, b"adb").expect("create adb file");
+        fs::set_permissions(&adb_path, fs::Permissions::from_mode(0o755))
+            .expect("set executable bit");
+        xattr::set(
+            &adb_path,
+            MACOS_QUARANTINE_ATTR,
+            b"01c1;test;Homebrew Cask;",
+        )
+        .expect("set quarantine attr");
+
+        let err = validate_adb_program(&adb_path.to_string_lossy()).unwrap_err();
+
+        assert!(err.message.contains("quarantined"));
+        assert_eq!(
+            err.issue_code.as_deref(),
+            Some(ADB_ISSUE_MACOS_GATEKEEPER_QUARANTINE)
+        );
+
+        let _ = fs::remove_file(&adb_path);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

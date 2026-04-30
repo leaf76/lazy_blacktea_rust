@@ -83,6 +83,7 @@ export type AdbInfo = {
   version_output: string;
   command_path: string;
   error?: string | null;
+  issue_code?: string | null;
 };
 
 export type IosToolStatus = {

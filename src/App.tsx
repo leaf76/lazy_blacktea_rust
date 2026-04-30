@@ -26,6 +26,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { getAdbIssueRecoveryMessages } from "./adbIssues";
 import { isTauriRuntime } from "./tauriEnv";
 import {
   getDesktopNotificationPermission,
@@ -12710,6 +12711,11 @@ function App() {
                 Current command: <code>{adbInfo.command_path || "adb"}</code>
               </span>
               {adbInfo.error && <span className="muted">Error: {adbInfo.error}</span>}
+              {getAdbIssueRecoveryMessages(adbInfo).map((message) => (
+                <span key={message} className="muted">
+                  {message}
+                </span>
+              ))}
             </div>
             <div className="button-row">
               <button className="ghost" onClick={() => navigate("/settings")} disabled={busy}>
@@ -18738,6 +18744,11 @@ function App() {
                                 </span>
                               )}
                               {adbInfo.error && <span className="muted">Error: {adbInfo.error}</span>}
+                              {getAdbIssueRecoveryMessages(adbInfo).map((message) => (
+                                <span key={message} className="muted">
+                                  {message}
+                                </span>
+                              ))}
                               <span className="muted">Save Settings to apply this path globally.</span>
                             </div>
                           )}

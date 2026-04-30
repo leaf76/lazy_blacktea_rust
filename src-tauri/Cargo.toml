@@ -34,6 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["clock"] }
 regex = "1"
 tempfile = "3"
+xattr = "1"
 zip = "2"
 mime_guess = "2"
 base64 = "0.22"
