@@ -20,6 +20,7 @@ impl AdbProgramValidationError {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn with_issue(message: impl Into<String>, issue_code: impl Into<String>) -> Self {
         Self {
             message: message.into(),
