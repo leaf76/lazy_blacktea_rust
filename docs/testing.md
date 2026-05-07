@@ -290,6 +290,7 @@ Preconditions:
 
 Checks:
 - `Check for updates` updates the `Last checked` timestamp and shows either `Up to date` or a newer version.
+- Automatic checks show an optional update modal once per version; closing it keeps the top-bar `Update` entry available without starting installation.
 - Opening the update modal shows current/latest version and release notes (if available).
 - While checking/installing, related action buttons are disabled and no duplicate actions are triggered.
 - Success path: `Install and restart` eventually relaunches the app, or shows `Update installed. Please restart the app manually.` when relaunch fails.

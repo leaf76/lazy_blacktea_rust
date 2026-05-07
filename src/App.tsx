@@ -267,6 +267,7 @@ import {
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
+  shouldCloseContextMenuOnScroll,
   splitDeviceSerialsByPlatform,
   withDeviceGroups,
   type DeviceContextActionId,
@@ -329,7 +330,9 @@ import { buildScreenRecordActionMeta } from "./screenRecord";
 import {
   checkForUpdate,
   installUpdateAndRelaunch,
+  markUpdatePromptDismissed,
   readUpdateLastCheckedMs,
+  shouldPromptForUpdateVersion,
   shouldAutoCheck,
   type UpdateCheckResult,
   type UpdaterUpdateLike,
@@ -1750,6 +1753,9 @@ function App() {
       setUpdatePublishingVersion(null);
       setUpdateError(null);
       setUpdateStatus("update_available");
+      if (source === "manual" || shouldPromptForUpdateVersion(result.update.version)) {
+        setUpdateModalOpen(true);
+      }
       return;
     }
 
@@ -1911,6 +1917,9 @@ function App() {
     if (updateStatus === "installing") {
       return;
     }
+    if (updateStatus === "update_available" && updateAvailable) {
+      markUpdatePromptDismissed(updateAvailable.version);
+    }
     setUpdateModalOpen(false);
   };
 
@@ -2012,6 +2021,7 @@ function App() {
   const [filesContextMenu, setFilesContextMenu] = useState<null | { x: number; y: number; entry: DeviceFileEntry }>(
     null,
   );
+  const filesContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [uiHtml, setUiHtml] = useState("");
   const [uiXml, setUiXml] = useState("");
   const [uiScreenshotDataUrl, setUiScreenshotDataUrl] = useState("");
@@ -2104,6 +2114,7 @@ function App() {
   const [selectedAppDetails, setSelectedAppDetails] = useState<AppBasicInfo | null>(null);
   const [appsDetailsBusy, setAppsDetailsBusy] = useState(false);
   const [appsContextMenu, setAppsContextMenu] = useState<null | { x: number; y: number; app: AppInfo }>(null);
+  const appsContextMenuRef = useRef<HTMLDivElement | null>(null);
   type AppIconStatus = "queued" | "loading" | "ready" | "error";
   const [appIconsByKey, setAppIconsByKey] = useState<
     Record<string, { status: AppIconStatus; dataUrl?: string; error?: string }>
@@ -3799,7 +3810,13 @@ function App() {
         setAppsContextMenu(null);
       }
     };
-    const handleScroll = () => setAppsContextMenu(null);
+    const handleScroll = (event: Event) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (!shouldCloseContextMenuOnScroll(target, [appsContextMenuRef.current])) {
+        return;
+      }
+      setAppsContextMenu(null);
+    };
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("scroll", handleScroll, true);
     return () => {
@@ -3828,7 +3845,18 @@ function App() {
         setDeviceContextMenu(null);
       }
     };
-    const handleScroll = () => setDeviceContextMenu(null);
+    const handleScroll = (event: Event) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (
+        !shouldCloseContextMenuOnScroll(target, [
+          deviceContextMenuRef.current,
+          deviceContextSubmenuRef.current,
+        ])
+      ) {
+        return;
+      }
+      setDeviceContextMenu(null);
+    };
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("scroll", handleScroll, true);
     return () => {
@@ -3878,7 +3906,13 @@ function App() {
         setFilesContextMenu(null);
       }
     };
-    const handleScroll = () => setFilesContextMenu(null);
+    const handleScroll = (event: Event) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (!shouldCloseContextMenuOnScroll(target, [filesContextMenuRef.current])) {
+        return;
+      }
+      setFilesContextMenu(null);
+    };
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("scroll", handleScroll, true);
     return () => {
@@ -16931,6 +16965,7 @@ function App() {
                       <>
                         <div className="context-menu-backdrop" onClick={() => setFilesContextMenu(null)} />
                         <div
+                          ref={filesContextMenuRef}
                           className="context-menu context-menu-scrollable"
                           style={{
                             top: filesContextMenuPosition?.top ?? filesContextMenu.y,
@@ -17742,6 +17777,7 @@ function App() {
 	                          onMouseDown={() => setAppsContextMenu(null)}
 	                        />
 	                        <div
+	                          ref={appsContextMenuRef}
 	                          className="context-menu context-menu-scrollable"
 	                          style={{
 	                            left: appsContextMenuPosition?.left ?? appsContextMenu.x,
@@ -20708,7 +20744,7 @@ function App() {
             <div className="modal-header">
               <div>
                 <h3>Update</h3>
-                <p className="muted">Download and install the latest version.</p>
+                <p className="muted">This update is optional. You can install now or later.</p>
               </div>
               <button className="ghost" onClick={closeUpdateModal} disabled={updateStatus === "installing"}>
                 Close

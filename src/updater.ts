@@ -25,6 +25,7 @@ export type UpdateInstallResult =
 
 const UPDATE_LAST_CHECKED_KEY = "lazy_blacktea_update_last_checked_ms_v1";
 const UPDATE_LAST_SEEN_VERSION_KEY = "lazy_blacktea_update_last_seen_version_v1";
+const UPDATE_DISMISSED_PROMPT_VERSION_KEY = "lazy_blacktea_update_dismissed_prompt_version_v1";
 const GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/leaf76/lazy_blacktea_rust/releases/latest";
 const GITHUB_LATEST_MANIFEST_URL = "https://github.com/leaf76/lazy_blacktea_rust/releases/latest/download/latest.json";
 const UPDATE_ENDPOINT_STATUS_ERROR_PATTERN = /did not respond with a successful status code/i;
@@ -112,6 +113,46 @@ function writeUpdateLastSeenVersion(version: string, storage?: StorageLike | nul
   } catch (_error) {
     // best-effort
   }
+}
+
+export function readUpdateDismissedPromptVersion(storage?: StorageLike | null): string | null {
+  const s = storage ?? defaultStorage();
+  if (!s) {
+    return null;
+  }
+  try {
+    const raw = s.getItem(UPDATE_DISMISSED_PROMPT_VERSION_KEY);
+    return raw ? raw : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+export function markUpdatePromptDismissed(version: string | null | undefined, storage?: StorageLike | null) {
+  const normalizedVersion = normalizeVersionTag(version);
+  if (!normalizedVersion) {
+    return;
+  }
+
+  const s = storage ?? defaultStorage();
+  if (!s) {
+    return;
+  }
+  try {
+    s.setItem(UPDATE_DISMISSED_PROMPT_VERSION_KEY, normalizedVersion);
+  } catch (_error) {
+    // best-effort; dismissal persistence should not block update checks
+  }
+}
+
+export function shouldPromptForUpdateVersion(version: string | null | undefined, storage?: StorageLike | null): boolean {
+  const normalizedVersion = normalizeVersionTag(version);
+  if (!normalizedVersion) {
+    return false;
+  }
+
+  const dismissedVersion = normalizeVersionTag(readUpdateDismissedPromptVersion(storage));
+  return dismissedVersion !== normalizedVersion;
 }
 
 export function shouldAutoCheck(nowMs: number, lastCheckedMs: number | null, minIntervalMs: number): boolean {

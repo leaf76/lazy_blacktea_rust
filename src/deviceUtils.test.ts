@@ -32,6 +32,7 @@ import {
   resolvePrimarySerial,
   resolveSelectedSerials,
   setPrimarySelection,
+  shouldCloseContextMenuOnScroll,
   splitDeviceSerialsByPlatform,
   shouldEnableConnectivityForSelection,
   selectSerialsForGroup,
@@ -1046,5 +1047,22 @@ describe("deviceUtils", () => {
     expect(layout.left).toBe(1452);
     expect(layout.top).toBe(120);
     expect(layout.maxHeight).toBe(360);
+  });
+
+  it("keeps context menus open when their own scroll containers move", () => {
+    const mainMenuTarget = {} as Node;
+    const submenuTarget = {} as Node;
+    const outsideTarget = {} as Node;
+    const mainMenu = {
+      contains: (node: Node | null) => node === mainMenuTarget,
+    };
+    const submenu = {
+      contains: (node: Node | null) => node === submenuTarget,
+    };
+
+    expect(shouldCloseContextMenuOnScroll(mainMenuTarget, [mainMenu, submenu])).toBe(false);
+    expect(shouldCloseContextMenuOnScroll(submenuTarget, [mainMenu, submenu])).toBe(false);
+    expect(shouldCloseContextMenuOnScroll(outsideTarget, [mainMenu, submenu])).toBe(true);
+    expect(shouldCloseContextMenuOnScroll(null, [mainMenu, submenu])).toBe(true);
   });
 });

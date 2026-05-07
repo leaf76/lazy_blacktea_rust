@@ -127,6 +127,7 @@ type ContextSubmenuLayout = {
   left: number;
   maxHeight: number;
 };
+type ContextMenuScrollContainer = Pick<Element, "contains">;
 
 const DEVICE_CONTEXT_SECTION_ORDER: DeviceContextActionSectionId[] = [
   "selection",
@@ -1001,6 +1002,16 @@ export const computeContextSubmenuLayout = ({
     left: Math.round(left),
     maxHeight: Math.round(maxHeight),
   };
+};
+
+export const shouldCloseContextMenuOnScroll = (
+  target: Node | null,
+  containers: Array<ContextMenuScrollContainer | null | undefined>,
+): boolean => {
+  if (!target) {
+    return true;
+  }
+  return !containers.some((container) => container?.contains(target) ?? false);
 };
 
 export const shouldEnableConnectivityForSelection = (

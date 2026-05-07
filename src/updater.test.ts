@@ -9,8 +9,11 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   checkForUpdate,
   installUpdateAndRelaunch,
+  markUpdatePromptDismissed,
+  readUpdateDismissedPromptVersion,
   readUpdateLastCheckedMs,
   readUpdateLastSeenVersion,
+  shouldPromptForUpdateVersion,
   shouldAutoCheck,
 } from "./updater";
 
@@ -52,6 +55,44 @@ describe("shouldAutoCheck", () => {
 
   it("checks when outside the minimum interval", () => {
     expect(shouldAutoCheck(1_000, 700, 200)).toBe(true);
+  });
+});
+
+describe("update reminder prompt dismissal", () => {
+  it("prompts for a version until that version is dismissed", () => {
+    const storage = createMemoryStorage();
+
+    expect(shouldPromptForUpdateVersion("0.0.54", storage)).toBe(true);
+
+    markUpdatePromptDismissed("0.0.54", storage);
+
+    expect(readUpdateDismissedPromptVersion(storage)).toBe("0.0.54");
+    expect(shouldPromptForUpdateVersion("0.0.54", storage)).toBe(false);
+  });
+
+  it("prompts again for a newer version after dismissing an older version", () => {
+    const storage = createMemoryStorage();
+
+    markUpdatePromptDismissed("0.0.54", storage);
+
+    expect(shouldPromptForUpdateVersion("0.0.55", storage)).toBe(true);
+  });
+
+  it("ignores empty versions and survives storage failures", () => {
+    const throwingStorage = {
+      getItem: () => {
+        throw new Error("storage read failed");
+      },
+      setItem: () => {
+        throw new Error("storage write failed");
+      },
+    };
+
+    expect(shouldPromptForUpdateVersion("", throwingStorage)).toBe(false);
+    expect(shouldPromptForUpdateVersion("   ", throwingStorage)).toBe(false);
+    expect(() => markUpdatePromptDismissed("", throwingStorage)).not.toThrow();
+    expect(() => markUpdatePromptDismissed("0.0.54", throwingStorage)).not.toThrow();
+    expect(shouldPromptForUpdateVersion("0.0.54", throwingStorage)).toBe(true);
   });
 });
 
