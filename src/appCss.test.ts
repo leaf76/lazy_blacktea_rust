@@ -8,6 +8,14 @@ const readCssRule = (selector: string): string => {
   return new RegExp(`${escapedSelector}\\s*\\{(?<body>[^}]*)\\}`).exec(appCss)?.groups?.body ?? "";
 };
 
+const readNumericDeclaration = (selector: string, property: string): number => {
+  const body = readCssRule(selector);
+  const escapedProperty = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rawValue = new RegExp(`${escapedProperty}\\s*:\\s*(?<value>-?\\d+)\\s*;`).exec(body)?.groups?.value;
+  expect(rawValue, `${selector} should define ${property}`).toBeDefined();
+  return Number(rawValue);
+};
+
 describe("app shell theme cascade", () => {
   it("sets the inherited text color from active theme variables", () => {
     expect(readCssRule(".app-shell")).toContain("color: var(--color-text)");
@@ -33,5 +41,32 @@ describe("app shell theme cascade", () => {
     expect(readCssRule(".settings-group")).toContain("background: var(--surface-subtle-bg)");
     expect(readCssRule(".device-popover")).toContain("background: var(--surface-popover-bg)");
     expect(readCssRule(".modal")).toContain("background: var(--surface-popover-bg)");
+  });
+});
+
+describe("app shell stacking order", () => {
+  it("keeps the header device popover stack above the Bluetooth monitor hero", () => {
+    expect(readNumericDeclaration(".top-bar", "z-index")).toBeGreaterThan(
+      readNumericDeclaration(".bluetooth-monitor-hero", "z-index"),
+    );
+  });
+
+  it("keeps page-local sticky and inline overlays below the top bar stack", () => {
+    const topBarZIndex = readNumericDeclaration(".top-bar", "z-index");
+    const pageLocalSelectors = [
+      ".device-filter-bar",
+      ".device-command-bar",
+      ".device-list-header",
+      ".developer-options-matrix-table thead th",
+      ".developer-options-matrix-option-col",
+      ".shell-terminal-header.panel",
+      ".logcat-search-overlay",
+      ".bugreport-log-findbar",
+      ".net-profiler-chart-overlay",
+    ];
+
+    pageLocalSelectors.forEach((selector) => {
+      expect(readNumericDeclaration(selector, "z-index"), selector).toBeLessThan(topBarZIndex);
+    });
   });
 });

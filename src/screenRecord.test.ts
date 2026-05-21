@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { buildScreenRecordActionMeta, resolveScreenRecordSelectionState } from "./screenRecord";
+import {
+  buildScreenRecordActionMeta,
+  buildScreenRecordDeviceStatus,
+  buildScreenRecordSelectionStatus,
+  resolveScreenRecordSelectionState,
+} from "./screenRecord";
+import { buildDeviceCommandStatusStack } from "./deviceActionStatus";
 import type { ScreenRecordStatus } from "./types";
 
 const runningStatus = (serial: string): ScreenRecordStatus => ({
@@ -88,5 +94,85 @@ describe("screenRecord helpers", () => {
     expect(meta.description).toContain("Stop active recordings");
     expect(meta.description).toContain("1 running, 1 idle, 1 skipped");
     expect(meta.hint).toBe("Multi-device");
+  });
+
+  it("does not show a device recording status for idle devices", () => {
+    expect(buildScreenRecordDeviceStatus("alpha", undefined, undefined, false)).toBeNull();
+  });
+
+  it("shows starting feedback before the backend status refresh completes", () => {
+    expect(buildScreenRecordDeviceStatus("alpha", undefined, "starting", false)).toEqual({
+      label: "Starting...",
+      tone: "busy",
+      title: "Screen recording is starting.",
+    });
+    expect(buildScreenRecordSelectionStatus(["alpha"], {}, { alpha: "starting" }, false)).toEqual({
+      text: "Starting recording...",
+      tone: "busy",
+    });
+  });
+
+  it("shows running feedback with the display path", () => {
+    expect(buildScreenRecordDeviceStatus("alpha", runningStatus("alpha"), undefined, false)).toEqual({
+      label: "Recording",
+      tone: "error",
+      title: "Recording to /sdcard/alpha.mp4",
+    });
+    expect(buildScreenRecordSelectionStatus(["alpha"], { alpha: runningStatus("alpha") }, {}, false)).toEqual({
+      text: "Recording: /sdcard/alpha.mp4",
+      tone: "error",
+    });
+  });
+
+  it("shows stopping feedback while a stop command is in progress", () => {
+    expect(buildScreenRecordDeviceStatus("alpha", runningStatus("alpha"), "stopping", false)).toEqual({
+      label: "Stopping...",
+      tone: "busy",
+      title: "Screen recording is stopping.",
+    });
+    expect(buildScreenRecordSelectionStatus(["alpha"], { alpha: runningStatus("alpha") }, { alpha: "stopping" }, false)).toEqual({
+      text: "Stopping recording...",
+      tone: "busy",
+    });
+  });
+
+  it("summarizes mixed selected recording state", () => {
+    expect(
+      buildScreenRecordSelectionStatus(
+        ["alpha", "bravo", "charlie"],
+        { alpha: runningStatus("alpha") },
+        { bravo: "starting" },
+        false,
+      ),
+    ).toEqual({
+      text: "Recording on 1 selected device. Starting 1 recording.",
+      tone: "busy",
+    });
+  });
+
+  it("shows checking feedback while selected statuses are loading", () => {
+    expect(buildScreenRecordDeviceStatus("alpha", undefined, undefined, true)).toEqual({
+      label: "Checking...",
+      tone: "busy",
+      title: "Checking screen recording status.",
+    });
+  });
+
+  it("keeps recording summary visible alongside quick action status", () => {
+    const recordingStatus = buildScreenRecordSelectionStatus(
+      ["alpha"],
+      { alpha: runningStatus("alpha") },
+      {},
+      false,
+    );
+    expect(
+      buildDeviceCommandStatusStack(
+        { text: "Capturing screenshots on 1 selected device...", tone: "busy" },
+        recordingStatus,
+      ),
+    ).toEqual([
+      { id: "quick-action", text: "Capturing screenshots on 1 selected device...", tone: "busy" },
+      { id: "screen-record", text: "Recording: /sdcard/alpha.mp4", tone: "error" },
+    ]);
   });
 });

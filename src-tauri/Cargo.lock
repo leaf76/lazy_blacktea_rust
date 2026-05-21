@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "lazy_blacktea_rust"
-version = "0.0.83"
+version = "0.0.84"
 dependencies = [
  "base64 0.22.1",
  "chrono",

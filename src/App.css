@@ -990,7 +990,7 @@ textarea {
 .bluetooth-monitor-hero {
   position: sticky;
   top: 10px;
-  z-index: 10;
+  z-index: 4;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -2610,7 +2610,10 @@ button.ghost.icon-only {
 
 .device-state {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
   flex: 0 0 auto;
   width: auto;
 }
@@ -2621,6 +2624,11 @@ button.ghost.icon-only {
 
 .device-state .status-pill.error {
   box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.25);
+}
+
+.device-state .screen-record-status,
+.device-state .device-quick-action-status {
+  white-space: nowrap;
 }
 
 .device-actions {
@@ -2766,6 +2774,33 @@ button.ghost.icon-only {
   font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+.device-command-status-stack {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.device-command-status {
+  max-width: 280px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.device-command-status.busy {
+  color: var(--pill-warn-text);
+}
+
+.device-command-status.ok {
+  color: var(--pill-ok-text);
+}
+
+.device-command-status.error {
+  color: var(--pill-error-text);
 }
 
 .inline-row {

@@ -6,6 +6,19 @@ import {
 } from "./batchActions";
 
 export type ScreenRecordBatchAction = "start" | "stop" | "toggle";
+export type ScreenRecordPendingAction = "starting" | "stopping";
+export type ScreenRecordStatusTone = "busy" | "error";
+
+export type ScreenRecordDeviceStatusView = {
+  label: string;
+  tone: ScreenRecordStatusTone;
+  title: string;
+};
+
+export type ScreenRecordSelectionStatusView = {
+  text: string;
+  tone: ScreenRecordStatusTone;
+};
 
 export type ScreenRecordSelectionState = {
   action: ScreenRecordBatchAction;
@@ -47,6 +60,106 @@ export const resolveScreenRecordSelectionState = (
     runningSerials: meta.activeSerials,
     selectedSerials: meta.eligibleSerials,
   };
+};
+
+const pluralize = (count: number, singular: string, plural = `${singular}s`) =>
+  `${count} ${count === 1 ? singular : plural}`;
+
+export const buildScreenRecordDeviceStatus = (
+  serial: string,
+  status: ScreenRecordStatus | undefined,
+  pendingAction: ScreenRecordPendingAction | undefined,
+  loading: boolean,
+): ScreenRecordDeviceStatusView | null => {
+  if (pendingAction === "starting") {
+    return {
+      label: "Starting...",
+      tone: "busy",
+      title: "Screen recording is starting.",
+    };
+  }
+  if (pendingAction === "stopping") {
+    return {
+      label: "Stopping...",
+      tone: "busy",
+      title: "Screen recording is stopping.",
+    };
+  }
+  if (loading) {
+    return {
+      label: "Checking...",
+      tone: "busy",
+      title: "Checking screen recording status.",
+    };
+  }
+  if (status?.running) {
+    const displayPath = status.display_path.trim();
+    return {
+      label: "Recording",
+      tone: "error",
+      title: displayPath ? `Recording to ${displayPath}` : `Recording on ${serial}`,
+    };
+  }
+  return null;
+};
+
+export const buildScreenRecordSelectionStatus = (
+  selectedSerials: string[],
+  statusBySerial: Record<string, ScreenRecordStatus | undefined>,
+  pendingBySerial: Record<string, ScreenRecordPendingAction | undefined>,
+  loading: boolean,
+): ScreenRecordSelectionStatusView | null => {
+  const selected = Array.from(new Set(selectedSerials)).filter(Boolean);
+  if (!selected.length) {
+    return null;
+  }
+
+  const startingCount = selected.filter((serial) => pendingBySerial[serial] === "starting").length;
+  const stoppingCount = selected.filter((serial) => pendingBySerial[serial] === "stopping").length;
+  const runningStatuses = selected
+    .map((serial) => statusBySerial[serial])
+    .filter((status): status is ScreenRecordStatus => status?.running === true);
+  const runningCount = runningStatuses.length;
+
+  if (stoppingCount > 0 && runningCount <= stoppingCount && startingCount === 0) {
+    return {
+      text: "Stopping recording...",
+      tone: "busy",
+    };
+  }
+
+  if (startingCount > 0 && runningCount === 0 && stoppingCount === 0) {
+    return {
+      text: "Starting recording...",
+      tone: "busy",
+    };
+  }
+
+  if (runningCount > 0) {
+    const parts =
+      runningCount === 1 && startingCount === 0 && stoppingCount === 0
+        ? [`Recording: ${runningStatuses[0].display_path}`]
+        : [`Recording on ${pluralize(runningCount, "selected device")}.`];
+    if (startingCount > 0) {
+      parts.push(`Starting ${pluralize(startingCount, "recording")}.`);
+    }
+    if (stoppingCount > 0) {
+      parts.push(`Stopping ${pluralize(stoppingCount, "recording")}.`);
+    }
+    return {
+      text: parts.join(" "),
+      tone: startingCount > 0 || stoppingCount > 0 ? "busy" : "error",
+    };
+  }
+
+  if (loading) {
+    return {
+      text: "Checking recording status...",
+      tone: "busy",
+    };
+  }
+
+  return null;
 };
 
 export const buildScreenRecordActionMeta = (

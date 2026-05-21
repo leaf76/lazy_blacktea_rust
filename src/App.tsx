@@ -326,7 +326,21 @@ import {
   buildBugreportPopupWindowLabel,
   parseBugreportPopupContext,
 } from "./bugreportWindow";
-import { buildScreenRecordActionMeta } from "./screenRecord";
+import {
+  buildScreenRecordActionMeta,
+  buildScreenRecordDeviceStatus,
+  buildScreenRecordSelectionStatus,
+  type ScreenRecordPendingAction,
+} from "./screenRecord";
+import {
+  buildDeviceCommandStatusStack,
+  buildDeviceQuickActionButtonLabel,
+  buildDeviceQuickActionDeviceStatus,
+  buildDeviceQuickActionSelectionStatus,
+  type DeviceQuickActionKind,
+  type DeviceQuickActionPhase,
+  type DeviceQuickActionStatus,
+} from "./deviceActionStatus";
 import {
   checkForUpdate,
   installUpdateAndRelaunch,
@@ -464,6 +478,7 @@ type ActionsShellTabId = (typeof ACTIONS_SHELL_TABS)[number]["id"];
 
 const TERMINAL_MAX_LINES = 500;
 const NET_PROFILER_MAX_SAMPLES = 180;
+const DEVICE_QUICK_ACTION_STATUS_TTL_MS = 3000;
 const BUGREPORT_LOG_LOAD_PAGE_SIZE = 500;
 const BUGREPORT_LOG_LOAD_ALL_MAX_ROWS = 20_000;
 const APK_INSTALLER_STORAGE_KEY = "lazy_blacktea_apk_installer_v1";
@@ -2101,8 +2116,14 @@ function App() {
   const [apkInstallSummary, setApkInstallSummary] = useState<string[]>([]);
   const [latestApkInstallTaskId, setLatestApkInstallTaskId] = useState<string | null>(null);
   const [screenRecordStatusBySerial, setScreenRecordStatusBySerial] = useState<Record<string, ScreenRecordStatus>>({});
+  const [screenRecordPendingBySerial, setScreenRecordPendingBySerial] = useState<
+    Record<string, ScreenRecordPendingAction | undefined>
+  >({});
   const [screenRecordStatusLoadingBySerial, setScreenRecordStatusLoadingBySerial] = useState<
     Record<string, boolean>
+  >({});
+  const [deviceQuickActionStatusBySerial, setDeviceQuickActionStatusBySerial] = useState<
+    Record<string, DeviceQuickActionStatus | undefined>
   >({});
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [appsFilter, setAppsFilter] = useState("");
@@ -2255,6 +2276,7 @@ function App() {
   const refreshSeqRef = useRef(0);
   const detailRefreshSeqRef = useRef(0);
   const detailRefreshTimerRef = useRef<number | null>(null);
+  const deviceQuickActionStatusTimersRef = useRef<Record<string, number>>({});
   const deviceAutoRefreshLastWarnAtRef = useRef(0);
   const deviceTrackingLastSnapshotAtRef = useRef<number>(0);
   const deviceTrackingPendingSnapshotRef = useRef<DeviceInfo[] | null>(null);
@@ -2286,6 +2308,15 @@ function App() {
       livePattern: "",
     },
   });
+
+  useEffect(() => {
+    return () => {
+      Object.values(deviceQuickActionStatusTimersRef.current).forEach((timer) => {
+        window.clearTimeout(timer);
+      });
+      deviceQuickActionStatusTimersRef.current = {};
+    };
+  }, []);
   const perfLastSerialRef = useRef<string | null>(null);
   const netLastSerialRef = useRef<string | null>(null);
   const filesDragContextRef = useRef<{
@@ -4275,6 +4306,75 @@ function App() {
       }),
     });
     return id;
+  };
+
+  const setDeviceQuickActionStatuses = (
+    serials: string[],
+    kind: DeviceQuickActionKind,
+    phase: DeviceQuickActionPhase,
+    operationId: string,
+  ) => {
+    setDeviceQuickActionStatusBySerial((prev) => {
+      const next = { ...prev };
+      serials.forEach((serial) => {
+        next[serial] = { id: operationId, kind, phase };
+      });
+      return next;
+    });
+  };
+
+  const clearDeviceQuickActionOperation = (operationId: string, serials: string[]) => {
+    const timer = deviceQuickActionStatusTimersRef.current[operationId];
+    if (timer != null) {
+      window.clearTimeout(timer);
+      delete deviceQuickActionStatusTimersRef.current[operationId];
+    }
+    setDeviceQuickActionStatusBySerial((prev) => {
+      const next = { ...prev };
+      serials.forEach((serial) => {
+        if (next[serial]?.id === operationId) {
+          delete next[serial];
+        }
+      });
+      return next;
+    });
+  };
+
+  const scheduleDeviceQuickActionStatusClear = (operationId: string, serials: string[]) => {
+    const existingTimer = deviceQuickActionStatusTimersRef.current[operationId];
+    if (existingTimer != null) {
+      window.clearTimeout(existingTimer);
+    }
+    deviceQuickActionStatusTimersRef.current[operationId] = window.setTimeout(() => {
+      clearDeviceQuickActionOperation(operationId, serials);
+    }, DEVICE_QUICK_ACTION_STATUS_TTL_MS);
+  };
+
+  const finishDeviceQuickActionOperation = ({
+    operationId,
+    kind,
+    successSerials,
+    errorSerials,
+  }: {
+    operationId: string;
+    kind: DeviceQuickActionKind;
+    successSerials: string[];
+    errorSerials: string[];
+  }) => {
+    const affectedSerials = Array.from(new Set([...successSerials, ...errorSerials]));
+    setDeviceQuickActionStatusBySerial((prev) => {
+      const next = { ...prev };
+      successSerials.forEach((serial) => {
+        next[serial] = { id: operationId, kind, phase: "success" };
+      });
+      errorSerials.forEach((serial) => {
+        next[serial] = { id: operationId, kind, phase: "error" };
+      });
+      return next;
+    });
+    if (affectedSerials.length) {
+      scheduleDeviceQuickActionStatusClear(operationId, affectedSerials);
+    }
   };
 
   const beginUiAutoSyncTask = (serial: string) => {
@@ -6449,14 +6549,28 @@ function App() {
       pushToast("No eligible devices selected.", "error");
       return;
     }
+    const operationId = crypto.randomUUID();
+    setDeviceQuickActionStatuses(targetSerials, "reboot", "pending", operationId);
     setBusy(true);
     try {
       await rebootDevices(targetSerials, mode);
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: "reboot",
+        successSerials: targetSerials,
+        errorSerials: [],
+      });
       pushToast(
         `Reboot command sent.${skippedCount > 0 ? ` Skipped ${skippedCount} unavailable device(s).` : ""}`,
         "info",
       );
     } catch (error) {
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: "reboot",
+        successSerials: [],
+        errorSerials: targetSerials,
+      });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
@@ -6483,11 +6597,25 @@ function App() {
       pushToast("No eligible devices selected.", "error");
       return;
     }
+    const operationId = crypto.randomUUID();
+    const actionKind: DeviceQuickActionKind = enable ? "wifi_on" : "wifi_off";
+    setDeviceQuickActionStatuses(targetSerials, actionKind, "pending", operationId);
     setBusy(true);
     try {
       const response = await setWifiState(targetSerials, enable);
       const successes = response.data.filter((item) => item.exit_code === 0).map((item) => item.serial);
       const failures = response.data.filter((item) => item.exit_code !== 0);
+      const reportedSerials = new Set(response.data.map((item) => item.serial));
+      const failureSerials = [
+        ...failures.map((item) => item.serial),
+        ...targetSerials.filter((serial) => !reportedSerials.has(serial)),
+      ];
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: actionKind,
+        successSerials: successes,
+        errorSerials: failureSerials,
+      });
       if (successes.length) {
         setDevices((prev) => applyDeviceDetailPatch(prev, successes, { wifi_is_on: enable }));
         scheduleDeviceDetailRefresh(800, { notifyOnError: false });
@@ -6508,6 +6636,12 @@ function App() {
         );
       }
     } catch (error) {
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: actionKind,
+        successSerials: [],
+        errorSerials: targetSerials,
+      });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
@@ -6534,11 +6668,25 @@ function App() {
       pushToast("No eligible devices selected.", "error");
       return;
     }
+    const operationId = crypto.randomUUID();
+    const actionKind: DeviceQuickActionKind = enable ? "bluetooth_on" : "bluetooth_off";
+    setDeviceQuickActionStatuses(targetSerials, actionKind, "pending", operationId);
     setBusy(true);
     try {
       const response = await setBluetoothState(targetSerials, enable);
       const successes = response.data.filter((item) => item.exit_code === 0).map((item) => item.serial);
       const failures = response.data.filter((item) => item.exit_code !== 0);
+      const reportedSerials = new Set(response.data.map((item) => item.serial));
+      const failureSerials = [
+        ...failures.map((item) => item.serial),
+        ...targetSerials.filter((serial) => !reportedSerials.has(serial)),
+      ];
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: actionKind,
+        successSerials: successes,
+        errorSerials: failureSerials,
+      });
       if (successes.length) {
         setDevices((prev) => applyDeviceDetailPatch(prev, successes, { bt_is_on: enable }));
         scheduleDeviceDetailRefresh(800, { notifyOnError: false });
@@ -6559,6 +6707,12 @@ function App() {
         );
       }
     } catch (error) {
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: actionKind,
+        successSerials: [],
+        errorSerials: targetSerials,
+      });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
@@ -11136,6 +11290,9 @@ function App() {
       pushToast("Select at least one device.", "error");
       return;
     }
+    const targetSerials = selectedSerials;
+    const operationId = crypto.randomUUID();
+    setDeviceQuickActionStatuses(targetSerials, "mirror_launch", "pending", operationId);
     setBusy(true);
     try {
       let availability = scrcpyInfo;
@@ -11145,11 +11302,29 @@ function App() {
         setScrcpyInfo(response.data);
       }
       if (!availability?.available) {
+        finishDeviceQuickActionOperation({
+          operationId,
+          kind: "mirror_launch",
+          successSerials: [],
+          errorSerials: targetSerials,
+        });
         pushToast("scrcpy is not available.", "error");
         return;
       }
-      const response = await launchScrcpy(selectedSerials);
+      const response = await launchScrcpy(targetSerials);
       const failures = response.data.filter((item) => item.exit_code !== 0);
+      const successSerials = response.data.filter((item) => item.exit_code === 0).map((item) => item.serial);
+      const reportedSerials = new Set(response.data.map((item) => item.serial));
+      const failureSerials = [
+        ...failures.map((item) => item.serial),
+        ...targetSerials.filter((serial) => !reportedSerials.has(serial)),
+      ];
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: "mirror_launch",
+        successSerials,
+        errorSerials: failureSerials,
+      });
       if (failures.length) {
         const firstFailure = failures[0];
         const detail = (firstFailure.stderr || firstFailure.stdout || "Unknown error").trim();
@@ -11162,6 +11337,12 @@ function App() {
         pushToast("scrcpy launched.", "info");
       }
     } catch (error) {
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: "mirror_launch",
+        successSerials: [],
+        errorSerials: targetSerials,
+      });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
@@ -11187,6 +11368,8 @@ function App() {
     try {
       const serials = screenshotActionMeta.eligibleSerials;
       const skippedCount = screenshotActionMeta.skippedSerials.length;
+      const operationId = crypto.randomUUID();
+      setDeviceQuickActionStatuses(serials, "screenshot", "pending", operationId);
       const taskId = beginTask({
         kind: "screenshot",
         title: `Screenshot (${serials.length})`,
@@ -11194,6 +11377,8 @@ function App() {
       });
       let hasError = false;
       let traceSet = false;
+      const successSerials: string[] = [];
+      const errorSerials: string[] = [];
       await Promise.all(
         serials.map(async (serial) => {
           try {
@@ -11208,8 +11393,10 @@ function App() {
               serial,
               patch: { status: "success", output_path: response.data, message: `Saved to ${response.data}` },
             });
+            successSerials.push(serial);
           } catch (error) {
             hasError = true;
+            errorSerials.push(serial);
             dispatchTasks({
               type: "TASK_UPDATE_DEVICE",
               id: taskId,
@@ -11219,6 +11406,12 @@ function App() {
           }
         }),
       );
+      finishDeviceQuickActionOperation({
+        operationId,
+        kind: "screenshot",
+        successSerials,
+        errorSerials,
+      });
       dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
       pushToast(
         `${
@@ -11243,6 +11436,18 @@ function App() {
       return;
     }
 
+    const pendingSerials = new Set<string>();
+    const markScreenRecordPending = (serials: string[], action: ScreenRecordPendingAction) => {
+      serials.forEach((serial) => pendingSerials.add(serial));
+      setScreenRecordPendingBySerial((prev) => {
+        const next = { ...prev };
+        serials.forEach((serial) => {
+          next[serial] = action;
+        });
+        return next;
+      });
+    };
+
     setBusy(true);
     try {
       const outputDir = (config?.output_path ?? "").trim() || undefined;
@@ -11252,6 +11457,7 @@ function App() {
 
       const stopGroup = nextAction.taskGroups.find((group) => group.action === "stop");
       if (stopGroup?.serials.length) {
+        markScreenRecordPending(stopGroup.serials, "stopping");
         const taskId = beginTask({
           kind: "screen_record_stop",
           title: `Screen Record Stop (${stopGroup.serials.length})`,
@@ -11300,6 +11506,7 @@ function App() {
 
       const startGroup = nextAction.taskGroups.find((group) => group.action === "start");
       if (startGroup?.serials.length) {
+        markScreenRecordPending(startGroup.serials, "starting");
         const taskId = beginTask({
           kind: "screen_record_start",
           title: `Screen Record Start (${startGroup.serials.length})`,
@@ -11369,6 +11576,15 @@ function App() {
         );
       }
     } finally {
+      if (pendingSerials.size > 0) {
+        setScreenRecordPendingBySerial((prev) => {
+          const next = { ...prev };
+          pendingSerials.forEach((serial) => {
+            delete next[serial];
+          });
+          return next;
+        });
+      }
       setBusy(false);
     }
   };
@@ -12281,6 +12497,64 @@ function App() {
       ),
     [batchAvailabilityBySerial, selectedSerials, screenRecordStatusBySerial],
   );
+  const screenRecordSelectionStatus = useMemo(
+    () =>
+      buildScreenRecordSelectionStatus(
+        selectedSerials,
+        screenRecordStatusBySerial,
+        screenRecordPendingBySerial,
+        screenRecordStatusLoading,
+      ),
+    [screenRecordPendingBySerial, screenRecordStatusBySerial, screenRecordStatusLoading, selectedSerials],
+  );
+  const deviceQuickActionSelectionStatus = useMemo(
+    () => buildDeviceQuickActionSelectionStatus(selectedSerials, deviceQuickActionStatusBySerial),
+    [deviceQuickActionStatusBySerial, selectedSerials],
+  );
+  const deviceCommandStatusStack = useMemo(
+    () => buildDeviceCommandStatusStack(deviceQuickActionSelectionStatus, screenRecordSelectionStatus),
+    [deviceQuickActionSelectionStatus, screenRecordSelectionStatus],
+  );
+  const selectedScreenRecordPendingActions = useMemo(
+    () =>
+      selectedSerials
+        .map((serial) => screenRecordPendingBySerial[serial])
+        .filter((action): action is ScreenRecordPendingAction => action === "starting" || action === "stopping"),
+    [screenRecordPendingBySerial, selectedSerials],
+  );
+  const screenRecordCommandLabel = selectedScreenRecordPendingActions.includes("stopping")
+    ? "Stopping..."
+    : selectedScreenRecordPendingActions.includes("starting")
+      ? "Starting..."
+      : screenRecordActionMeta.title;
+  const screenshotCommandLabel = buildDeviceQuickActionButtonLabel(
+    screenshotActionMeta.title,
+    "Capturing...",
+    selectedSerials,
+    deviceQuickActionStatusBySerial,
+    ["screenshot"],
+  );
+  const mirrorCommandLabel = buildDeviceQuickActionButtonLabel(
+    "Live Mirror",
+    "Launching...",
+    selectedSerials,
+    deviceQuickActionStatusBySerial,
+    ["mirror_launch"],
+  );
+  const rebootCommandLabel = buildDeviceQuickActionButtonLabel(
+    rebootActionMeta.title,
+    "Sending...",
+    selectedSerials,
+    deviceQuickActionStatusBySerial,
+    ["reboot"],
+  );
+  const rebootDirectCommandLabel = buildDeviceQuickActionButtonLabel(
+    "Reboot…",
+    "Sending...",
+    selectedSerials,
+    deviceQuickActionStatusBySerial,
+    ["reboot"],
+  );
   const logcatClearActionMeta = useMemo(
     () =>
       buildSingletonActionMeta({
@@ -12336,7 +12610,7 @@ function App() {
     },
     {
       id: "screenshot",
-      label: screenshotActionMeta.title,
+      label: screenshotCommandLabel,
       section: "capture",
       scope: "both",
       disabled: busy || selectedCount === 0 || screenshotActionMeta.disabled,
@@ -12346,7 +12620,7 @@ function App() {
     },
     {
       id: "record",
-      label: screenRecordActionMeta.title,
+      label: screenRecordCommandLabel,
       section: "capture",
       scope: "both",
       disabled: busy || selectedCount === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled,
@@ -12356,7 +12630,7 @@ function App() {
     },
     {
       id: "reboot",
-      label: rebootActionMeta.title,
+      label: rebootCommandLabel,
       section: "control",
       scope: "both",
       tone: "danger",
@@ -12365,7 +12639,7 @@ function App() {
     },
     {
       id: "mirror",
-      label: "Live Mirror",
+      label: mirrorCommandLabel,
       section: "control",
       scope: "both",
       disabled: busy || selectedCount === 0 || !hasSelectedAndroidActionTarget,
@@ -15701,6 +15975,15 @@ function App() {
                               const isSelected = selectedSerials.includes(serial);
                               const isActive = serial === activeSerial;
                               const stateTone = getDeviceTone(device.summary.state);
+                              const screenRecordDeviceStatus = buildScreenRecordDeviceStatus(
+                                serial,
+                                screenRecordStatusBySerial[serial],
+                                screenRecordPendingBySerial[serial],
+                                screenRecordStatusLoadingBySerial[serial] === true,
+                              );
+                              const deviceQuickActionStatus = buildDeviceQuickActionDeviceStatus(
+                                deviceQuickActionStatusBySerial[serial],
+                              );
                               return (
                                 <div
                                   key={serial}
@@ -15779,6 +16062,22 @@ function App() {
                                   <div className="device-cell device-status-actions">
                                     <div className="device-state">
                                       <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
+                                      {screenRecordDeviceStatus && (
+                                        <span
+                                          className={`status-pill screen-record-status ${screenRecordDeviceStatus.tone}`}
+                                          title={screenRecordDeviceStatus.title}
+                                        >
+                                          {screenRecordDeviceStatus.label}
+                                        </span>
+                                      )}
+                                      {deviceQuickActionStatus && (
+                                        <span
+                                          className={`status-pill device-quick-action-status ${deviceQuickActionStatus.tone}`}
+                                          title={deviceQuickActionStatus.title}
+                                        >
+                                          {deviceQuickActionStatus.label}
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="device-actions">
                                       <button
@@ -15828,6 +16127,22 @@ function App() {
                               <span className="muted">
                                 {selectedOnlineCount}/{selectedCount} online
                               </span>
+                              {deviceCommandStatusStack.length > 0 && (
+                                <div className="device-command-status-stack" aria-live="polite">
+                                  {deviceCommandStatusStack.map((status) => (
+                                    <span
+                                      key={status.id}
+                                      className={`device-command-status ${
+                                        status.id === "quick-action"
+                                          ? "device-quick-action-command-status"
+                                          : "screen-record-command-status"
+                                      } ${status.tone}`}
+                                    >
+                                      {status.text}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                             <div className="button-row device-command-actions">
                               <button
@@ -15835,14 +16150,14 @@ function App() {
                                 onClick={() => void handleQuickScreenshot()}
                                 disabled={busy || selectedCount === 0 || screenshotActionMeta.disabled}
                               >
-                                {screenshotActionMeta.title}
+                                {screenshotCommandLabel}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => void handleQuickScreenRecord()}
                                 disabled={busy || selectedCount === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled}
                               >
-                                {screenRecordActionMeta.title}
+                                {screenRecordCommandLabel}
                               </button>
                               <button
                                 type="button"
@@ -15868,10 +16183,10 @@ function App() {
                                 onClick={() => void handleScrcpyLaunch()}
                                 disabled={busy || selectedCount === 0 || !hasSelectedAndroidActionTarget}
                               >
-                                Live Mirror
+                                {mirrorCommandLabel}
                               </button>
                               <button type="button" className="danger" onClick={requestRebootConfirm} disabled={busy || selectedCount === 0 || rebootActionMeta.disabled}>
-                                Reboot…
+                                {rebootDirectCommandLabel}
                               </button>
                             </div>
                           </div>
