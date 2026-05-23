@@ -70,3 +70,11 @@ describe("app shell stacking order", () => {
     });
   });
 });
+
+describe("device manager layout", () => {
+  it("lets device status actions wrap before they can overlap info columns", () => {
+    expect(readCssRule(".device-status-actions")).toContain("flex-wrap: wrap");
+    expect(readCssRule(".device-state")).toContain("flex: 1 1 190px");
+    expect(readCssRule(".device-state")).toContain("min-width: 0");
+  });
+});

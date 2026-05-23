@@ -17,6 +17,14 @@ const runningStatus = (serial: string): ScreenRecordStatus => ({
   segment_count: 1,
 });
 
+const runningStatusWithLogcat = (serial: string): ScreenRecordStatus => ({
+  ...runningStatus(serial),
+  logcat_output_path: `/tmp/${serial}_logcat.txt`,
+  logcat_running: true,
+  artifact_dir: `/tmp/screenrecord_${serial}`,
+  artifact_paths: [],
+});
+
 describe("screenRecord helpers", () => {
   it("classifies all-idle selections as start", () => {
     const state = resolveScreenRecordSelectionState(
@@ -121,6 +129,35 @@ describe("screenRecord helpers", () => {
     expect(buildScreenRecordSelectionStatus(["alpha"], { alpha: runningStatus("alpha") }, {}, false)).toEqual({
       text: "Recording: /sdcard/alpha.mp4",
       tone: "error",
+    });
+  });
+
+  it("shows linked logcat capture feedback while recording", () => {
+    expect(buildScreenRecordDeviceStatus("alpha", runningStatusWithLogcat("alpha"), undefined, false)).toEqual({
+      label: "Recording + Logs",
+      tone: "error",
+      title: "Recording to /sdcard/alpha.mp4. Capturing logcat to /tmp/alpha_logcat.txt. Artifacts: /tmp/screenrecord_alpha",
+    });
+    expect(
+      buildScreenRecordSelectionStatus(["alpha"], { alpha: runningStatusWithLogcat("alpha") }, {}, false),
+    ).toEqual({
+      text: "Recording: /sdcard/alpha.mp4. Logcat: /tmp/alpha_logcat.txt. Artifacts: /tmp/screenrecord_alpha",
+      tone: "error",
+    });
+  });
+
+  it("surfaces linked logcat capture errors without hiding the recording path", () => {
+    const status: ScreenRecordStatus = {
+      ...runningStatusWithLogcat("alpha"),
+      logcat_running: false,
+      logcat_error: "Logcat capture exited before recording stopped.",
+    };
+
+    expect(buildScreenRecordDeviceStatus("alpha", status, undefined, false)).toEqual({
+      label: "Recording",
+      tone: "error",
+      title:
+        "Recording to /sdcard/alpha.mp4. Logcat capture issue: Logcat capture exited before recording stopped. Artifacts: /tmp/screenrecord_alpha",
     });
   });
 

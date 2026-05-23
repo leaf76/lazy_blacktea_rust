@@ -36,18 +36,29 @@ pub enum RecordingHandle {
     Adb {
         child: Child,
         remote_path: String,
-        default_output_dir: String,
+        artifact_dir: String,
     },
     AdbSegmented {
         stop_flag: Arc<AtomicBool>,
         shared: Arc<Mutex<SegmentedRecordingShared>>,
         join: JoinHandle<()>,
-        default_output_dir: String,
+        artifact_dir: String,
     },
     Scrcpy {
         child: Child,
         output_path: String,
+        artifact_dir: String,
     },
+}
+
+pub struct RecordingLogcatCapture {
+    pub child: Child,
+    pub output_path: String,
+}
+
+pub struct RecordingSession {
+    pub recording: RecordingHandle,
+    pub logcat_capture: Option<RecordingLogcatCapture>,
 }
 
 pub struct BugreportHandle {
@@ -57,7 +68,7 @@ pub struct BugreportHandle {
 
 pub struct AppState {
     pub scheduler: Arc<TaskScheduler>,
-    pub recording_processes: Mutex<HashMap<String, RecordingHandle>>,
+    pub recording_processes: Mutex<HashMap<String, RecordingSession>>,
     pub logcat_processes: Mutex<HashMap<String, LogcatHandle>>,
     pub ios_syslog_processes: Mutex<HashMap<String, LogcatHandle>>,
     pub perf_monitors: Mutex<HashMap<String, PerfMonitorHandle>>,

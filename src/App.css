@@ -2603,7 +2603,7 @@ button.ghost.icon-only {
   flex-direction: row;
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
 }
@@ -2614,7 +2614,8 @@ button.ghost.icon-only {
   justify-content: flex-end;
   gap: 6px;
   flex-wrap: wrap;
-  flex: 0 0 auto;
+  flex: 1 1 190px;
+  min-width: 0;
   width: auto;
 }
 
@@ -2628,6 +2629,9 @@ button.ghost.icon-only {
 
 .device-state .screen-record-status,
 .device-state .device-quick-action-status {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

@@ -935,6 +935,85 @@ fn get_logcat_status_inner_cleans_stale_handle() {
 }
 
 #[test]
+fn attach_logcat_capture_to_stop_result_includes_video_and_logcat_artifacts() {
+    let result = ScreenRecordStopResult {
+        serial: "ABC".to_string(),
+        backend: ScreenRecordBackend::Adb,
+        output_path: "/tmp/out/screenrecord_ABC/screenrecord_ABC.mp4".to_string(),
+        output_paths: vec!["/tmp/out/screenrecord_ABC/screenrecord_ABC.mp4".to_string()],
+        segment_count: 1,
+        artifact_dir: Some("/tmp/out/screenrecord_ABC".to_string()),
+        logcat_output_path: None,
+        logcat_error: None,
+        artifact_paths: Vec::new(),
+    };
+
+    let result = attach_logcat_capture_to_stop_result(
+        result,
+        Some(RecordingLogcatCaptureResult {
+            output_path: "/tmp/out/screenrecord_ABC/screenrecord_ABC_logcat.txt".to_string(),
+            error: Some("Logcat capture exited before recording stopped.".to_string()),
+        }),
+    );
+
+    assert_eq!(
+        result.artifact_paths,
+        vec![
+            "/tmp/out/screenrecord_ABC/screenrecord_ABC.mp4",
+            "/tmp/out/screenrecord_ABC/screenrecord_ABC_logcat.txt",
+        ]
+    );
+    assert_eq!(
+        result.logcat_output_path.as_deref(),
+        Some("/tmp/out/screenrecord_ABC/screenrecord_ABC_logcat.txt")
+    );
+    assert_eq!(
+        result.logcat_error.as_deref(),
+        Some("Logcat capture exited before recording stopped.")
+    );
+    assert_eq!(
+        result.artifact_dir.as_deref(),
+        Some("/tmp/out/screenrecord_ABC")
+    );
+}
+
+#[test]
+fn cleanup_failed_recording_artifact_dir_removes_only_known_logcat_file_and_empty_dir() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_dir = temp.path().join("screenrecord_ABC_20260523_153000");
+    std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+    let logcat_path = artifact_dir.join("screenrecord_ABC_20260523_153000_logcat.txt");
+    std::fs::write(&logcat_path, b"partial startup log").expect("logcat file");
+
+    cleanup_failed_recording_artifact_dir(
+        &artifact_dir.to_string_lossy(),
+        &logcat_path.to_string_lossy(),
+    );
+
+    assert!(!artifact_dir.exists());
+}
+
+#[test]
+fn cleanup_failed_recording_artifact_dir_leaves_non_empty_dir() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_dir = temp.path().join("screenrecord_ABC_20260523_153000");
+    std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+    let logcat_path = artifact_dir.join("screenrecord_ABC_20260523_153000_logcat.txt");
+    let unrelated_path = artifact_dir.join("keep.txt");
+    std::fs::write(&logcat_path, b"partial startup log").expect("logcat file");
+    std::fs::write(&unrelated_path, b"keep").expect("unrelated file");
+
+    cleanup_failed_recording_artifact_dir(
+        &artifact_dir.to_string_lossy(),
+        &logcat_path.to_string_lossy(),
+    );
+
+    assert!(!logcat_path.exists());
+    assert!(artifact_dir.exists());
+    assert!(unrelated_path.exists());
+}
+
+#[test]
 fn parse_legacy_logcat_preset_json_reads_filters() {
     let raw = r#"{
         "name": "Crash Watch",

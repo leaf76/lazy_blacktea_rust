@@ -22,6 +22,8 @@ export type DeviceTaskStatus = {
   progress?: number | null;
   message?: string | null;
   output_path?: string | null;
+  artifact_dir?: string | null;
+  artifact_paths?: string[] | null;
   stdout?: string | null;
   stderr?: string | null;
   exit_code?: number | null;
@@ -201,6 +203,8 @@ export type StoredDeviceTaskStatus = {
   status: TaskStatus;
   message?: string | null;
   output_path?: string | null;
+  artifact_dir?: string | null;
+  artifact_paths?: string[] | null;
   exit_code?: number | null;
 };
 
@@ -253,6 +257,23 @@ const truncateString = (value: string, maxLen: number) => {
   return `${value.slice(0, Math.max(0, maxLen - 1))}…`;
 };
 
+const sanitizeArtifactPaths = (paths: string[] | null | undefined): string[] => {
+  const seen = new Set<string>();
+  const sanitized: string[] = [];
+  for (const path of paths ?? []) {
+    const normalized = typeof path === "string" ? path.trim() : "";
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    sanitized.push(truncateString(normalized, 500));
+    if (sanitized.length >= 12) {
+      break;
+    }
+  }
+  return sanitized;
+};
+
 export const sanitizeTaskStateForStorage = (state: TaskState): StoredTaskState => {
   const maxItems = Math.max(1, Math.min(200, state.max_items));
   const items: StoredTaskItem[] = state.items.slice(0, maxItems).map((item) => {
@@ -263,6 +284,8 @@ export const sanitizeTaskStateForStorage = (state: TaskState): StoredTaskState =
         status: entry.status,
         message: entry.message ? truncateString(entry.message, 240) : entry.message ?? null,
         output_path: entry.output_path ? truncateString(entry.output_path, 500) : entry.output_path ?? null,
+        artifact_dir: entry.artifact_dir ? truncateString(entry.artifact_dir, 500) : entry.artifact_dir ?? null,
+        artifact_paths: sanitizeArtifactPaths(entry.artifact_paths),
         exit_code: entry.exit_code ?? null,
       };
     });
@@ -321,6 +344,8 @@ export const inflateStoredTaskState = (stored: StoredTaskState, fallbackMaxItems
         status: entry.status,
         message: entry.message ?? null,
         output_path: entry.output_path ?? null,
+        artifact_dir: entry.artifact_dir ?? null,
+        artifact_paths: sanitizeArtifactPaths(entry.artifact_paths),
         exit_code: entry.exit_code ?? null,
         progress: null,
         stdout: null,

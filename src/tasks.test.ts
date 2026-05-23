@@ -113,6 +113,43 @@ describe("tasksReducer", () => {
     expect(inflated.items[0].devices.A.stdout ?? null).toBeNull();
   });
 
+  it("persists task artifact paths without restoring bulky process output", () => {
+    const state = createInitialTaskState();
+    const task = createTask({ id: "1", kind: "screen_record_stop", title: "Screen Record Stop", serials: ["A"] });
+    const withArtifacts = tasksReducer({ ...state, items: [task] }, {
+      type: "TASK_UPDATE_DEVICE",
+      id: "1",
+      serial: "A",
+      patch: {
+        status: "success",
+        output_path: "/tmp/out/screenrecord_A/screenrecord_A.mp4",
+        artifact_dir: "/tmp/out/screenrecord_A",
+        artifact_paths: [
+          "/tmp/out/screenrecord_A/screenrecord_A.mp4",
+          "/tmp/out/screenrecord_A/screenrecord_A_logcat.txt",
+        ],
+        stdout: "y".repeat(50_000),
+      },
+    });
+
+    const stored = sanitizeTaskStateForStorage(withArtifacts);
+    expect(stored.items[0].devices.A.artifact_paths).toEqual([
+      "/tmp/out/screenrecord_A/screenrecord_A.mp4",
+      "/tmp/out/screenrecord_A/screenrecord_A_logcat.txt",
+    ]);
+    expect(stored.items[0].devices.A.artifact_dir).toBe("/tmp/out/screenrecord_A");
+
+    const parsed = parseStoredTaskState(JSON.stringify(stored));
+    expect(parsed).not.toBeNull();
+    const inflated = inflateStoredTaskState(parsed!, 50);
+    expect(inflated.items[0].devices.A.artifact_paths).toEqual([
+      "/tmp/out/screenrecord_A/screenrecord_A.mp4",
+      "/tmp/out/screenrecord_A/screenrecord_A_logcat.txt",
+    ]);
+    expect(inflated.items[0].devices.A.artifact_dir).toBe("/tmp/out/screenrecord_A");
+    expect(inflated.items[0].devices.A.stdout ?? null).toBeNull();
+  });
+
   it("finalizes restored running bugreport tasks as interrupted", () => {
     const runningTask = createTask({
       id: "1",

@@ -153,12 +153,20 @@ export type ScreenRecordStatus = {
   backend: ScreenRecordBackend;
   display_path: string;
   segment_count: number;
+  artifact_dir?: string | null;
+  logcat_output_path?: string | null;
+  logcat_running?: boolean;
+  logcat_error?: string | null;
+  artifact_paths?: string[];
 };
 
 export type ScreenRecordStartResult = {
   serial: string;
   backend: ScreenRecordBackend;
   display_path: string;
+  artifact_dir?: string | null;
+  logcat_output_path?: string | null;
+  logcat_running?: boolean;
 };
 
 export type ScreenRecordStopResult = {
@@ -167,6 +175,10 @@ export type ScreenRecordStopResult = {
   output_path: string;
   output_paths: string[];
   segment_count: number;
+  artifact_dir?: string | null;
+  logcat_output_path?: string | null;
+  logcat_error?: string | null;
+  artifact_paths?: string[];
 };
 
 export type LegacyLogcatPreset = {
@@ -460,6 +472,8 @@ export type BugreportTaskDeviceSnapshot = {
   status: BugreportTaskStatus;
   message?: string | null;
   output_path?: string | null;
+  artifact_dir?: string | null;
+  artifact_paths?: string[] | null;
   exit_code?: number | null;
 };
 

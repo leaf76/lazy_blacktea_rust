@@ -65,6 +65,29 @@ export const resolveScreenRecordSelectionState = (
 const pluralize = (count: number, singular: string, plural = `${singular}s`) =>
   `${count} ${count === 1 ? singular : plural}`;
 
+const formatLogcatStatusParts = (
+  status: ScreenRecordStatus,
+  mode: "device" | "selection" = "device",
+): string[] => {
+  const logcatPath = status.logcat_output_path?.trim() ?? "";
+  const logcatError = status.logcat_error?.trim() ?? "";
+  const artifactDir = status.artifact_dir?.trim() ?? "";
+  const artifactParts = artifactDir ? [`Artifacts: ${artifactDir}`] : [];
+  if (logcatError) {
+    return [`Logcat capture issue: ${logcatError.replace(/[.。]+$/, "")}`, ...artifactParts];
+  }
+  if (status.logcat_running && logcatPath) {
+    return [
+      mode === "device" ? `Capturing logcat to ${logcatPath}` : `Logcat: ${logcatPath}`,
+      ...artifactParts,
+    ];
+  }
+  if (logcatPath) {
+    return [`Logcat: ${logcatPath}`, ...artifactParts];
+  }
+  return artifactParts;
+};
+
 export const buildScreenRecordDeviceStatus = (
   serial: string,
   status: ScreenRecordStatus | undefined,
@@ -94,10 +117,15 @@ export const buildScreenRecordDeviceStatus = (
   }
   if (status?.running) {
     const displayPath = status.display_path.trim();
+    const logcatParts = formatLogcatStatusParts(status);
+    const title = [
+      displayPath ? `Recording to ${displayPath}` : `Recording on ${serial}`,
+      ...logcatParts,
+    ].join(". ");
     return {
-      label: "Recording",
+      label: status.logcat_running && !status.logcat_error ? "Recording + Logs" : "Recording",
       tone: "error",
-      title: displayPath ? `Recording to ${displayPath}` : `Recording on ${serial}`,
+      title,
     };
   }
   return null;
@@ -138,7 +166,10 @@ export const buildScreenRecordSelectionStatus = (
   if (runningCount > 0) {
     const parts =
       runningCount === 1 && startingCount === 0 && stoppingCount === 0
-        ? [`Recording: ${runningStatuses[0].display_path}`]
+        ? [
+            `Recording: ${runningStatuses[0].display_path}`,
+            ...formatLogcatStatusParts(runningStatuses[0], "selection"),
+          ]
         : [`Recording on ${pluralize(runningCount, "selected device")}.`];
     if (startingCount > 0) {
       parts.push(`Starting ${pluralize(startingCount, "recording")}.`);
@@ -147,7 +178,10 @@ export const buildScreenRecordSelectionStatus = (
       parts.push(`Stopping ${pluralize(stoppingCount, "recording")}.`);
     }
     return {
-      text: parts.join(" "),
+      text:
+        runningCount === 1 && startingCount === 0 && stoppingCount === 0
+          ? parts.join(". ")
+          : parts.join(" "),
       tone: startingCount > 0 || stoppingCount > 0 ? "busy" : "error",
     };
   }

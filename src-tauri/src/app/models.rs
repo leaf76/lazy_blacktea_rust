@@ -241,6 +241,16 @@ pub struct ScreenRecordStatus {
     pub backend: ScreenRecordBackend,
     pub display_path: String,
     pub segment_count: usize,
+    #[serde(default)]
+    pub artifact_dir: Option<String>,
+    #[serde(default)]
+    pub logcat_output_path: Option<String>,
+    #[serde(default)]
+    pub logcat_running: bool,
+    #[serde(default)]
+    pub logcat_error: Option<String>,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -248,6 +258,12 @@ pub struct ScreenRecordStartResult {
     pub serial: String,
     pub backend: ScreenRecordBackend,
     pub display_path: String,
+    #[serde(default)]
+    pub artifact_dir: Option<String>,
+    #[serde(default)]
+    pub logcat_output_path: Option<String>,
+    #[serde(default)]
+    pub logcat_running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,6 +274,14 @@ pub struct ScreenRecordStopResult {
     #[serde(default)]
     pub output_paths: Vec<String>,
     pub segment_count: usize,
+    #[serde(default)]
+    pub artifact_dir: Option<String>,
+    #[serde(default)]
+    pub logcat_output_path: Option<String>,
+    #[serde(default)]
+    pub logcat_error: Option<String>,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

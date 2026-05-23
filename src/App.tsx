@@ -11473,6 +11473,18 @@ function App() {
                 dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
               }
               const savedPath = response.data.output_path?.trim() ?? "";
+              const logcatPath = response.data.logcat_output_path?.trim() ?? "";
+              const logcatError = response.data.logcat_error?.trim() ?? "";
+              const artifactDir = response.data.artifact_dir?.trim() ?? "";
+              const artifactPaths = Array.from(
+                new Set(
+                  [
+                    ...(response.data.artifact_paths ?? []),
+                    ...(response.data.output_paths ?? []),
+                    logcatPath,
+                  ].filter((path) => path.trim()),
+                ),
+              );
               const segmentCount = response.data.segment_count;
               const message =
                 segmentCount > 1
@@ -11480,14 +11492,22 @@ function App() {
                   : savedPath
                     ? `Saved to ${savedPath}`
                     : "Stopped.";
+              const logcatMessage = logcatPath ? ` Logcat saved to ${logcatPath}.` : "";
+              const artifactDirMessage = artifactDir ? ` Artifacts folder: ${artifactDir}.` : "";
+              const logcatErrorMessage = logcatError ? ` Logcat capture issue: ${logcatError}` : "";
+              if (logcatError) {
+                hasError = true;
+              }
               dispatchTasks({
                 type: "TASK_UPDATE_DEVICE",
                 id: taskId,
                 serial,
                 patch: {
-                  status: "success",
+                  status: logcatError ? "error" : "success",
                   output_path: savedPath || null,
-                  message,
+                  artifact_dir: artifactDir || null,
+                  artifact_paths: artifactPaths,
+                  message: `${message}${logcatMessage}${artifactDirMessage}${logcatErrorMessage}`.trim(),
                 },
               });
             } catch (error) {
@@ -11527,7 +11547,17 @@ function App() {
                 serial,
                 patch: {
                   status: "success",
-                  message: `Recording to ${response.data.display_path}`,
+                  message: [
+                    `Recording to ${response.data.display_path}`,
+                    response.data.logcat_output_path?.trim()
+                      ? `Capturing logcat to ${response.data.logcat_output_path}`
+                      : "",
+                    response.data.artifact_dir?.trim()
+                      ? `Artifacts folder: ${response.data.artifact_dir}`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(". "),
                 },
               });
             } catch (error) {
@@ -15688,6 +15718,9 @@ function App() {
                                       : entry.status === "cancelled" || entry.status === "interrupted"
                                         ? "warn"
                                         : "error";
+                                const extraArtifactPaths = Array.from(new Set(entry.artifact_paths ?? []))
+                                  .filter((path) => path.trim())
+                                  .filter((path) => path !== entry.output_path);
                                 return (
                                   <div
                                     key={serial}
@@ -15724,6 +15757,18 @@ function App() {
                                           Open output
                                         </button>
                                       )}
+                                      {entry.artifact_dir && (
+                                        <button className="ghost" onClick={() => openPath(entry.artifact_dir!)}>
+                                          Open folder
+                                        </button>
+                                      )}
+                                      {extraArtifactPaths.map((path, index) => (
+                                        <button key={path} className="ghost" onClick={() => openPath(path)}>
+                                          {path.toLowerCase().includes("logcat")
+                                            ? "Open logcat"
+                                            : `Open artifact ${index + 2}`}
+                                        </button>
+                                      ))}
                                       {entry.status === "error" && (
                                         <button
                                           className="ghost"

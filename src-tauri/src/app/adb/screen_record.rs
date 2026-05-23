@@ -54,6 +54,14 @@ pub fn build_screen_record_file_stem(
     }
 }
 
+pub fn build_local_recording_artifact_dir(
+    output_root: &Path,
+    serial: &str,
+    timestamp: &str,
+) -> PathBuf {
+    output_root.join(build_screen_record_file_stem(serial, timestamp, None))
+}
+
 pub fn build_remote_recording_path(
     serial: &str,
     timestamp: &str,
@@ -66,17 +74,42 @@ pub fn build_remote_recording_path(
 }
 
 pub fn build_local_recording_path(
-    output_dir: &Path,
+    output_root: &Path,
     serial: &str,
     timestamp: &str,
     segment_index: Option<usize>,
     extension: &str,
 ) -> PathBuf {
-    output_dir.join(format!(
+    build_local_recording_artifact_dir(output_root, serial, timestamp).join(format!(
         "{}.{}",
         build_screen_record_file_stem(serial, timestamp, segment_index),
         extension.trim_start_matches('.')
     ))
+}
+
+pub fn build_local_recording_logcat_path(
+    output_root: &Path,
+    serial: &str,
+    timestamp: &str,
+) -> PathBuf {
+    build_local_recording_artifact_dir(output_root, serial, timestamp).join(format!(
+        "{}_logcat.txt",
+        build_screen_record_file_stem(serial, timestamp, None)
+    ))
+}
+
+pub fn build_recording_logcat_args(serial: &str) -> Vec<String> {
+    vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "logcat".to_string(),
+        "-v".to_string(),
+        "threadtime".to_string(),
+        "-b".to_string(),
+        "all".to_string(),
+        "-T".to_string(),
+        "1".to_string(),
+    ]
 }
 
 pub fn build_adb_screen_record_args(
@@ -209,6 +242,70 @@ mod tests {
         settings.time_limit_sec = 0;
         let args = build_adb_screen_record_args("device", &settings, "/sdcard/out.mp4", None);
         assert!(!args.iter().any(|item| item == "--time-limit"));
+    }
+
+    #[test]
+    fn build_local_recording_artifact_dir_uses_sanitized_recording_stem() {
+        let dir = build_local_recording_artifact_dir(
+            Path::new("/tmp/out"),
+            "USB:ABC/12 34",
+            "20260523_153000",
+        );
+        assert_eq!(
+            dir,
+            PathBuf::from("/tmp/out/screenrecord_USB_ABC_12_34_20260523_153000")
+        );
+    }
+
+    #[test]
+    fn build_local_recording_path_uses_artifact_dir() {
+        let path = build_local_recording_path(
+            Path::new("/tmp/out"),
+            "USB:ABC/12 34",
+            "20260523_153000",
+            None,
+            "mp4",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/tmp/out/screenrecord_USB_ABC_12_34_20260523_153000/screenrecord_USB_ABC_12_34_20260523_153000.mp4"
+            )
+        );
+    }
+
+    #[test]
+    fn build_recording_logcat_args_uses_structured_raw_all_buffers_args() {
+        let args = build_recording_logcat_args("USB:ABC/12 34");
+        assert_eq!(
+            args,
+            vec![
+                "-s",
+                "USB:ABC/12 34",
+                "logcat",
+                "-v",
+                "threadtime",
+                "-b",
+                "all",
+                "-T",
+                "1",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_local_recording_logcat_path_uses_artifact_dir() {
+        let path = build_local_recording_logcat_path(
+            Path::new("/tmp/out"),
+            "USB:ABC/12 34",
+            "20260523_153000",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/tmp/out/screenrecord_USB_ABC_12_34_20260523_153000/screenrecord_USB_ABC_12_34_20260523_153000_logcat.txt"
+            )
+        );
     }
 
     #[test]
