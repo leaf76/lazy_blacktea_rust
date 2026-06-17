@@ -72,6 +72,11 @@ pub fn run_command_with_timeout(
     });
 
     let start = Instant::now();
+    // Adaptive backoff: a flat 50ms poll added up to ~50ms latency to *every* command (the first
+    // try_wait almost always observes the child still running). Start tight and back off so fast
+    // adb calls return promptly while long-running ones stay cheap to poll.
+    let mut poll_interval = Duration::from_millis(1);
+    let max_poll_interval = Duration::from_millis(25);
     let exit_code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
@@ -83,7 +88,8 @@ pub fn run_command_with_timeout(
                     let _ = stderr_handle.join();
                     return Err(AppError::system("Command timed out".to_string(), trace_id));
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(poll_interval);
+                poll_interval = (poll_interval * 2).min(max_poll_interval);
             }
             Err(err) => {
                 let _ = stdout_handle.join();

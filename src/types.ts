@@ -259,6 +259,8 @@ export type BluetoothParsedEvent = {
 };
 
 export type BluetoothMonitorEventEntry = {
+  /** Monotonic ingest id; used as a stable React key independent of list position. */
+  id: number;
   event: BluetoothParsedEvent;
   receivedAtMs: number;
 };

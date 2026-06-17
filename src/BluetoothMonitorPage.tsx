@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { isTauriRuntime } from "./tauriEnv";
@@ -6,7 +6,6 @@ import type {
   BluetoothDiscoveredDeviceRow,
   BluetoothEventEvent,
   BluetoothMonitorEventEntry,
-  BluetoothParsedEvent,
   BluetoothParsedSnapshot,
   BluetoothPairedDeviceRow,
   BluetoothSnapshotEvent,
@@ -92,7 +91,72 @@ const eventCategoryOptions: Array<[BluetoothEventCategory, string]> = [
   ["error", "Errors"],
 ];
 
-const buildEventKey = (event: BluetoothParsedEvent, index: number) => `${event.timestamp}:${event.raw_line}:${index}`;
+type BluetoothEventRowProps = {
+  entry: BluetoothMonitorEventEntry;
+  onCopy: (rawLine: string) => void;
+};
+
+// Memoized so that prepending a new event re-renders only the new row, not all (up to 200) rows.
+// Relies on a stable per-entry `id` key and a stable `onCopy` callback from the parent.
+const BluetoothEventRow = memo(({ entry, onCopy }: BluetoothEventRowProps) => {
+  const { event, receivedAtMs } = entry;
+  const category = bluetoothEventCategory(event.event_type);
+  const time = formatClockTime(toUnixSeconds(event.timestamp, receivedAtMs));
+  const metadataEntries = Object.entries(event.metadata ?? {})
+    .map(([key, value]) => {
+      const text = valueToChipText(value);
+      return text ? `${key}: ${text}` : null;
+    })
+    .filter((value): value is string => Boolean(value));
+  return (
+    <details className={`bluetooth-monitor-event bluetooth-monitor-event-${category}`}>
+      <summary className="bluetooth-monitor-event-summary">
+        <div className="bluetooth-monitor-event-time muted">{time}</div>
+        <div className="bluetooth-monitor-event-main">
+          <div className="bluetooth-monitor-event-title">
+            <span className="bluetooth-monitor-event-dot" />
+            <strong>{bluetoothEventLabel(event.event_type)}</strong>
+            {event.tag ? (
+              <span className="filter-chip bluetooth-monitor-chip bluetooth-monitor-tag">{event.tag}</span>
+            ) : null}
+          </div>
+          <div className="bluetooth-monitor-event-message">{event.message}</div>
+          {metadataEntries.length ? (
+            <div className="bluetooth-monitor-chip-row">
+              {metadataEntries.slice(0, 3).map((chip) => (
+                <span key={chip} className="filter-chip bluetooth-monitor-chip">
+                  {chip}
+                </span>
+              ))}
+              {metadataEntries.length > 3 ? (
+                <span className="muted">+{metadataEntries.length - 3} more</span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </summary>
+
+      <div className="bluetooth-monitor-event-details">
+        {metadataEntries.length ? (
+          <div className="bluetooth-monitor-chip-row">
+            {metadataEntries.map((chip) => (
+              <span key={chip} className="filter-chip bluetooth-monitor-chip">
+                {chip}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        <pre className="bluetooth-monitor-event-raw">{event.raw_line}</pre>
+        <div className="button-row compact">
+          <button type="button" className="ghost" onClick={() => onCopy(event.raw_line)}>
+            Copy row
+          </button>
+        </div>
+      </div>
+    </details>
+  );
+});
+BluetoothEventRow.displayName = "BluetoothEventRow";
 
 const formatScannerClientLabel = (client: string) => {
   const trimmed = client.trim();
@@ -121,6 +185,7 @@ export const BluetoothMonitorPage = ({
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const pendingEventsRef = useRef<BluetoothMonitorEventEntry[]>([]);
   const timelinePausedRef = useRef(false);
+  const eventIdRef = useRef(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [pendingMonitoringDesired, setPendingMonitoringDesired] = useState<boolean | null>(null);
   const [snapshot, setSnapshot] = useState<BluetoothParsedSnapshot | null>(null);
@@ -216,7 +281,7 @@ export const BluetoothMonitorPage = ({
       }
       const receivedAtMs = Date.now();
       setLastEventReceivedAtMs(receivedAtMs);
-      const nextEntry = { event: payload.event, receivedAtMs };
+      const nextEntry = { id: eventIdRef.current++, event: payload.event, receivedAtMs };
       setSessionEvents((prev) => [nextEntry, ...prev].slice(0, SESSION_EVENT_LIMIT));
       if (timelinePausedRef.current) {
         pendingEventsRef.current = [nextEntry, ...pendingEventsRef.current].slice(0, EVENT_LIMIT);
@@ -397,7 +462,7 @@ export const BluetoothMonitorPage = ({
     queuedEvents: timelineNewCount,
   });
 
-  const handleCopyText = async (text: string, successMessage: string) => {
+  const handleCopyText = useCallback(async (text: string, successMessage: string) => {
     if (!text.trim()) {
       setCopyNotice("Nothing to copy.");
       return;
@@ -408,7 +473,15 @@ export const BluetoothMonitorPage = ({
     } catch {
       setCopyNotice("Copy failed.");
     }
-  };
+  }, []);
+
+  // Stable identity so the memoized event rows are not invalidated on every parent render.
+  const handleCopyEventRow = useCallback(
+    (rawLine: string) => {
+      void handleCopyText(rawLine, "Copied event row to clipboard.");
+    },
+    [handleCopyText],
+  );
 
   const handleCopyRaw = async () => {
     await handleCopyText(snapshot?.raw_text?.trim() ?? "", "Copied raw snapshot to clipboard.");
@@ -694,70 +767,9 @@ export const BluetoothMonitorPage = ({
 
           {filteredEvents.length ? (
             <div className="bluetooth-monitor-timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
-              {filteredEvents.map(({ event, receivedAtMs }, index) => {
-                const category = bluetoothEventCategory(event.event_type);
-                const time = formatClockTime(toUnixSeconds(event.timestamp, receivedAtMs));
-                const metadataEntries = Object.entries(event.metadata ?? {})
-                  .map(([key, value]) => {
-                    const text = valueToChipText(value);
-                    return text ? `${key}: ${text}` : null;
-                  })
-                  .filter((value): value is string => Boolean(value));
-                return (
-                  <details
-                    key={buildEventKey(event, index)}
-                    className={`bluetooth-monitor-event bluetooth-monitor-event-${category}`}
-                  >
-                    <summary className="bluetooth-monitor-event-summary">
-                      <div className="bluetooth-monitor-event-time muted">{time}</div>
-                      <div className="bluetooth-monitor-event-main">
-                        <div className="bluetooth-monitor-event-title">
-                          <span className="bluetooth-monitor-event-dot" />
-                          <strong>{bluetoothEventLabel(event.event_type)}</strong>
-                          {event.tag ? (
-                            <span className="filter-chip bluetooth-monitor-chip bluetooth-monitor-tag">{event.tag}</span>
-                          ) : null}
-                        </div>
-                        <div className="bluetooth-monitor-event-message">{event.message}</div>
-                        {metadataEntries.length ? (
-                          <div className="bluetooth-monitor-chip-row">
-                            {metadataEntries.slice(0, 3).map((chip) => (
-                              <span key={chip} className="filter-chip bluetooth-monitor-chip">
-                                {chip}
-                              </span>
-                            ))}
-                            {metadataEntries.length > 3 ? (
-                              <span className="muted">+{metadataEntries.length - 3} more</span>
-                            ) : null}
-                          </div>
-                        ) : null}
-                      </div>
-                    </summary>
-
-                    <div className="bluetooth-monitor-event-details">
-                      {metadataEntries.length ? (
-                        <div className="bluetooth-monitor-chip-row">
-                          {metadataEntries.map((chip) => (
-                            <span key={chip} className="filter-chip bluetooth-monitor-chip">
-                              {chip}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                      <pre className="bluetooth-monitor-event-raw">{event.raw_line}</pre>
-                      <div className="button-row compact">
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={() => void handleCopyText(event.raw_line, "Copied event row to clipboard.")}
-                        >
-                          Copy row
-                        </button>
-                      </div>
-                    </div>
-                  </details>
-                );
-              })}
+              {filteredEvents.map((entry) => (
+                <BluetoothEventRow key={entry.id} entry={entry} onCopy={handleCopyEventRow} />
+              ))}
             </div>
           ) : (
             <div className="bluetooth-monitor-empty">

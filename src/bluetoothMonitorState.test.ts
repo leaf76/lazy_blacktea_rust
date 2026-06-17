@@ -38,6 +38,7 @@ const buildStateSummary = (overrides: Partial<BluetoothStateSummary> = {}): Blue
 });
 
 const buildMonitorEvent = (overrides: Partial<BluetoothMonitorEventEntry> = {}): BluetoothMonitorEventEntry => ({
+  id: 0,
   receivedAtMs: 1_700_000_500_000,
   ...overrides,
   event: {

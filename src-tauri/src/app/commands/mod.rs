@@ -2346,6 +2346,69 @@ pub fn export_diagnostics_bundle(
     })
 }
 
+const DETAIL_SECTION_BATTERY: &str = "battery";
+const DETAIL_SECTION_WIFI: &str = "wifi";
+const DETAIL_SECTION_BLUETOOTH: &str = "bluetooth";
+const DETAIL_SECTION_BT_STATE: &str = "bt_state";
+const DETAIL_SECTION_AUDIO: &str = "audio";
+const DETAIL_SECTION_GMS: &str = "gms";
+const DETAIL_SECTION_WM: &str = "wm";
+const DETAIL_SECTION_DF: &str = "df";
+const DETAIL_SECTION_MEM: &str = "mem";
+
+fn detail_section_marker(key: &str) -> String {
+    format!("__LBT_DETAIL__{key}__")
+}
+
+/// Builds a single device-side shell script running every (non-getprop) device-detail probe,
+/// emitting a unique marker line before each so the combined stdout can be split into sections.
+/// Uses `;` so a failing probe (e.g. an unsupported `cmd`) does not abort the rest.
+fn build_device_detail_script() -> String {
+    let probes: [(&str, &str); 9] = [
+        (DETAIL_SECTION_BATTERY, "dumpsys battery"),
+        (DETAIL_SECTION_WIFI, "settings get global wifi_on"),
+        (DETAIL_SECTION_BLUETOOTH, "settings get global bluetooth_on"),
+        (DETAIL_SECTION_BT_STATE, "cmd bluetooth_manager get-state"),
+        (DETAIL_SECTION_AUDIO, "dumpsys audio"),
+        (DETAIL_SECTION_GMS, "dumpsys package com.google.android.gms"),
+        (DETAIL_SECTION_WM, "wm size"),
+        (DETAIL_SECTION_DF, "df -k /data"),
+        (DETAIL_SECTION_MEM, "cat /proc/meminfo"),
+    ];
+    probes
+        .iter()
+        .map(|(key, command)| format!("echo {}; {}", detail_section_marker(key), command))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Splits combined device-detail stdout into per-probe sections keyed by marker name. A probe that
+/// produced no output (or whose command was unsupported) simply yields an empty/absent section.
+fn split_device_detail_sections(stdout: &str) -> HashMap<String, String> {
+    let mut sections: HashMap<String, String> = HashMap::new();
+    let mut current_key: Option<String> = None;
+    let mut current_lines: Vec<&str> = Vec::new();
+    for line in stdout.lines() {
+        if let Some(key) = line
+            .trim()
+            .strip_prefix("__LBT_DETAIL__")
+            .and_then(|rest| rest.strip_suffix("__"))
+        {
+            if let Some(prev_key) = current_key.take() {
+                sections.insert(prev_key, current_lines.join("\n"));
+            }
+            current_key = Some(key.to_string());
+            current_lines = Vec::new();
+        } else if current_key.is_some() {
+            current_lines.push(line);
+        }
+    }
+    if let Some(prev_key) = current_key.take() {
+        sections.insert(prev_key, current_lines.join("\n"));
+    }
+    sections
+}
+
 fn load_device_detail(
     serial: &str,
     trace_id: &str,
@@ -2443,200 +2506,106 @@ fn load_device_detail(
 
     let mut detail = build_device_detail(serial, &parse_getprop_map(&output.stdout));
 
-    let battery_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "dumpsys".to_string(),
-        "battery".to_string(),
-    ];
-    let (_battery_elapsed_ms, battery) = run_timed("battery", battery_args, Duration::from_secs(5));
-    if let Ok(battery_output) = battery {
-        detail.battery_level = parse_battery_level(&battery_output.stdout);
-    }
-
-    let wifi_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "settings".to_string(),
-        "get".to_string(),
-        "global".to_string(),
-        "wifi_on".to_string(),
-    ];
-    let (_wifi_elapsed_ms, wifi_output) = run_timed("wifi", wifi_args, Duration::from_secs(5));
-    if let Ok(wifi_output) = wifi_output {
-        detail.wifi_is_on = parse_settings_bool(&wifi_output.stdout);
-    }
-
-    let bt_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "settings".to_string(),
-        "get".to_string(),
-        "global".to_string(),
-        "bluetooth_on".to_string(),
-    ];
-    let (_bt_elapsed_ms, bt_output) = run_timed("bluetooth", bt_args, Duration::from_secs(5));
-    if let Ok(bt_output) = bt_output {
-        detail.bt_is_on = parse_settings_bool(&bt_output.stdout);
-    }
-
-    let bt_state_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "cmd".to_string(),
-        "bluetooth_manager".to_string(),
-        "get-state".to_string(),
-    ];
-    let (_bt_state_elapsed_ms, bt_state_output) = run_timed(
-        "bluetooth_manager_state",
-        bt_state_args,
-        Duration::from_secs(5),
-    );
-    let bt_state = bt_state_output
-        .ok()
-        .and_then(|output| parse_bluetooth_manager_state(&output.stdout));
-    if detail.bt_is_on.is_none() {
-        if let Some(state) = bt_state.as_deref() {
-            detail.bt_is_on = Some(state.contains("ON"));
-        }
-    }
-    detail.bluetooth_manager_state = bt_state;
-
-    let audio_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "dumpsys".to_string(),
-        "audio".to_string(),
-    ];
-    let (_audio_elapsed_ms, audio_output) = run_timed("audio", audio_args, Duration::from_secs(5));
-    if let Ok(audio_output) = audio_output {
-        detail.audio_state = parse_audio_summary(&audio_output.stdout);
-    }
-
-    let gms_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "dumpsys".to_string(),
-        "package".to_string(),
-        "com.google.android.gms".to_string(),
-    ];
-    let (_gms_elapsed_ms, gms_output) = run_timed("gms", gms_args, Duration::from_secs(5));
-    if let Ok(gms_output) = gms_output {
-        detail.gms_version = parse_gms_version_name(&gms_output.stdout);
-    }
-
-    let wm_size_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "wm".to_string(),
-        "size".to_string(),
-    ];
-    let (wm_size_elapsed_ms, wm_size_output) =
-        run_timed("wm_size", wm_size_args, Duration::from_secs(5));
-    match wm_size_output {
-        Ok(out) => {
-            let parsed = parse_wm_size(&out.stdout);
-            if parsed.is_none() && !out.stdout.trim().is_empty() {
-                warn!(
-                    trace_id = %trace_id,
-                    serial = %serial,
-                    step = "wm_size",
-                    elapsed_ms = wm_size_elapsed_ms,
-                    output = %out.stdout.trim(),
-                    "failed to parse wm size"
-                );
-            }
-            detail.resolution = parsed;
-        }
-        Err(err) => {
-            warn!(
-                trace_id = %trace_id,
-                serial = %serial,
-                step = "wm_size",
-                elapsed_ms = wm_size_elapsed_ms,
-                error = %err,
-                "failed to load wm size"
-            );
-        }
-    }
-
-    let df_args = vec![
-        "-s".to_string(),
-        serial_arg.clone(),
-        "shell".to_string(),
-        "df".to_string(),
-        "-k".to_string(),
-        "/data".to_string(),
-    ];
-    let (df_elapsed_ms, df_output) = run_timed("df", df_args, Duration::from_secs(5));
-    match df_output {
-        Ok(out) => match parse_df_total_kb(&out.stdout) {
-            Ok(total_kb) => {
-                detail.storage_total_bytes = Some(total_kb.saturating_mul(1024));
-            }
-            Err(err) => {
-                warn!(
-                    trace_id = %trace_id,
-                    serial = %serial,
-                    step = "df",
-                    elapsed_ms = df_elapsed_ms,
-                    error = %err,
-                    "failed to parse df output"
-                );
-            }
-        },
-        Err(err) => {
-            warn!(
-                trace_id = %trace_id,
-                serial = %serial,
-                step = "df",
-                elapsed_ms = df_elapsed_ms,
-                error = %err,
-                "failed to load df output"
-            );
-        }
-    }
-
-    let meminfo_args = vec![
+    // Batch every remaining probe into ONE `adb shell` invocation with delimited sections,
+    // instead of spawning one adb process per probe. This turns ~9 process spawns per device per
+    // refresh into a single spawn. Each probe still degrades gracefully: a missing/empty section
+    // leaves its field unset, exactly as an individually-failed command did.
+    let detail_script = build_device_detail_script();
+    let batch_args = vec![
         "-s".to_string(),
         serial_arg,
         "shell".to_string(),
-        "cat".to_string(),
-        "/proc/meminfo".to_string(),
+        detail_script,
     ];
-    let (meminfo_elapsed_ms, meminfo_output) =
-        run_timed("meminfo", meminfo_args, Duration::from_secs(5));
-    match meminfo_output {
-        Ok(out) => match parse_mem_totals(&out.stdout) {
-            Ok(mem) => {
-                detail.memory_total_bytes = Some(mem.total_bytes);
+    let (batch_elapsed_ms, batch_output) =
+        run_timed("device_detail_batch", batch_args, Duration::from_secs(15));
+    match batch_output {
+        Ok(out) => {
+            let sections = split_device_detail_sections(&out.stdout);
+
+            if let Some(text) = sections.get(DETAIL_SECTION_BATTERY) {
+                detail.battery_level = parse_battery_level(text);
             }
-            Err(err) => {
-                warn!(
-                    trace_id = %trace_id,
-                    serial = %serial,
-                    step = "meminfo",
-                    elapsed_ms = meminfo_elapsed_ms,
-                    error = %err,
-                    "failed to parse /proc/meminfo"
-                );
+            if let Some(text) = sections.get(DETAIL_SECTION_WIFI) {
+                detail.wifi_is_on = parse_settings_bool(text);
             }
-        },
+            if let Some(text) = sections.get(DETAIL_SECTION_BLUETOOTH) {
+                detail.bt_is_on = parse_settings_bool(text);
+            }
+
+            let bt_state = sections
+                .get(DETAIL_SECTION_BT_STATE)
+                .and_then(|text| parse_bluetooth_manager_state(text));
+            if detail.bt_is_on.is_none() {
+                if let Some(state) = bt_state.as_deref() {
+                    detail.bt_is_on = Some(state.contains("ON"));
+                }
+            }
+            detail.bluetooth_manager_state = bt_state;
+
+            if let Some(text) = sections.get(DETAIL_SECTION_AUDIO) {
+                detail.audio_state = parse_audio_summary(text);
+            }
+            if let Some(text) = sections.get(DETAIL_SECTION_GMS) {
+                detail.gms_version = parse_gms_version_name(text);
+            }
+
+            if let Some(text) = sections.get(DETAIL_SECTION_WM) {
+                let parsed = parse_wm_size(text);
+                if parsed.is_none() && !text.trim().is_empty() {
+                    warn!(
+                        trace_id = %trace_id,
+                        serial = %serial,
+                        step = "wm_size",
+                        output = %text.trim(),
+                        "failed to parse wm size"
+                    );
+                }
+                detail.resolution = parsed;
+            }
+
+            if let Some(text) = sections.get(DETAIL_SECTION_DF) {
+                match parse_df_total_kb(text) {
+                    Ok(total_kb) => {
+                        detail.storage_total_bytes = Some(total_kb.saturating_mul(1024));
+                    }
+                    Err(err) => {
+                        warn!(
+                            trace_id = %trace_id,
+                            serial = %serial,
+                            step = "df",
+                            error = %err,
+                            "failed to parse df output"
+                        );
+                    }
+                }
+            }
+
+            if let Some(text) = sections.get(DETAIL_SECTION_MEM) {
+                match parse_mem_totals(text) {
+                    Ok(mem) => {
+                        detail.memory_total_bytes = Some(mem.total_bytes);
+                    }
+                    Err(err) => {
+                        warn!(
+                            trace_id = %trace_id,
+                            serial = %serial,
+                            step = "meminfo",
+                            error = %err,
+                            "failed to parse /proc/meminfo"
+                        );
+                    }
+                }
+            }
+        }
         Err(err) => {
             warn!(
                 trace_id = %trace_id,
                 serial = %serial,
-                step = "meminfo",
-                elapsed_ms = meminfo_elapsed_ms,
+                step = "device_detail_batch",
+                elapsed_ms = batch_elapsed_ms,
                 error = %err,
-                "failed to load /proc/meminfo"
+                "failed to load batched device detail"
             );
         }
     }
@@ -4400,6 +4369,90 @@ fn stop_recording_session(
         .logcat_capture
         .map(|capture| stop_recording_logcat_capture(capture, trace_id));
     recording_result.map(|result| attach_logcat_capture_to_stop_result(result, logcat_result))
+}
+
+/// Best-effort kill of a recording session's child process(es) without the finalize/pull steps
+/// (used on app shutdown, where pulling artifacts off the device may hang or is unwanted).
+fn kill_recording_session(session: RecordingSession) {
+    match session.recording {
+        RecordingHandle::Adb { mut child, .. } | RecordingHandle::Scrcpy { mut child, .. } => {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        RecordingHandle::AdbSegmented { stop_flag, .. } => {
+            // Signal the segment loop to stop; do not join here so quitting stays responsive.
+            stop_flag.store(true, Ordering::Relaxed);
+        }
+    }
+    if let Some(mut capture) = session.logcat_capture {
+        let _ = capture.child.kill();
+        let _ = capture.child.wait();
+    }
+}
+
+/// Tears down every spawned child process and monitor thread on app exit. Without this, closing
+/// the window orphans long-lived `adb logcat` / `screenrecord` / `scrcpy` children and leaves the
+/// device-tracker, perf/net pollers and terminal sessions running.
+pub fn shutdown_all(state: &AppState) {
+    // Long-lived capture children first (the ones most likely to orphan).
+    if let Ok(mut map) = state.logcat_processes.lock() {
+        for (_, handle) in map.drain() {
+            handle.stop_flag.store(true, Ordering::Relaxed);
+            let mut child = handle.child;
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    if let Ok(mut map) = state.ios_syslog_processes.lock() {
+        for (_, handle) in map.drain() {
+            handle.stop_flag.store(true, Ordering::Relaxed);
+            let mut child = handle.child;
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    if let Ok(mut map) = state.recording_processes.lock() {
+        for (_, session) in map.drain() {
+            kill_recording_session(session);
+        }
+    }
+    if let Ok(mut map) = state.bugreport_processes.lock() {
+        for (_, handle) in map.drain() {
+            handle.cancel_flag.store(true, Ordering::Relaxed);
+            if let Ok(mut child_guard) = handle.child.lock() {
+                if let Some(mut child) = child_guard.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+    // Monitor threads: signal stop; they own short-lived adb children and exit promptly.
+    if let Ok(mut map) = state.perf_monitors.lock() {
+        for (_, handle) in map.drain() {
+            handle.stop_flag.store(true, Ordering::Relaxed);
+        }
+    }
+    if let Ok(mut map) = state.net_profilers.lock() {
+        for (_, handle) in map.drain() {
+            handle.stop_flag.store(true, Ordering::Relaxed);
+        }
+    }
+    if let Ok(mut map) = state.bluetooth_monitors.lock() {
+        for (_, handle) in map.drain() {
+            handle.stop();
+        }
+    }
+    if let Ok(mut tracker) = state.device_tracker.lock() {
+        if let Some(handle) = tracker.take() {
+            handle.stop();
+        }
+    }
+    if let Ok(mut map) = state.terminal_sessions.lock() {
+        for (_, session) in map.drain() {
+            session.stop();
+        }
+    }
 }
 
 fn stop_result_to_status(result: &ScreenRecordStopResult) -> ScreenRecordStatus {

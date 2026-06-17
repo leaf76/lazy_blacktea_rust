@@ -107,7 +107,9 @@ impl BluetoothParser {
             .map(|line| line.trim().to_string())
             .filter(|line| !line.is_empty())
             .collect();
-        let lowered: Vec<String> = lines.iter().map(|line| line.to_lowercase()).collect();
+        // ASCII lowercasing is sufficient here (all match keywords below are ASCII) and is far
+        // cheaper than Unicode `to_lowercase()` on the periodic snapshot path.
+        let lowered: Vec<String> = lines.iter().map(|line| line.to_ascii_lowercase()).collect();
 
         let adapter_enabled = lowered
             .iter()
@@ -136,7 +138,9 @@ impl BluetoothParser {
         if line.trim().is_empty() {
             return None;
         }
-        let lowered = line.to_lowercase();
+        // Runs for every line of the `-b all` logcat firehose; ASCII lowercasing matches the
+        // ASCII-only classification keywords and avoids the cost of Unicode case folding.
+        let lowered = line.to_ascii_lowercase();
         let event_type = self.classify_event(&lowered)?;
         let (tag, message) = self.split_tag_and_message(line);
         let metadata = self.extract_metadata(&lowered, &message, line);

@@ -20,6 +20,7 @@ use app::commands::{
 };
 use app::logging::init_logging;
 use app::state::AppState;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -106,6 +107,13 @@ pub fn run() {
             search_bugreport_logcat,
             query_bugreport_logcat_around
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Kill spawned child processes / monitor threads on exit so they are not orphaned.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let state = app_handle.state::<AppState>();
+                app::commands::shutdown_all(state.inner());
+            }
+        });
 }

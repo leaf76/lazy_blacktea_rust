@@ -1347,10 +1347,34 @@ fn load_device_detail_bails_early_when_getprop_fails() {
 }
 
 #[test]
-fn load_device_detail_continues_when_non_getprop_steps_fail() {
+fn load_device_detail_continues_when_batched_probes_partially_fail() {
     let trace_id = "trace-load-device-detail-2";
     let serial = "SERIAL-2";
     let mut called_steps: Vec<&'static str> = Vec::new();
+
+    // After getprop, every remaining probe runs in a single batched `adb shell` call whose stdout
+    // is split by `__LBT_DETAIL__<key>__` marker lines. The `gms` section is intentionally empty
+    // to exercise graceful degradation of an individual probe within the batch.
+    let batched_stdout = concat!(
+        "__LBT_DETAIL__battery__\n",
+        "level: 50\n",
+        "__LBT_DETAIL__wifi__\n",
+        "1\n",
+        "__LBT_DETAIL__bluetooth__\n",
+        "0\n",
+        "__LBT_DETAIL__bt_state__\n",
+        "state: ON\n",
+        "__LBT_DETAIL__audio__\n",
+        "mode: NORMAL\n",
+        "__LBT_DETAIL__gms__\n",
+        "__LBT_DETAIL__wm__\n",
+        "Physical size: 1080x2400\n",
+        "__LBT_DETAIL__df__\n",
+        "Filesystem 1K-blocks Used Available Use% Mounted on\n",
+        "/dev/block/dm-0 1000 0 0 0% /data\n",
+        "__LBT_DETAIL__mem__\n",
+        "MemTotal: 2048 kB\n",
+    );
 
     let run = |_args: &[String],
                _timeout: Duration,
@@ -1366,38 +1390,23 @@ fn load_device_detail_continues_when_non_getprop_steps_fail() {
 
         match step {
             "getprop" => Ok(ok("")),
-            "battery" => Ok(ok("level: 50\n")),
-            "wifi" => Ok(ok("1\n")),
-            "bluetooth" => Ok(ok("0\n")),
-            "bluetooth_manager_state" => Ok(ok("state: ON\n")),
-            "audio" => Ok(ok("mode: NORMAL\n")),
-            "gms" => Err(AppError::dependency("gms fails".to_string(), trace_id)),
-            "wm_size" => Ok(ok("Physical size: 1080x2400\n")),
-            "df" => Ok(ok(
-                "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/dm-0 1000 0 0 0% /data\n",
-            )),
-            "meminfo" => Ok(ok("MemTotal: 2048 kB\n")),
+            "device_detail_batch" => Ok(ok(batched_stdout)),
             other => panic!("unexpected step {other}"),
         }
     };
 
-    let detail = load_device_detail(serial, trace_id, false, 0, run);
-    assert!(detail.is_some());
-    assert_eq!(
-        called_steps,
-        vec![
-            "getprop",
-            "battery",
-            "wifi",
-            "bluetooth",
-            "bluetooth_manager_state",
-            "audio",
-            "gms",
-            "wm_size",
-            "df",
-            "meminfo"
-        ]
-    );
+    let detail = load_device_detail(serial, trace_id, false, 0, run).expect("detail");
+    // Probes parsed out of the batched sections.
+    assert_eq!(detail.battery_level, Some(50));
+    assert_eq!(detail.wifi_is_on, Some(true));
+    assert_eq!(detail.bt_is_on, Some(false));
+    assert_eq!(detail.bluetooth_manager_state.as_deref(), Some("ON"));
+    assert_eq!(detail.resolution.as_deref(), Some("1080x2400"));
+    assert_eq!(detail.memory_total_bytes, Some(2048 * 1024));
+    // The empty `gms` section degrades gracefully to no version.
+    assert_eq!(detail.gms_version, None);
+
+    assert_eq!(called_steps, vec!["getprop", "device_detail_batch"]);
 }
 
 #[test]

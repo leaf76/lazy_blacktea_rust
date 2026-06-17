@@ -142,7 +142,6 @@ import {
   uninstallApp,
   validateMobileconfig,
 } from "./api";
-import { AdbCommandLibraryPanel } from "./AdbCommandLibraryPanel";
 import {
   buildAdbCommandRunErrorResult,
   buildAdbCommandRunResult,
@@ -598,6 +597,36 @@ const LazyBluetoothMonitorPage = lazy(async () => {
 });
 const LazyUiInspectorPage = lazy(() => import("./UiInspectorPage"));
 const LazyBugreportPage = lazy(() => import("./BugreportMainPage"));
+// Behind the "ADB Shell" actions tab; lazy-loaded to keep the ~24KB panel out of the initial chunk.
+const LazyAdbCommandLibraryPanel = lazy(async () => {
+  const module = await import("./AdbCommandLibraryPanel");
+  return { default: module.AdbCommandLibraryPanel };
+});
+
+// Stable wrapper for route content. The per-route views are defined inside App() (so they close
+// over its state), which means using them directly as `element={<View />}` gives React a brand-new
+// component type on every render and forces a full unmount/remount of the active page (losing DOM,
+// scroll position, focus and child state). Routing through this stable component instead makes
+// React reconcile the page in place. The views call no hooks, so invoking them as functions here
+// is safe, and only the matched route's `render` actually runs.
+const RouteView = ({ render }: { render: () => ReactNode }) => <>{render()}</>;
+
+// Adds Escape-to-close for an open dialog/modal. Mirrors the existing context-menu dismissal
+// behavior and is safe to compose with each modal's existing backdrop-click close handler.
+function useEscapeToClose(active: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!active) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [active, onClose]);
+}
 
 type StoredSharedLogFiltersV1 = {
   levels?: Record<string, unknown>;
@@ -1832,6 +1861,9 @@ function App() {
   const [logcatActiveFilterSummary, setLogcatActiveFilterSummary] = useState("");
   const [logcatLastExport, setLogcatLastExport] = useState("");
   const [logcatClearBufferModal, setLogcatClearBufferModal] = useState<null | { serial: string }>(null);
+  const [appActionConfirm, setAppActionConfirm] = useState<
+    null | { action: "uninstall" | "clear"; packageName: string }
+  >(null);
   const [logcatPopupSelectorOpen, setLogcatPopupSelectorOpen] = useState(false);
   const [logcatPopupDraftSerials, setLogcatPopupDraftSerials] = useState<string[]>([]);
   const [logcatTextKind, setLogcatTextKind] = useState<LogTextChipKind>("include");
@@ -2114,6 +2146,7 @@ function App() {
   const [apkLaunchAfterInstall, setApkLaunchAfterInstall] = useState(false);
   const [apkLaunchPackage, setApkLaunchPackage] = useState("");
   const [apkInstallSummary, setApkInstallSummary] = useState<string[]>([]);
+  const [installBusy, setInstallBusy] = useState(false);
   const [latestApkInstallTaskId, setLatestApkInstallTaskId] = useState<string | null>(null);
   const [screenRecordStatusBySerial, setScreenRecordStatusBySerial] = useState<Record<string, ScreenRecordStatus>>({});
   const [screenRecordPendingBySerial, setScreenRecordPendingBySerial] = useState<
@@ -2126,6 +2159,7 @@ function App() {
     Record<string, DeviceQuickActionStatus | undefined>
   >({});
   const [apps, setApps] = useState<AppInfo[]>([]);
+  const [appsLoading, setAppsLoading] = useState(false);
   const [appsFilter, setAppsFilter] = useState("");
   const [appsThirdPartyOnly, setAppsThirdPartyOnly] = useState(true);
   const [appsIncludeVersions, setAppsIncludeVersions] = useState(false);
@@ -2294,6 +2328,12 @@ function App() {
   const logcatPendingRef = useRef<Record<string, string[]>>({});
   const logcatNextIdRef = useRef<Record<string, number>>({});
   const logcatFlushTimerRef = useRef<number | null>(null);
+  // Perf/net snapshots are coalesced into a single batched setState per flush window so that a
+  // burst of per-device samples does not trigger a full-app re-render per sample.
+  const perfPendingRef = useRef<PerfEvent[]>([]);
+  const perfFlushTimerRef = useRef<number | null>(null);
+  const netPendingRef = useRef<NetProfilerEvent[]>([]);
+  const netFlushTimerRef = useRef<number | null>(null);
   const monitoringIdleLastActivityAtRef = useRef<number>(Date.now());
   const monitoringIdleTimerRef = useRef<number | null>(null);
   const monitoringIdleStoppingRef = useRef(false);
@@ -4020,9 +4060,15 @@ function App() {
 
     const id = crypto.randomUUID();
     setToasts((prev) => [...prev, { id, message, tone }]);
+    // Errors linger longer than informational toasts so they are not missed.
+    const dismissAfterMs = tone === "error" ? 8000 : 4000;
     setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 4000);
+    }, dismissAfterMs);
+  };
+
+  const dismissToast = (id: string) => {
+    setToasts((prev) => prev.filter((toast) => toast.id !== id));
   };
 
   const pushToastRef = useRef(pushToast);
@@ -5437,6 +5483,78 @@ function App() {
       logcatFlushTimerRef.current = window.setTimeout(flushLogcatPending, 120);
     };
 
+    const flushPerfPending = () => {
+      perfFlushTimerRef.current = null;
+      const pending = perfPendingRef.current;
+      if (!pending.length) {
+        return;
+      }
+      perfPendingRef.current = [];
+      setPerfBySerial((prev) => {
+        const next = { ...prev };
+        for (const payload of pending) {
+          const existing =
+            next[payload.serial] ??
+            ({ running: false, traceId: null, samples: [], lastError: null } satisfies PerfMonitorState);
+          const nextSamples = payload.snapshot
+            ? [...existing.samples, payload.snapshot].slice(-60)
+            : existing.samples;
+          next[payload.serial] = {
+            ...existing,
+            traceId: payload.trace_id || existing.traceId,
+            samples: nextSamples,
+            lastError: payload.error ?? (payload.snapshot ? null : existing.lastError),
+          };
+        }
+        return next;
+      });
+    };
+
+    const schedulePerfFlush = () => {
+      if (perfFlushTimerRef.current != null) {
+        return;
+      }
+      perfFlushTimerRef.current = window.setTimeout(flushPerfPending, 250);
+    };
+
+    const flushNetPending = () => {
+      netFlushTimerRef.current = null;
+      const pending = netPendingRef.current;
+      if (!pending.length) {
+        return;
+      }
+      netPendingRef.current = [];
+      setNetBySerial((prev) => {
+        const next = { ...prev };
+        for (const payload of pending) {
+          const unsupported = payload.snapshot?.unsupported === true;
+          const existing =
+            next[payload.serial] ??
+            ({ running: false, traceId: null, samples: [], lastError: null } satisfies NetProfilerState);
+          const nextSamples = unsupported
+            ? []
+            : payload.snapshot
+              ? [...existing.samples, payload.snapshot].slice(-NET_PROFILER_MAX_SAMPLES)
+              : existing.samples;
+          next[payload.serial] = {
+            ...existing,
+            running: unsupported ? false : existing.running,
+            traceId: payload.trace_id || existing.traceId,
+            samples: nextSamples,
+            lastError: payload.error ?? (payload.snapshot ? null : existing.lastError),
+          };
+        }
+        return next;
+      });
+    };
+
+    const scheduleNetFlush = () => {
+      if (netFlushTimerRef.current != null) {
+        return;
+      }
+      netFlushTimerRef.current = window.setTimeout(flushNetPending, 250);
+    };
+
     const unlistenLogcat = listen<LogcatEvent>("logcat-line", (event) => {
       const payload = event.payload;
       const lines = payload.lines?.length
@@ -5454,6 +5572,9 @@ function App() {
 
     const unlistenPerf = listen<PerfEvent>("perf-snapshot", (event) => {
       const payload = event.payload;
+      // Error toasts stay immediate (and deduped against the last committed state); only the
+      // sample accumulation is batched. The poll cadence (>=500ms) exceeds the 250ms flush
+      // window, so the ref stays current for dedup.
       if (payload.error) {
         const prevError = perfBySerialRef.current[payload.serial]?.lastError ?? null;
         if (payload.error !== prevError) {
@@ -5461,30 +5582,8 @@ function App() {
         }
       }
 
-      setPerfBySerial((prev) => {
-        const existing =
-          prev[payload.serial] ??
-          ({
-            running: false,
-            traceId: null,
-            samples: [],
-            lastError: null,
-          } satisfies PerfMonitorState);
-
-        const nextSamples = payload.snapshot
-          ? [...existing.samples, payload.snapshot].slice(-60)
-          : existing.samples;
-
-        return {
-          ...prev,
-          [payload.serial]: {
-            ...existing,
-            traceId: payload.trace_id || existing.traceId,
-            samples: nextSamples,
-            lastError: payload.error ?? (payload.snapshot ? null : existing.lastError),
-          },
-        };
-      });
+      perfPendingRef.current.push(payload);
+      schedulePerfFlush();
     });
 
     const unlistenNetProfiler = listen<NetProfilerEvent>("net-profiler-snapshot", (event) => {
@@ -5520,33 +5619,8 @@ function App() {
         }
       }
 
-      setNetBySerial((prev) => {
-        const existing =
-          prev[payload.serial] ??
-          ({
-            running: false,
-            traceId: null,
-            samples: [],
-            lastError: null,
-          } satisfies NetProfilerState);
-
-        const nextSamples = unsupported
-          ? []
-          : payload.snapshot
-            ? [...existing.samples, payload.snapshot].slice(-NET_PROFILER_MAX_SAMPLES)
-            : existing.samples;
-
-        return {
-          ...prev,
-          [payload.serial]: {
-            ...existing,
-            running: unsupported ? false : existing.running,
-            traceId: payload.trace_id || existing.traceId,
-            samples: nextSamples,
-            lastError: payload.error ?? (payload.snapshot ? null : existing.lastError),
-          },
-        };
-      });
+      netPendingRef.current.push(payload);
+      scheduleNetFlush();
     });
 
     const flushTerminalPending = () => {
@@ -5767,7 +5841,17 @@ function App() {
       }
       logcatPendingRef.current = {};
       void unlistenPerf.then((unlisten) => unlisten());
+      if (perfFlushTimerRef.current != null) {
+        window.clearTimeout(perfFlushTimerRef.current);
+        perfFlushTimerRef.current = null;
+      }
+      perfPendingRef.current = [];
       void unlistenNetProfiler.then((unlisten) => unlisten());
+      if (netFlushTimerRef.current != null) {
+        window.clearTimeout(netFlushTimerRef.current);
+        netFlushTimerRef.current = null;
+      }
+      netPendingRef.current = [];
       void unlistenTerminal.then((unlisten) => unlisten());
       if (terminalFlushTimerRef.current != null) {
         window.clearTimeout(terminalFlushTimerRef.current);
@@ -7980,6 +8064,7 @@ function App() {
 
     setApkInstallSummary([]);
     setBusy(true);
+    setInstallBusy(true);
     try {
       const summaries: string[] = [];
       for (const path of paths) {
@@ -8063,6 +8148,7 @@ function App() {
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
+      setInstallBusy(false);
     }
   };
 
@@ -9339,6 +9425,11 @@ function App() {
   };
 
   const closeLogcatClearBufferModal = () => setLogcatClearBufferModal(null);
+
+  // Escape-to-close for the confirmation/danger modals (composes with their backdrop-click close).
+  useEscapeToClose(appActionConfirm !== null, () => setAppActionConfirm(null));
+  useEscapeToClose(rebootConfirmOpen, closeRebootConfirm);
+  useEscapeToClose(logcatClearBufferModal !== null, closeLogcatClearBufferModal);
 
   const handleLogcatClearBuffer = () => {
     const serial = ensureSingleSelection("logcat");
@@ -10936,6 +11027,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setAppsLoading(true);
     try {
       const response = await listApps(
         serial,
@@ -10956,6 +11048,7 @@ function App() {
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
+      setAppsLoading(false);
     }
   };
 
@@ -11253,10 +11346,18 @@ function App() {
     }
   };
 
-  const handleAppAction = async (action: "uninstall" | "forceStop" | "clear" | "enable" | "disable" | "info") => {
+  const handleAppAction = async (
+    action: "uninstall" | "forceStop" | "clear" | "enable" | "disable" | "info",
+    confirmed = false,
+  ) => {
     const serial = ensureSingleSelection("app management");
     if (!serial || !selectedApp) {
       pushToast("Select an app.", "error");
+      return;
+    }
+    // Destructive actions require explicit confirmation (consistent with Reboot / Delete).
+    if (!confirmed && (action === "uninstall" || action === "clear")) {
+      setAppActionConfirm({ action, packageName: selectedApp.package_name });
       return;
     }
     setBusy(true);
@@ -13056,7 +13157,7 @@ function App() {
               ))}
             </div>
             <div className="button-row">
-              <button className="ghost" onClick={() => navigate("/settings")} disabled={busy}>
+              <button className="ghost" onClick={() => navigate("/settings")}>
                 Open Settings
               </button>
               <button onClick={refreshDevices} disabled={busy}>
@@ -13117,7 +13218,7 @@ function App() {
             <button className="ghost" onClick={openDashboardConfig} disabled={busy || !config}>
               Configure
             </button>
-            <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+            <button className="ghost" onClick={() => navigate("/devices")}>
               Open Device Manager
             </button>
           </div>
@@ -14600,7 +14701,7 @@ function App() {
               <p className="muted">Choose an online device to start monitoring.</p>
             </div>
             <div className="button-row">
-              <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+              <button className="ghost" onClick={() => navigate("/devices")}>
                 Go to Device Manager
               </button>
             </div>
@@ -14825,7 +14926,7 @@ function App() {
               <p className="muted">Choose an online device to start profiling.</p>
             </div>
             <div className="button-row">
-              <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+              <button className="ghost" onClick={() => navigate("/devices")}>
                 Go to Device Manager
               </button>
             </div>
@@ -15358,7 +15459,7 @@ function App() {
                   </>
                 )}
               </div>
-              <button className="ghost" onClick={() => navigate("/devices")} disabled={busy}>
+              <button className="ghost" onClick={() => navigate("/devices")}>
                 Manage
               </button>
             </div>
@@ -15618,12 +15719,12 @@ function App() {
 
         <main className={`page${isDetachedPopupWindow ? " logcat-popup-page" : ""}`}>
           <Routes>
-            <Route path="/" element={<DashboardView />} />
+            <Route path="/" element={<RouteView render={DashboardView} />} />
             <Route path="/quick-actions" element={<Navigate to="/devices" replace />} />
-            <Route path="/performance" element={<PerformanceView />} />
-            <Route path="/network" element={<NetworkView />} />
-            <Route path="/profiles" element={<ProfilesView />} />
-            <Route path="/developer-options" element={<DeveloperOptionsView />} />
+            <Route path="/performance" element={<RouteView render={PerformanceView} />} />
+            <Route path="/network" element={<RouteView render={NetworkView} />} />
+            <Route path="/profiles" element={<RouteView render={ProfilesView} />} />
+            <Route path="/developer-options" element={<RouteView render={DeveloperOptionsView} />} />
             <Route
               path="/tasks"
               element={
@@ -16412,15 +16513,19 @@ function App() {
                         role="tabpanel"
                         aria-labelledby="actions-shell-tab-adb-shell"
                       >
-                        <AdbCommandLibraryPanel
-                          library={config?.adb_command_library}
-                          targetSerials={adbCommandTargetSerials}
-                          disabled={busy || !config}
-                          onSaveLibrary={handleSaveAdbCommandLibrary}
-                          onRunCommand={handleRunAdbCommandLibraryEntry}
-                          onCopyText={copyAdbCommandLibraryText}
-                          onNotify={pushToast}
-                        />
+                        <Suspense
+                          fallback={<div className="panel empty-state muted">Loading command library…</div>}
+                        >
+                          <LazyAdbCommandLibraryPanel
+                            library={config?.adb_command_library}
+                            targetSerials={adbCommandTargetSerials}
+                            disabled={busy || !config}
+                            onSaveLibrary={handleSaveAdbCommandLibrary}
+                            onRunCommand={handleRunAdbCommandLibraryEntry}
+                            onCopyText={copyAdbCommandLibraryText}
+                            onNotify={pushToast}
+                          />
+                        </Suspense>
                       </div>
                     )}
                     {activeActionsShellTabConfig.id === "shell" && (
@@ -16809,7 +16914,7 @@ function App() {
                           placeholder="e.g. --force-queryable"
                         />
                         <button onClick={handleInstallApk} disabled={busy || !selectedSerials.length}>
-                          Install
+                          {installBusy ? "Installing…" : "Install"}
                         </button>
                       </div>
                       <div className="form-row">
@@ -17893,7 +17998,7 @@ function App() {
                         Include versions
                       </label>
                       <button onClick={handleLoadApps} disabled={busy || !activeSerial}>
-                        Load Apps
+                        {appsLoading ? "Loading…" : "Load Apps"}
                       </button>
 	                      {(() => {
 	                        if (!appsSerial || apps.length === 0) {
@@ -20494,10 +20599,16 @@ function App() {
 
       {logcatClearBufferModal && (
         <div className="modal-backdrop" onClick={closeLogcatClearBufferModal}>
-          <div className="modal danger-modal" onClick={(event) => event.stopPropagation()}>
+          <div
+            className="modal danger-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="logcat-clear-title"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="modal-header">
               <div>
-                <h3>Clear Logcat Buffer</h3>
+                <h3 id="logcat-clear-title">Clear Logcat Buffer</h3>
                 <p className="muted">This clears the active device logcat buffer and the local view cache.</p>
               </div>
               <button className="ghost" onClick={closeLogcatClearBufferModal} disabled={busy}>
@@ -20518,6 +20629,59 @@ function App() {
                 Confirm Clear
               </button>
               <button className="ghost" onClick={closeLogcatClearBufferModal} disabled={busy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {appActionConfirm && (
+        <div className="modal-backdrop" onClick={() => setAppActionConfirm(null)}>
+          <div
+            className="modal danger-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="app-action-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <h3 id="app-action-confirm-title">
+                  {appActionConfirm.action === "uninstall" ? "Uninstall App" : "Clear App Data"}
+                </h3>
+                <p className="muted">
+                  {appActionConfirm.action === "uninstall"
+                    ? "This removes the app and all of its data from the device."
+                    : "This erases all data and cache for the app on the device."}
+                </p>
+              </div>
+              <button className="ghost" onClick={() => setAppActionConfirm(null)} disabled={busy}>
+                Close
+              </button>
+            </div>
+            <div className="stack">
+              <div className="inline-alert error">
+                <strong>Danger zone</strong>
+                <span className="muted">This action cannot be undone.</span>
+              </div>
+              <p className="muted">
+                Package: <strong>{appActionConfirm.packageName}</strong>
+              </p>
+            </div>
+            <div className="button-row">
+              <button
+                className="danger"
+                onClick={() => {
+                  const action = appActionConfirm.action;
+                  setAppActionConfirm(null);
+                  void handleAppAction(action, true);
+                }}
+                disabled={busy}
+              >
+                {appActionConfirm.action === "uninstall" ? "Confirm Uninstall" : "Confirm Clear Data"}
+              </button>
+              <button className="ghost" onClick={() => setAppActionConfirm(null)} disabled={busy}>
                 Cancel
               </button>
             </div>
@@ -21193,10 +21357,22 @@ function App() {
         </div>
       )}
 
-      <div className="toast-stack">
+      <div className="toast-stack" role="status" aria-live="polite">
         {toasts.map((toast) => (
-          <div key={toast.id} className={`toast ${toast.tone}`}>
-            {toast.message}
+          <div
+            key={toast.id}
+            className={`toast ${toast.tone}`}
+            role={toast.tone === "error" ? "alert" : undefined}
+          >
+            <span className="toast-message">{toast.message}</span>
+            <button
+              type="button"
+              className="toast-dismiss"
+              aria-label="Dismiss notification"
+              onClick={() => dismissToast(toast.id)}
+            >
+              ×
+            </button>
           </div>
         ))}
       </div>
@@ -21209,8 +21385,10 @@ function formatError(error: unknown): string {
     return error;
   }
   if (error && typeof error === "object" && "error" in error) {
+    // Keep the message and (optional) code; the trace_id stays out of the user-facing string
+    // (it is still captured in the error log / diagnostics for support).
     const payload = error as { error: string; code?: string; trace_id?: string };
-    return `${payload.error} ${payload.code ? `(${payload.code})` : ""} ${payload.trace_id ?? ""}`.trim();
+    return `${payload.error}${payload.code ? ` (${payload.code})` : ""}`.trim();
   }
   if (error instanceof Error) {
     return error.message;

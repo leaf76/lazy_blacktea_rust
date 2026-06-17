@@ -6982,12 +6982,36 @@ textarea:disabled {
 }
 
 .toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 10px 14px;
   border-radius: 12px;
   background: #111827;
   color: #fff;
   font-size: 13px;
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.18);
+}
+
+.toast-message {
+  flex: 1 1 auto;
+}
+
+.toast-dismiss {
+  flex: none;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.toast-dismiss:hover {
+  opacity: 1;
 }
 
 .toast.error {

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use crate::app::adb::screen_record::{
     normalize_screen_record_time_limit_sec, DEFAULT_SCREEN_RECORD_TIME_LIMIT_SEC,
@@ -706,12 +708,68 @@ pub fn backup_config_path() -> PathBuf {
     PathBuf::from(home).join(".lazy_blacktea_config.backup.json")
 }
 
+/// Identity of an on-disk config file used to detect changes without re-parsing.
+type FileSignature = (SystemTime, u64);
+
+struct CachedConfig {
+    signature: FileSignature,
+    config: AppConfig,
+}
+
+/// Caches the parsed config for the canonical `config_path()` keyed by file (modified-time, len).
+///
+/// `load_config` runs on essentially every Tauri command (via `get_adb_program`); without this
+/// it re-reads + double-parses + validates the JSON each time. The cache is keyed by the resolved
+/// path so per-test config paths never collide, and validated by the file signature so external
+/// edits are picked up automatically. `save_config` invalidates the entry explicitly, so writes
+/// from any save site (including read-modify-write commands) are always reflected on the next read.
+fn config_cache() -> &'static Mutex<HashMap<PathBuf, CachedConfig>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedConfig>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn file_signature(path: &Path) -> Option<FileSignature> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 pub fn load_config(trace_id: &str) -> Result<AppConfig, AppError> {
-    load_config_from_path(&config_path(), trace_id)
+    let path = config_path();
+    let signature = file_signature(&path);
+    if let Some(signature) = signature {
+        if let Ok(cache) = config_cache().lock() {
+            if let Some(entry) = cache.get(&path) {
+                if entry.signature == signature {
+                    return Ok(entry.config.clone());
+                }
+            }
+        }
+    }
+
+    let config = load_config_from_path(&path, trace_id)?;
+    // Only cache when the file actually exists (a missing file resolves cheaply to defaults).
+    if let Some(signature) = signature {
+        if let Ok(mut cache) = config_cache().lock() {
+            cache.insert(
+                path,
+                CachedConfig {
+                    signature,
+                    config: config.clone(),
+                },
+            );
+        }
+    }
+    Ok(config)
 }
 
 pub fn save_config(config: &AppConfig, trace_id: &str) -> Result<(), AppError> {
-    save_config_to_path(config, &config_path(), &backup_config_path(), trace_id)
+    let path = config_path();
+    save_config_to_path(config, &path, &backup_config_path(), trace_id)?;
+    // Invalidate so the next load re-reads the freshly-written (and re-validated) file.
+    if let Ok(mut cache) = config_cache().lock() {
+        cache.remove(&path);
+    }
+    Ok(())
 }
 
 pub fn load_config_from_path(path: &Path, trace_id: &str) -> Result<AppConfig, AppError> {
