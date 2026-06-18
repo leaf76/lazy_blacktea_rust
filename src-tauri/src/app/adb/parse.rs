@@ -226,17 +226,19 @@ pub fn parse_audio_summary(output: &str) -> Option<String> {
     static MUSIC_RE: OnceLock<Regex> = OnceLock::new();
     static DEVICE_RE: OnceLock<Regex> = OnceLock::new();
     static SCO_RE: OnceLock<Regex> = OnceLock::new();
-    let mode_re =
-        MODE_RE.get_or_init(|| Regex::new(r"(?i)\bmode\s*[:=]\s*([A-Za-z_]+)").expect("audio mode regex"));
-    let ringer_re = RINGER_RE
-        .get_or_init(|| Regex::new(r"(?i)\bringer\s+mode\s*[:=]\s*([A-Za-z_]+)").expect("audio ringer regex"));
-    let music_re = MUSIC_RE
-        .get_or_init(|| Regex::new(r"(?i)music\s+active\s*[:=]\s*([A-Za-z_]+)").expect("audio music regex"));
+    let mode_re = MODE_RE
+        .get_or_init(|| Regex::new(r"(?i)\bmode\s*[:=]\s*([A-Za-z_]+)").expect("audio mode regex"));
+    let ringer_re = RINGER_RE.get_or_init(|| {
+        Regex::new(r"(?i)\bringer\s+mode\s*[:=]\s*([A-Za-z_]+)").expect("audio ringer regex")
+    });
+    let music_re = MUSIC_RE.get_or_init(|| {
+        Regex::new(r"(?i)music\s+active\s*[:=]\s*([A-Za-z_]+)").expect("audio music regex")
+    });
     let device_re = DEVICE_RE.get_or_init(|| {
         Regex::new(r"(?i)device\s+(?:current\s+)?state\s*[:=]\s*(.+)").expect("audio device regex")
     });
-    let sco_re =
-        SCO_RE.get_or_init(|| Regex::new(r"(?i)sco\s+state\s*[:=]\s*(.+)").expect("audio sco regex"));
+    let sco_re = SCO_RE
+        .get_or_init(|| Regex::new(r"(?i)sco\s+state\s*[:=]\s*(.+)").expect("audio sco regex"));
 
     let mut summary: HashMap<&str, String> = HashMap::new();
     for line in output.lines() {
@@ -306,8 +308,9 @@ pub fn parse_audio_summary(output: &str) -> Option<String> {
 
 pub fn parse_bluetooth_manager_state(output: &str) -> Option<String> {
     static STATE_RE: OnceLock<Regex> = OnceLock::new();
-    let state_re =
-        STATE_RE.get_or_init(|| Regex::new(r"(?i)state\s*[:=]\s*([A-Za-z_]+)").expect("bt manager state regex"));
+    let state_re = STATE_RE.get_or_init(|| {
+        Regex::new(r"(?i)state\s*[:=]\s*([A-Za-z_]+)").expect("bt manager state regex")
+    });
     for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
