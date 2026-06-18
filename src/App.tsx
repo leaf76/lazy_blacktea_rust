@@ -4535,7 +4535,7 @@ function App() {
     navigate("/tasks");
   };
 
-  const handleOpenCompletionOutputPath = async (path: string) => {
+  const openExternalPath = async (path: string) => {
     try {
       await openPath(path);
     } catch (error) {
@@ -15854,17 +15854,17 @@ function App() {
                                     </div>
                                     <div className="task-device-meta">
                                       {entry.output_path && (
-                                        <button className="ghost" onClick={() => openPath(entry.output_path!)}>
+                                        <button className="ghost" onClick={() => void openExternalPath(entry.output_path!)}>
                                           Open output
                                         </button>
                                       )}
                                       {entry.artifact_dir && (
-                                        <button className="ghost" onClick={() => openPath(entry.artifact_dir!)}>
+                                        <button className="ghost" onClick={() => void openExternalPath(entry.artifact_dir!)}>
                                           Open folder
                                         </button>
                                       )}
                                       {extraArtifactPaths.map((path, index) => (
-                                        <button key={path} className="ghost" onClick={() => openPath(path)}>
+                                        <button key={path} className="ghost" onClick={() => void openExternalPath(path)}>
                                           {path.toLowerCase().includes("logcat")
                                             ? "Open logcat"
                                             : `Open artifact ${index + 2}`}
@@ -16403,7 +16403,7 @@ function App() {
                                       }
                                       if (action.id === "open_output") {
                                         if (deviceContextMenu.outputPath) {
-                                          void openPath(deviceContextMenu.outputPath);
+                                          void openExternalPath(deviceContextMenu.outputPath);
                                         }
                                       } else {
                                         catalogAction?.onSelect();
@@ -17388,7 +17388,7 @@ function App() {
                               )}
 
                               <div className="button-row compact">
-                                <button onClick={() => openPath(filePreview.local_path)} disabled={busy}>
+                                <button onClick={() => void openExternalPath(filePreview.local_path)} disabled={busy}>
                                   Open Externally
                                 </button>
                                 <button className="ghost" onClick={() => void handleFilePull(entry)} disabled={busy}>
@@ -18387,7 +18387,7 @@ function App() {
                     onOpenDeviceContextKeyboard={openDeviceQuickContextMenuFromKeyboard}
                     onOpenDeviceContextPointer={openDeviceQuickContextMenuFromPointer}
                     onOpenOutputPath={(path) => {
-                      void openPath(path);
+                      void openExternalPath(path);
                     }}
                     onCancelSerial={(serial) => {
                       void cancelBugreportForSerials([serial]);
@@ -20458,7 +20458,7 @@ function App() {
                         </span>
                       </div>
                       <div className="button-row compact task-completion-output-actions">
-                        <button className="ghost" onClick={() => void handleOpenCompletionOutputPath(item.path)}>
+                        <button className="ghost" onClick={() => void openExternalPath(item.path)}>
                           Open
                         </button>
                         <button className="ghost" onClick={() => void handleCopyCompletionOutputPath(item.path)}>

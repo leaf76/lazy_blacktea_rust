@@ -10,7 +10,10 @@
     "process:default",
     "updater:default",
     "opener:default",
-    "opener:allow-open-path",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "**" }]
+    },
     "dialog:allow-open",
     "clipboard-manager:allow-write-text",
     "notification:allow-is-permission-granted",
