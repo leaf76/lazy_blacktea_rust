@@ -109,6 +109,12 @@ Linux-specific checks:
 
 If `idevicesyslog` is missing, the iPhone can still appear in Device Manager, but live iOS logs are disabled.
 
+Common human-readable failures:
+
+- Locked / passcode → unlock the phone
+- Pairing / lockdown / trust → reconnect USB and accept Trust This Computer
+- No device / disconnected → cable, `usbmuxd`, then Refresh Devices
+
 ## iOS Crash Report Export Fails
 
 Crash report export requires `idevicecrashreport`.
@@ -118,6 +124,25 @@ idevicecrashreport --version
 ```
 
 Confirm the output folder is writable and the iPhone is trusted. The app writes crash reports only to the configured local output folder or an explicitly selected folder.
+
+Large exports can take up to about two minutes. Watch **Task Center** for success or error instead of assuming a hang.
+
+## iOS Screenshot Fails
+
+Screenshot on iOS requires `idevicescreenshot`.
+
+```bash
+idevicescreenshot --version
+```
+
+If the tool is missing, the device row will not expose screenshot capability. Android screenshots are unaffected.
+
+## iOS List Stale After Plug / Unplug
+
+iOS has no ADB-style hot-plug stream. Either:
+
+1. Click **Refresh Devices**, or
+2. Enable **Settings → Devices → Auto-refresh iOS inventory**
 
 ## iOS Configuration Profile Install Fails
 

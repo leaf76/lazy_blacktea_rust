@@ -99,7 +99,9 @@ export type IosToolsInfo = {
   ideviceinfo: IosToolStatus;
   idevicesyslog: IosToolStatus;
   idevicecrashreport: IosToolStatus;
+  idevicescreenshot: IosToolStatus;
   cfgutil: IosToolStatus;
+  usbmuxd: IosToolStatus;
 };
 
 export type MobileconfigSummary = {
@@ -657,6 +659,8 @@ export type ThemeStyleSettings = {
 export type DeviceSettings = {
   refresh_interval: number;
   auto_refresh_enabled: boolean;
+  ios_auto_refresh_enabled: boolean;
+  ios_refresh_interval: number;
   auto_connect: boolean;
   show_offline_devices: boolean;
   preferred_devices: string[];

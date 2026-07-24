@@ -253,6 +253,10 @@ import {
   computeContextSubmenuLayout,
   filterDevicesBySearch,
   flattenDeviceGroups,
+  countAvailableIosTools,
+  countIosToolsTotal,
+  formatIosRefreshHint,
+  formatIosTrustLabel,
   getIosConfigurationProfileEligibleSerials,
   getIosCrashReportEligibleSerials,
   formatPrimaryDeviceLabel,
@@ -286,7 +290,7 @@ import {
   normalizeThemeStyleSettings,
   resolveThemeCopy,
 } from "./theme";
-import { clampRefreshIntervalSec } from "./deviceAutoRefresh";
+import { clampIosRefreshIntervalSec, clampRefreshIntervalSec, getIosAutoRefreshIntervalMs } from "./deviceAutoRefresh";
 import { parseIntegerSettingInput } from "./settingsInput";
 import {
   LOGCAT_INACTIVITY_EVENTS,
@@ -4956,6 +4960,23 @@ function App() {
     });
   }, [busy, config?.device.auto_refresh_enabled]);
 
+  // Optional iOS inventory poll — full list_devices so plug/unplug is visible without manual refresh.
+  useEffect(() => {
+    const intervalMs = getIosAutoRefreshIntervalMs(config);
+    if (intervalMs == null) {
+      return;
+    }
+    const handle = window.setInterval(() => {
+      if (busyRef.current || deviceTrackingFallbackInFlightRef.current) {
+        return;
+      }
+      void refreshDeviceSummaryOnce(false);
+    }, intervalMs);
+    return () => {
+      window.clearInterval(handle);
+    };
+  }, [config?.device.ios_auto_refresh_enabled, config?.device.ios_refresh_interval]);
+
   useEffect(() => {
     if (!config) {
       return;
@@ -9331,6 +9352,13 @@ function App() {
     const sourceValue = logcatSourceValue.trim();
     let filter = "";
     if (isIosTarget) {
+      if (!hasDeviceCapability(targetDevice, "logs")) {
+        pushToast(
+          "iOS syslog requires idevicesyslog. Open Settings → iOS Tools and install libimobiledevice.",
+          "error",
+        );
+        return;
+      }
       filter = "";
     } else if (logcatSourceMode === "package") {
       if (!sourceValue) {
@@ -11740,12 +11768,42 @@ function App() {
       return;
     }
 
+    const outputDir = (config?.file_gen_output_path || config?.output_path || "").trim();
     setBusy(true);
+    const taskId = beginTask({
+      kind: "ios_crash_export",
+      title: "Export iOS Crash Reports",
+      serials: [serial],
+    });
     try {
-      const response = await exportIosCrashReports(serial, config?.file_gen_output_path || config?.output_path);
+      const response = await exportIosCrashReports(serial, outputDir || undefined);
+      if (response.trace_id) {
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+      }
       const detail = (response.data.stdout || response.data.stderr || "").trim();
-      pushToast(detail ? `iOS crash reports exported. ${detail}` : "iOS crash reports exported.", "info");
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: {
+          status: "success",
+          output_path: outputDir || undefined,
+          message: detail || "Crash reports exported.",
+        },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "success" });
+      pushToast(
+        detail ? `iOS crash reports exported. ${detail}` : "iOS crash reports exported. Check Task Center.",
+        "info",
+      );
     } catch (error) {
+      dispatchTasks({
+        type: "TASK_UPDATE_DEVICE",
+        id: taskId,
+        serial,
+        patch: { status: "error", message: formatError(error) },
+      });
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
       pushToast(formatError(error), "error");
     } finally {
       setBusy(false);
@@ -12162,17 +12220,48 @@ function App() {
   const handleConfirmProfileInstall = async () => {
     setProfileConfirmOpen(false);
     setProfileInstalling(true);
+    const targets = getValidProfileTargetSerials();
+    const taskId = beginTask({
+      kind: "ios_profile_install",
+      title: `Install Configuration Profile (${targets.length})`,
+      serials: targets,
+    });
     try {
-      const response = await installIosConfigurationProfile(getValidProfileTargetSerials(), mobileconfigPath);
+      // Refresh inventory so cfgutil ECID mapping stays current before install.
+      await refreshDeviceSummaryOnce(false);
+      const response = await installIosConfigurationProfile(targets, mobileconfigPath);
       setProfileInstallResults(response.data);
+      if (response.trace_id) {
+        dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
+      }
+      let failedCount = 0;
+      response.data.forEach((item) => {
+        if (item.status === "failed") {
+          failedCount += 1;
+        }
+        dispatchTasks({
+          type: "TASK_UPDATE_DEVICE",
+          id: taskId,
+          serial: item.serial,
+          patch: {
+            status: item.status === "installed" ? "success" : item.status === "skipped" ? "cancelled" : "error",
+            message: item.message,
+          },
+        });
+      });
       const installedCount = response.data.filter((item) => item.status === "installed").length;
-      const failedCount = response.data.filter((item) => item.status === "failed").length;
       const skippedCount = response.data.filter((item) => item.status === "skipped").length;
+      dispatchTasks({
+        type: "TASK_SET_STATUS",
+        id: taskId,
+        status: failedCount > 0 ? "error" : "success",
+      });
       pushToast(
         `Profile install finished: ${installedCount} installed, ${failedCount} failed, ${skippedCount} skipped.`,
         failedCount > 0 ? "error" : "info",
       );
     } catch (error) {
+      dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: "error" });
       pushToast(formatError(error), "error");
     } finally {
       setProfileInstalling(false);
@@ -12434,9 +12523,12 @@ function App() {
     try {
       const response = await checkIosTools();
       setIosToolsInfo(response.data);
-      const availableCount = Object.values(response.data).filter((tool) => tool.available).length;
+      const availableCount = countAvailableIosTools(response.data);
+      const totalCount = countIosToolsTotal(response.data);
       pushToast(
-        availableCount > 0 ? `iOS tools available: ${availableCount}/5.` : "No iOS tools are available.",
+        availableCount > 0
+          ? `iOS tools available: ${availableCount}/${totalCount}.`
+          : "No iOS tools are available.",
         availableCount > 0 ? "info" : "error",
       );
     } catch (error) {
@@ -12536,6 +12628,23 @@ function App() {
       ),
     [devices],
   );
+  const screenshotAvailabilityBySerial = useMemo(
+    () =>
+      Object.fromEntries(
+        devices.map((device) => {
+          const online = device.summary.state === "device";
+          const platform = getDevicePlatform(device);
+          if (!online) {
+            return [device.summary.serial, false] as const;
+          }
+          if (platform === "ios") {
+            return [device.summary.serial, hasDeviceCapability(device, "screenshot")] as const;
+          }
+          return [device.summary.serial, true] as const;
+        }),
+      ),
+    [devices],
+  );
   const hasSelectedAndroidActionTarget = selectedSerials.some(
     (serial) => batchAvailabilityBySerial[serial] === true,
   );
@@ -12579,13 +12688,13 @@ function App() {
     () =>
       buildFanOutActionMeta({
         selectedSerials,
-        availabilityBySerial: batchAvailabilityBySerial,
+        availabilityBySerial: screenshotAvailabilityBySerial,
         title: "Screenshot",
         singleDescription: "Capture a screenshot from the selected device.",
         multiDescription: "Capture screenshots from eligible selected devices.",
         taskKey: "screenshot",
       }),
-    [batchAvailabilityBySerial, selectedSerials],
+    [screenshotAvailabilityBySerial, selectedSerials],
   );
   const rebootActionMeta = useMemo(
     () =>
@@ -15156,6 +15265,13 @@ function App() {
                     <div role="cell">{result.message}</div>
                     <div role="cell">
                       <code>{result.trace_id}</code>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => void copyDeviceInfoValue(result.trace_id, "Trace ID copied.")}
+                      >
+                        Copy
+                      </button>
                     </div>
                   </div>
                 );
@@ -16190,6 +16306,16 @@ function App() {
                                     {showSerialMeta && (
                                       <div className="device-identity-meta">
                                         <span className="device-serial">{serial}</span>
+                                      </div>
+                                    )}
+                                    {devicePlatform === "ios" && (
+                                      <div className="device-identity-meta">
+                                        <span className="muted">
+                                          {formatIosTrustLabel(device) ??
+                                            (config?.device.ios_auto_refresh_enabled
+                                              ? "iOS · auto-refresh on"
+                                              : "iOS · manual refresh")}
+                                        </span>
                                       </div>
                                     )}
                                   </div>
@@ -19912,6 +20038,54 @@ function App() {
                             <div className="muted settings-hint">
                               When enabled, background detail refresh keeps battery and connectivity fields up to date (no toast errors).
                             </div>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.device.ios_auto_refresh_enabled === true}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          device: {
+                                            ...prev.device,
+                                            ios_auto_refresh_enabled: event.target.checked,
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Auto-refresh iOS inventory
+                            </label>
+                            <div className="muted settings-hint">
+                              {formatIosRefreshHint(config.device.ios_auto_refresh_enabled === true)} Android still uses
+                              ADB tracking for hot-plug.
+                            </div>
+                            <label>
+                              iOS refresh interval (sec)
+                              <input
+                                type="number"
+                                min={5}
+                                max={300}
+                                value={config.device.ios_refresh_interval ?? 15}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          device: {
+                                            ...prev.device,
+                                            ios_refresh_interval: clampIosRefreshIntervalSec(
+                                              parseIntegerSettingInput(event.target.value, prev.device.ios_refresh_interval ?? 15),
+                                            ),
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                            </label>
 	                          <label>
 	                            Refresh interval (sec)
 		                            <input

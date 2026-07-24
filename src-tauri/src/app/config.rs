@@ -39,8 +39,16 @@ fn default_device_refresh_interval() -> i32 {
     5
 }
 
+fn default_ios_refresh_interval() -> i32 {
+    15
+}
+
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_theme_preset_id() -> String {
@@ -180,6 +188,12 @@ pub struct DeviceSettings {
     pub refresh_interval: i32,
     #[serde(default = "default_true")]
     pub auto_refresh_enabled: bool,
+    /// When true, periodically re-run full device discovery so iOS plug/unplug is visible.
+    /// Android hot-plug still uses ADB tracking; this path mainly keeps iOS inventory fresh.
+    #[serde(default = "default_false")]
+    pub ios_auto_refresh_enabled: bool,
+    #[serde(default = "default_ios_refresh_interval")]
+    pub ios_refresh_interval: i32,
     #[serde(default = "default_true")]
     pub auto_connect: bool,
     #[serde(default)]
@@ -193,6 +207,8 @@ impl Default for DeviceSettings {
         Self {
             refresh_interval: default_device_refresh_interval(),
             auto_refresh_enabled: true,
+            ios_auto_refresh_enabled: false,
+            ios_refresh_interval: default_ios_refresh_interval(),
             auto_connect: true,
             show_offline_devices: false,
             preferred_devices: Vec::new(),
@@ -1050,6 +1066,12 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     }
     if config.device.refresh_interval < 1 {
         config.device.refresh_interval = default_device_refresh_interval();
+    }
+    if config.device.ios_refresh_interval < 5 {
+        config.device.ios_refresh_interval = default_ios_refresh_interval();
+    }
+    if config.device.ios_refresh_interval > 300 {
+        config.device.ios_refresh_interval = 300;
     }
     if config.logcat.max_lines < 100 {
         config.logcat.max_lines = 1000;

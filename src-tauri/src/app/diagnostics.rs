@@ -3,7 +3,8 @@ use crate::app::adb::paths::sanitize_filename_component;
 use crate::app::adb::runner::run_adb;
 use crate::app::config::{load_config, AppConfig};
 use crate::app::error::AppError;
-use crate::app::models::DeviceSummary;
+use crate::app::ios;
+use crate::app::models::{DeviceSummary, IosToolsInfo};
 use chrono::Utc;
 use serde::Serialize;
 use std::fs;
@@ -31,10 +32,18 @@ struct DevicesPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct IosDiagnosticsPayload {
+    tools: IosToolsInfo,
+    discovered_serials: Vec<String>,
+    discovery_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct DiagnosticsPayload {
     manifest: DiagnosticsManifest,
     command_history: Vec<String>,
     devices: DevicesPayload,
+    ios: IosDiagnosticsPayload,
 }
 
 fn resolve_output_dir(
@@ -125,10 +134,29 @@ pub fn export_diagnostics_bundle(
         }
     }
 
+    let ios_tools = ios::check_ios_tools_force(trace_id);
+    let mut ios_serials = Vec::new();
+    let mut ios_discovery_error = None;
+    let discovered = ios::discover_ios_devices(trace_id);
+    if discovered.is_empty() && !ios_tools.idevice_id.available && !ios_tools.devicectl.available {
+        ios_discovery_error = Some(
+            "No iOS discovery tools available (install Xcode devicectl or libimobiledevice)."
+                .to_string(),
+        );
+    }
+    for device in discovered {
+        ios_serials.push(device.summary.serial);
+    }
+
     let payload = DiagnosticsPayload {
         manifest,
         command_history,
         devices: devices_payload,
+        ios: IosDiagnosticsPayload {
+            tools: ios_tools,
+            discovered_serials: ios_serials,
+            discovery_error: ios_discovery_error,
+        },
     };
 
     let json = serde_json::to_vec_pretty(&payload).map_err(|err| {
@@ -192,6 +220,8 @@ mod tests {
         assert!(content.contains("\"command_history\""));
         assert!(content.contains("echo 1"));
         assert!(content.contains("\"trace_id\""));
+        assert!(content.contains("\"ios\""));
+        assert!(content.contains("\"idevicescreenshot\"") || content.contains("\"usbmuxd\""));
 
         std::env::remove_var("LAZY_BLACKTEA_CONFIG_PATH");
     }

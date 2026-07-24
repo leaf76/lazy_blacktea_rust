@@ -12,7 +12,9 @@ export type TaskKind =
   | "file_delete"
   | "ui_inspector_capture"
   | "ui_inspector_export"
-  | "ui_inspector_auto_sync";
+  | "ui_inspector_auto_sync"
+  | "ios_crash_export"
+  | "ios_profile_install";
 
 export type TaskStatus = "running" | "success" | "error" | "cancelled" | "interrupted";
 

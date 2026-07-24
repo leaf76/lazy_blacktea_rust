@@ -52,6 +52,8 @@ ideviceinfo -u "IOS_UDID"
 - Cross-platform device list with Android/iOS platform badges
 - Logcat streaming with live filters, presets, search, and export
 - iOS syslog streaming when `idevicesyslog` is available
+- Optional iOS inventory auto-refresh (Settings) because iOS has no ADB-style hot-plug tracking
+- iOS screenshot when `idevicescreenshot` is available
 - File browser with pull/upload/rename/delete/preview
 - APK install flows: single APK, multi APK, split bundles, and launch
 - UI hierarchy capture with screenshot preview and XML/HTML export
@@ -60,17 +62,20 @@ ideviceinfo -u "IOS_UDID"
 
 ## Platform capabilities
 
-| Capability | Android | iOS MVP |
-| --- | --- | --- |
-| Device list and basic info | Yes, via `adb` | Yes, via `devicectl` or libimobiledevice |
-| Live logs | Yes, logcat | Yes, syslog when `idevicesyslog` is available |
-| Crash report export | No dedicated Android flow | Yes, when `idevicecrashreport` is available |
-| Configuration profile install | No | Yes, macOS + Apple Configurator `cfgutil` + USB only |
-| Shell commands | Yes | No |
-| File browser and file mutation | Yes | No |
-| APK / app install workflow | Yes | No |
-| Screenshot, screen record, mirroring | Yes | No |
-| Wi-Fi, Bluetooth, reboot controls | Yes | No |
+| Capability | Android | iOS MVP (macOS/Linux) | Windows |
+| --- | --- | --- | --- |
+| Device list and basic info | Yes, via `adb` | Yes, via `devicectl` or libimobiledevice | Android only; iOS unsupported |
+| Live logs | Yes, logcat | Yes, syslog when `idevicesyslog` is available | Android only |
+| Crash report export | No dedicated Android flow | Yes, when `idevicecrashreport` is available | No |
+| Configuration profile install | No | Yes, macOS + Apple Configurator `cfgutil` + USB only | No |
+| Screenshot | Yes | Yes, when `idevicescreenshot` is available | Android only |
+| Shell commands | Yes | No | Android only |
+| File browser and file mutation | Yes | No | Android only |
+| APK / app install workflow | Yes | No | Android only |
+| Screen record, mirroring | Yes | No | Android only |
+| Wi-Fi, Bluetooth, reboot controls | Yes | No | Android only |
+
+Windows note: Lazy Blacktea ships Android ADB workflows on Windows. iOS inventory and observation tools are not supported on Windows builds.
 
 ## Who this is for
 

@@ -176,7 +176,9 @@ pub struct IosToolsInfo {
     pub ideviceinfo: IosToolStatus,
     pub idevicesyslog: IosToolStatus,
     pub idevicecrashreport: IosToolStatus,
+    pub idevicescreenshot: IosToolStatus,
     pub cfgutil: IosToolStatus,
+    pub usbmuxd: IosToolStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

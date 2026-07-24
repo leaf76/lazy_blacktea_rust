@@ -374,11 +374,22 @@ describe("deviceUtils", () => {
           version_output: "",
           error: "command not found",
         },
+        idevicescreenshot: {
+          available: false,
+          command_path: "idevicescreenshot",
+          version_output: "",
+          error: "command not found",
+        },
         cfgutil: {
           available: false,
           command_path: "cfgutil",
           version_output: "",
           error: "command not found",
+        },
+        usbmuxd: {
+          available: true,
+          command_path: "/var/run/usbmuxd",
+          version_output: "socket present",
         },
       },
       "linux",
@@ -388,8 +399,10 @@ describe("deviceUtils", () => {
     expect(rows.find((row) => row.id === "cfgutil")?.status).toBe("not_required");
     expect(rows.find((row) => row.id === "devicectl")?.detail).toContain("macOS-only");
     expect(rows.find((row) => row.id === "usbmuxd")?.role).toBe("required");
+    expect(rows.find((row) => row.id === "usbmuxd")?.status).toBe("available");
     expect(rows.find((row) => row.id === "idevice_id")?.status).toBe("available");
     expect(rows.find((row) => row.id === "ideviceinfo")?.status).toBe("missing");
+    expect(rows.find((row) => row.id === "idevicescreenshot")?.status).toBe("missing");
   });
 
   it("selects only online iOS devices with crash report capability for export", () => {

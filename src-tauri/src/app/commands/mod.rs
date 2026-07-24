@@ -2312,8 +2312,9 @@ pub fn check_ios_tools(
 ) -> Result<CommandResponse<IosToolsInfo>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
     info!(trace_id = %trace_id, "check_ios_tools");
+    // Settings / Profiles always force a fresh probe so cache does not hide install changes.
     Ok(CommandResponse {
-        data: ios::check_ios_tools(&trace_id),
+        data: ios::check_ios_tools_force(&trace_id),
         trace_id,
     })
 }
@@ -3794,8 +3795,6 @@ pub fn capture_screenshot(
     ensure_non_empty(&serial, "serial", &trace_id)?;
     ensure_non_empty(&output_dir, "output_dir", &trace_id)?;
 
-    let adb_program = get_adb_program(&trace_id)?;
-    let config = load_config(&trace_id)?;
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
     let safe_serial = sanitize_filename_component(&serial);
     let filename = format!("screenshot_{}_{}.png", safe_serial, timestamp);
@@ -3805,6 +3804,21 @@ pub fn capture_screenshot(
     })?;
     output_path.push(&filename);
     let output_path_string = output_path.to_string_lossy().to_string();
+
+    // Route iOS UDIDs to idevicescreenshot when the tool is available.
+    if ios::looks_like_ios_serial(&serial) {
+        let tools = ios::check_ios_tools(&trace_id);
+        if tools.idevicescreenshot.available {
+            let path = ios::capture_ios_screenshot(&serial, &output_path, &trace_id)?;
+            return Ok(CommandResponse {
+                trace_id,
+                data: path.to_string_lossy().to_string(),
+            });
+        }
+    }
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let config = load_config(&trace_id)?;
     let bytes = capture_validated_screenshot_bytes(
         &adb_program,
         &serial,
@@ -7493,10 +7507,23 @@ pub fn start_ios_syslog(
     trace_id: Option<String>,
 ) -> Result<CommandResponse<bool>, AppError> {
     let trace_id = resolve_trace_id(trace_id);
+    let serial = ios::validate_ios_serial(&serial, &trace_id)?;
     let tools = ios::check_ios_tools(&trace_id);
     if !tools.idevicesyslog.available {
         return Err(AppError::dependency(
-            "idevicesyslog is not available",
+            "idevicesyslog is not available. Install libimobiledevice tools to stream iOS logs.",
+            &trace_id,
+        ));
+    }
+    // Avoid concurrent mutation tooling on the same serial when possible.
+    if state
+        .ios_syslog_processes
+        .lock()
+        .map(|map| map.contains_key(&serial))
+        .unwrap_or(false)
+    {
+        return Err(AppError::validation(
+            "iOS syslog is already running for this device",
             &trace_id,
         ));
     }
@@ -7521,7 +7548,10 @@ pub fn start_ios_syslog(
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|err| {
-                    AppError::dependency(format!("Failed to start iOS syslog: {err}"), trace_id)
+                    AppError::dependency(
+                        ios::humanize_ios_tool_error(&format!("Failed to start iOS syslog: {err}")),
+                        trace_id,
+                    )
                 })
         },
     )?;

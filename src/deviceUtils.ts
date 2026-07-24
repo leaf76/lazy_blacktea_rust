@@ -9,7 +9,7 @@ export type HostOs = "linux" | "macos" | "windows" | "unknown";
 export type IosToolGuidanceStatus = "available" | "missing" | "not_required" | "not_checked";
 export type IosToolGuidanceRole = "required" | "optional" | "macos_only";
 export type IosToolGuidanceRow = {
-  id: keyof IosToolsInfo | "usbmuxd";
+  id: keyof IosToolsInfo;
   label: string;
   status: IosToolGuidanceStatus;
   role: IosToolGuidanceRole;
@@ -209,11 +209,12 @@ export const buildIosToolGuidanceRows = (
     {
       id: "usbmuxd",
       label: "usbmuxd service",
-      status: "not_checked",
+      status: toGuidanceStatus(tools?.usbmuxd.available),
       role: isLinux ? "required" : "optional",
       detail: isLinux
-        ? "Required on Ubuntu/Debian for USB communication with iOS devices."
-        : "Used by libimobiledevice for USB communication.",
+        ? "Required on Ubuntu/Debian for USB communication with iOS devices. If missing, run: sudo systemctl enable --now usbmuxd"
+        : "Used by libimobiledevice for USB communication when present.",
+      error: tools?.usbmuxd.error,
     },
     {
       id: "idevice_id",
@@ -251,8 +252,58 @@ export const buildIosToolGuidanceRows = (
       detail: "Optional; enables iOS crash report export.",
       error: tools?.idevicecrashreport.error,
     },
+    {
+      id: "idevicescreenshot",
+      label: "idevicescreenshot",
+      status: toGuidanceStatus(tools?.idevicescreenshot.available),
+      role: "optional",
+      detail: "Optional; enables iOS screenshot capture.",
+      error: tools?.idevicescreenshot.error,
+    },
   ];
 };
+
+export const countAvailableIosTools = (tools: IosToolsInfo | null | undefined): number => {
+  if (!tools) {
+    return 0;
+  }
+  return Object.values(tools).filter((tool) => tool?.available === true).length;
+};
+
+export const countIosToolsTotal = (tools: IosToolsInfo | null | undefined): number => {
+  if (!tools) {
+    return 0;
+  }
+  return Object.keys(tools).length;
+};
+
+export const formatIosTrustLabel = (device: DeviceInfo | null | undefined): string | null => {
+  if (!device || getDevicePlatform(device) !== "ios") {
+    return null;
+  }
+  const trust = device.detail?.trust_status?.trim().toLowerCase();
+  if (!trust) {
+    return "Trust unknown — unlock and accept the prompt, then refresh";
+  }
+  if (trust === "trusted") {
+    return null;
+  }
+  if (trust === "locked") {
+    return "Locked — unlock the iPhone";
+  }
+  if (trust === "untrusted") {
+    return "Untrusted — accept Trust This Computer";
+  }
+  if (trust === "unavailable") {
+    return "Unavailable — reconnect USB and refresh";
+  }
+  return `Trust: ${trust}`;
+};
+
+export const formatIosRefreshHint = (iosAutoRefreshEnabled: boolean): string =>
+  iosAutoRefreshEnabled
+    ? "iOS inventory auto-refreshes on an interval (no hot-plug events)."
+    : "iOS has no hot-plug events — use Refresh Devices or enable iOS auto-refresh in Settings.";
 
 export const getDevicePlatform = (device: DeviceInfo | null | undefined): DevicePlatform =>
   device?.summary.platform ?? "android";

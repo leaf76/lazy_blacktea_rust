@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "./types";
-import { clampRefreshIntervalSec, getAutoRefreshIntervalMs } from "./deviceAutoRefresh";
+import {
+  clampIosRefreshIntervalSec,
+  clampRefreshIntervalSec,
+  getAutoRefreshIntervalMs,
+  getIosAutoRefreshIntervalMs,
+} from "./deviceAutoRefresh";
 
 describe("deviceAutoRefresh", () => {
   it("clamps invalid values to the default interval", () => {
@@ -35,5 +40,24 @@ describe("deviceAutoRefresh", () => {
 
     expect(getAutoRefreshIntervalMs(config)).toBe(5000);
   });
-});
 
+  it("clamps iOS inventory poll interval", () => {
+    expect(clampIosRefreshIntervalSec(Number.NaN)).toBe(15);
+    expect(clampIosRefreshIntervalSec(2)).toBe(15);
+    expect(clampIosRefreshIntervalSec(20)).toBe(20);
+    expect(clampIosRefreshIntervalSec(999)).toBe(300);
+  });
+
+  it("returns iOS poll interval only when enabled", () => {
+    expect(
+      getIosAutoRefreshIntervalMs({
+        device: { ios_auto_refresh_enabled: false, ios_refresh_interval: 20 },
+      } as unknown as AppConfig),
+    ).toBeNull();
+    expect(
+      getIosAutoRefreshIntervalMs({
+        device: { ios_auto_refresh_enabled: true, ios_refresh_interval: 20 },
+      } as unknown as AppConfig),
+    ).toBe(20_000);
+  });
+});

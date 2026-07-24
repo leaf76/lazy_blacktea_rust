@@ -104,7 +104,18 @@ ideviceinfo -u "IOS_UDID"
 - Source filters are disabled for iOS and do not block syslog.
 - Export writes the visible log lines to the configured output folder.
 
-6. Negative checks:
+6. Screenshot (optional tool):
+
+- If `idevicescreenshot` is available, Screenshot captures a PNG for the selected iPhone.
+- If the tool is missing, Screenshot stays disabled for that iOS device while Android devices still work.
+
+7. iOS auto-refresh:
+
+- Enable **Settings → Devices → Auto-refresh iOS inventory**.
+- Disconnect or reconnect the iPhone and wait one interval; the list should update without a manual refresh.
+- Disable the setting; plug changes should require **Refresh Devices**.
+
+8. Negative checks:
 
 - Lock or untrust the iPhone and refresh. The UI should show a human-readable unavailable or missing-detail state.
 - Remove libimobiledevice tools from PATH or use a shell without them. Android refresh should still work.

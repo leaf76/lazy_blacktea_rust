@@ -7,6 +7,56 @@ This guide covers common day-to-day workflows.
 - If you don't see any devices, confirm `adb devices` shows your device.
 - If `adb` is not in `PATH`, set an absolute ADB executable path in the app Settings.
 
+## iOS Devices (MVP)
+
+iOS support is inventory and observation oriented. It does not replace Xcode or full device management.
+
+### Requirements
+
+- **macOS:** Xcode command line tools (`devicectl`) and/or libimobiledevice tools in `PATH`. Profile install also needs Apple Configurator `cfgutil`.
+- **Linux:** `usbmuxd` running plus `idevice_id` / `ideviceinfo` (optional: `idevicesyslog`, `idevicecrashreport`, `idevicescreenshot`).
+- **Windows:** iOS is not supported; use Android workflows only.
+
+### Device list
+
+1. Unlock the iPhone/iPad and accept the trust prompt.
+2. Open **Device Manager** and click **Refresh Devices**.
+3. iOS rows show an **iOS** badge, UDID, name/product type, and version when available.
+4. Trust problems show a short hint on the device row (locked / untrusted / unavailable).
+5. iOS has **no hot-plug events**. Either refresh manually or enable **Settings → Devices → Auto-refresh iOS inventory**.
+
+Android hot-plug still uses ADB tracking. iOS auto-refresh re-runs full discovery on an interval.
+
+### Logs (syslog)
+
+1. Select one online iOS device with `idevicesyslog` available.
+2. Open **Logs** and click **Start**.
+3. Source filters are Android-only and stay disabled for iOS.
+4. **Stop** ends the stream. Export saves the visible lines from the UI buffer.
+
+### Screenshot
+
+1. Select an online iOS device with `idevicescreenshot` available.
+2. Use the Screenshot action (same control as Android).
+3. Output goes to the configured Settings output folder.
+
+### Crash reports
+
+1. Select one online iOS device with `idevicecrashreport` available.
+2. Device menu → **Export iOS Crash Reports**.
+3. Follow progress in **Task Center**. Large exports can take up to about two minutes.
+
+### Configuration profiles (macOS only)
+
+1. Install Apple Configurator and its `cfgutil` command-line tool.
+2. Open **Profiles**, browse a `.mobileconfig`, and click **Validate**.
+3. Select eligible USB-connected iOS devices and **Install Profile**.
+4. Each device reports installed / failed / skipped independently. Copy the per-row `trace_id` if you need support.
+
+### Tool check
+
+Open **Settings → iOS Tools → Test iOS Tools** to probe host tooling (`devicectl`, libimobiledevice, `cfgutil`, `usbmuxd` socket, and optional observation tools).
+
 ## Wireless Pairing (ADB)
 
 Wireless pairing typically requires Android 11+.
