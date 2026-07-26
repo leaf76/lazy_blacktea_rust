@@ -114,7 +114,8 @@ const baseEnv = (remoteRoot: string) => ({
   FAKE_ADB_REMOTE_ROOT: remoteRoot,
 });
 
-describe("ui_inspector_probe.sh", () => {
+// Bash probe scripts are not runnable on native Windows CI without WSL/Git Bash wiring.
+describe.skipIf(process.platform === "win32")("ui_inspector_probe.sh", () => {
   it("collects command artifacts and creates a zip bundle", () => {
     const dir = makeTempDir();
     const outputDir = join(dir, "probe-output");

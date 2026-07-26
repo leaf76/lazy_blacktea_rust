@@ -123,7 +123,7 @@ describe("ADB command library helpers", () => {
     const docsExample = readFileSync(
       new URL("../docs/examples/adb-command-pack.example.json", import.meta.url),
       "utf8",
-    );
+    ).replace(/\r\n/g, "\n");
 
     expect(docsExample).toBe(formatAdbCommandPackJson(EXAMPLE_ADB_COMMAND_PACK));
   });
