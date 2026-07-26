@@ -1,4 +1,4 @@
-name: Build (macOS, Linux)
+name: Build (macOS, Linux, Windows)
 
 on:
   pull_request:
@@ -20,7 +20,12 @@ jobs:
             bundles: dmg,app
           - os: ubuntu-24.04
             bundles: appimage,deb
+          - os: windows-latest
+            bundles: nsis,msi
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout

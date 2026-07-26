@@ -1,4 +1,4 @@
-name: Release (macOS, Linux)
+name: Release (macOS, Linux, Windows)
 
 on:
   push:
@@ -52,7 +52,14 @@ jobs:
             bundles: appimage,deb
             target: ""
             meta_os: linux
+          - os: windows-latest
+            bundles: nsis,msi
+            target: ""
+            meta_os: windows
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     env:
       HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
 
@@ -248,6 +255,7 @@ jobs:
           required_installers = {
             "macos": ["app"],
             "linux": ["appimage", "deb"],
+            "windows": ["nsis"],
           }.get(meta_os, [])
           if not required_installers:
             raise SystemExit(f"Unsupported META_OS: {meta_os}")
@@ -261,6 +269,10 @@ jobs:
               return "deb"
             if asset_name_lower.endswith(".rpm"):
               return "rpm"
+            if asset_name_lower.endswith("-setup.exe") or asset_name_lower.endswith(".nsis.zip"):
+              return "nsis"
+            if asset_name_lower.endswith(".msi"):
+              return "msi"
             return None
 
           items_by_installer: dict[str, list[dict]] = {}
@@ -291,7 +303,7 @@ jobs:
             raise SystemExit(f"Missing updater artifacts for installer(s): {', '.join(missing)}")
 
           def score(item):
-            p = item["path_hint"]
+            p = item["path_hint"].replace("\\", "/")
             n = item["asset_name"].lower()
             installer = item["installer"]
             s = 0
@@ -313,6 +325,15 @@ jobs:
                 s += 5
               if installer == "deb" and n.endswith(".deb"):
                 s += 5
+            elif meta_os == "windows":
+              if "/nsis/" in p:
+                s += 20
+              if "/msi/" in p:
+                s += 10
+              if installer == "nsis" and n.endswith("-setup.exe"):
+                s += 10
+              if installer == "msi" and n.endswith(".msi"):
+                s += 5
             return s
 
           chosen_by_installer: dict[str, dict] = {}
@@ -327,14 +348,19 @@ jobs:
           for installer in required_installers:
             chosen = chosen_by_installer[installer]
 
-            # Avoid duplicate asset uploads: Linux job uploads .deb and .AppImage separately.
+            # Avoid duplicate asset uploads: platform jobs upload installers separately.
             copy_asset = True
-            asset_path_hint = chosen["path_hint"]
+            asset_path_hint = chosen["path_hint"].replace("\\", "/")
             asset_name_lower = chosen["asset_name"].lower()
             if meta_os == "linux":
               if installer == "deb" and "/bundle/deb/" in asset_path_hint and asset_name_lower.endswith(".deb"):
                 copy_asset = False
               if installer == "appimage" and "/bundle/appimage/" in asset_path_hint and asset_name_lower.endswith(".appimage"):
+                copy_asset = False
+            if meta_os == "windows":
+              if installer == "nsis" and "/bundle/nsis/" in asset_path_hint and asset_name_lower.endswith("-setup.exe"):
+                copy_asset = False
+              if installer == "msi" and "/bundle/msi/" in asset_path_hint and asset_name_lower.endswith(".msi"):
                 copy_asset = False
 
             if copy_asset:
@@ -449,6 +475,35 @@ jobs:
             sleep "$sleep_seconds"
           done
 
+      - name: Upload Windows assets to GitHub Release
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Windows release assets found."
+            find "src-tauri/target/release/bundle" -maxdepth 3 -type f || true
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Failed to upload Windows assets after 3 attempts."
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 10))
+            echo "Upload failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
+            sleep "$sleep_seconds"
+          done
+
   publish-latest-json:
     needs: build-and-upload
     runs-on: ubuntu-24.04
@@ -486,17 +541,21 @@ jobs:
 
           mac_path = pathlib.Path("updater-meta") / "updater-meta-macos" / "updater-meta-macos.json"
           linux_path = pathlib.Path("updater-meta") / "updater-meta-linux" / "updater-meta-linux.json"
+          windows_path = pathlib.Path("updater-meta") / "updater-meta-windows" / "updater-meta-windows.json"
           mac = json.loads(mac_path.read_text(encoding="utf-8"))
           linux = json.loads(linux_path.read_text(encoding="utf-8"))
+          windows = json.loads(windows_path.read_text(encoding="utf-8"))
 
           mac_app = (mac.get("installers") or {}).get("app") or {}
           linux_appimage = (linux.get("installers") or {}).get("appimage") or {}
           linux_deb = (linux.get("installers") or {}).get("deb") or {}
+          windows_nsis = (windows.get("installers") or {}).get("nsis") or {}
 
           required = [
             ("macos app", mac_app),
             ("linux appimage", linux_appimage),
             ("linux deb", linux_deb),
+            ("windows nsis", windows_nsis),
           ]
           missing = [name for name, item in required if not item.get("asset_name") or not item.get("signature")]
           if missing:
@@ -523,12 +582,14 @@ jobs:
           mac_release_asset = pick_release_asset(".app.tar.gz")
           linux_appimage_release_asset = pick_release_asset(".AppImage")
           linux_deb_release_asset = pick_release_asset(".deb")
+          windows_nsis_release_asset = pick_release_asset("-setup.exe")
 
           platforms = {
             "darwin-aarch64-app": {"url": mac_release_asset["url"], "signature": mac_app["signature"]},
             "darwin-x86_64-app": {"url": mac_release_asset["url"], "signature": mac_app["signature"]},
             "linux-x86_64-appimage": {"url": linux_appimage_release_asset["url"], "signature": linux_appimage["signature"]},
             "linux-x86_64-deb": {"url": linux_deb_release_asset["url"], "signature": linux_deb["signature"]},
+            "windows-x86_64-nsis": {"url": windows_nsis_release_asset["url"], "signature": windows_nsis["signature"]},
           }
 
           latest = {
@@ -595,6 +656,10 @@ jobs:
             missing.append(".AppImage")
           if not has_suffix(".deb"):
             missing.append(".deb")
+          if not has_suffix("-setup.exe"):
+            missing.append("-setup.exe")
+          if not has_suffix(".msi"):
+            missing.append(".msi")
           if require_latest_json and "latest.json" not in names:
             missing.append("latest.json")
 

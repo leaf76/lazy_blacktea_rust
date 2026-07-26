@@ -18,8 +18,11 @@ Get the latest build from GitHub **Releases**: [Releases](../../releases)
 
 - macOS: `*.dmg` (preferred), `*.app` bundle (if provided)
 - Linux: `*.AppImage` (portable), `*.deb` (Debian/Ubuntu-based distros)
+- Windows: `*-setup.exe` (NSIS installer, preferred), `*.msi`
 
 macOS note: current builds are **unsigned**. If blocked by Gatekeeper, right-click and choose **Open**, or allow it in **System Settings -> Privacy & Security**.
+
+Windows note: SmartScreen may warn on unsigned installers. Choose **More info -> Run anyway** if you trust the release.
 
 ## Quick start (3 minutes)
 

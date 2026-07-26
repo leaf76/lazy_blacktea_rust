@@ -17,7 +17,7 @@ iOS features are host-tool dependent and are not bundled with the app.
 | --- | --- | --- |
 | macOS | Xcode CLT (`xcrun --find devicectl`) and/or libimobiledevice | `idevicesyslog`, `idevicecrashreport`, `idevicescreenshot`; `cfgutil` for profile install |
 | Linux | `usbmuxd` + `libimobiledevice-utils` (`idevice_id`, `ideviceinfo`) | same optional tools as above |
-| Windows | Android only in this project | iOS unsupported |
+| Windows | Android only in this project (prebuilt `*-setup.exe` / `*.msi` from Releases, or build from source) | iOS unsupported |
 
 Quick checks:
 

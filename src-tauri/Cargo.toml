@@ -1,6 +1,6 @@
 [package]
 name = "lazy_blacktea_rust"
-version = "0.0.88"
+version = "0.0.89"
 description = "Lazy Blacktea (Rust + Tauri)"
 authors = ["cy76"]
 edition = "2021"
@@ -34,7 +34,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["clock"] }
 regex = "1"
 tempfile = "3"
-xattr = "1"
 zip = "2"
 mime_guess = "2"
 base64 = "0.22"
@@ -43,3 +42,7 @@ quick-xml = "0.38"
 plist = "1"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled", "functions"] }
+
+# macOS-only: Gatekeeper quarantine check for custom ADB paths (see adb/locator.rs)
+[target.'cfg(target_os = "macos")'.dependencies]
+xattr = "1"
