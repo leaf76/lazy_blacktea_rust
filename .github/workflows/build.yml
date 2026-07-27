@@ -75,7 +75,10 @@ jobs:
 
       - name: Rust tests
         working-directory: src-tauri
-        run: cargo test --all --all-features
+        # Use --lib on all platforms. On Windows, bin test harnesses (smoke/soak)
+        # cannot also embed our Common Controls v6 test manifest alongside
+        # tauri-build's resource MANIFEST (CVT1100 duplicate resource).
+        run: cargo test --lib --all-features
 
       - name: Build Tauri bundles
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
