@@ -75,9 +75,12 @@ jobs:
 
       - name: Rust tests
         working-directory: src-tauri
-        # Use --lib on all platforms. On Windows, bin test harnesses (smoke/soak)
-        # cannot also embed our Common Controls v6 test manifest alongside
-        # tauri-build's resource MANIFEST (CVT1100 duplicate resource).
+        env:
+          # Windows: embed Common Controls v6 for the lib test harness only
+          # (see src-tauri/build.rs). Must not be set during `tauri build`.
+          LAZY_BLACKTEA_TEST_MANIFEST: "1"
+        # Use --lib so we do not also link smoke/soak unit-test harnesses with
+        # a second MANIFEST on top of tauri-build's resource (CVT1100/LNK1123).
         run: cargo test --lib --all-features
 
       - name: Build Tauri bundles
