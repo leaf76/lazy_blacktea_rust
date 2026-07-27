@@ -1314,7 +1314,11 @@ mod tests {
     #[test]
     fn default_output_dir_falls_back_to_home_downloads() {
         let resolved = resolve_default_output_dir(None, Some(PathBuf::from("/tmp/home")));
-        assert_eq!(resolved, "/tmp/home/Downloads");
+        let expected = PathBuf::from("/tmp/home")
+            .join("Downloads")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(resolved, expected);
     }
 
     #[test]

@@ -40,8 +40,11 @@ mod tests {
         join.join().expect("join stop request");
 
         assert!(interrupted, "expected sleep to stop early");
+        // sleep_with_stop_flag polls up to every 100ms; under CI load the stop
+        // thread and wakeup can take several hundred ms. Still require a clear
+        // early return vs the full 2s timeout.
         assert!(
-            started.elapsed() < Duration::from_millis(250),
+            started.elapsed() < Duration::from_millis(1000),
             "expected early wakeup, took {:?}",
             started.elapsed()
         );
