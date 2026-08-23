@@ -43,6 +43,14 @@ fn default_ios_refresh_interval() -> i32 {
     15
 }
 
+fn default_reboot_retention_timeout_sec() -> i32 {
+    90
+}
+
+fn default_disconnect_retention_timeout_sec() -> i32 {
+    45
+}
+
 fn default_true() -> bool {
     true
 }
@@ -200,6 +208,12 @@ pub struct DeviceSettings {
     pub show_offline_devices: bool,
     #[serde(default)]
     pub preferred_devices: Vec<String>,
+    #[serde(default = "default_true")]
+    pub device_retention_enabled: bool,
+    #[serde(default = "default_reboot_retention_timeout_sec")]
+    pub device_reboot_retention_timeout_sec: i32,
+    #[serde(default = "default_disconnect_retention_timeout_sec")]
+    pub device_disconnect_retention_timeout_sec: i32,
 }
 
 impl Default for DeviceSettings {
@@ -212,6 +226,9 @@ impl Default for DeviceSettings {
             auto_connect: true,
             show_offline_devices: false,
             preferred_devices: Vec::new(),
+            device_retention_enabled: true,
+            device_reboot_retention_timeout_sec: default_reboot_retention_timeout_sec(),
+            device_disconnect_retention_timeout_sec: default_disconnect_retention_timeout_sec(),
         }
     }
 }

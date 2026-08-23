@@ -262,7 +262,6 @@ import {
   formatPrimaryDeviceLabel,
   getDevicePlatform,
   hasDeviceCapability,
-  mergeDeviceDetails,
   normalizeDeviceItemInfoFieldIds,
   reduceSelectionToOne,
   resolveDeviceQuickMenuSelection,
@@ -279,6 +278,16 @@ import {
   type DeviceQuickMenuAction,
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
+import {
+  clampRetentionTimeoutSec,
+  dismissRetainedDevice,
+  markDevicesForReboot,
+  reconcileDevicesWithRetention,
+  resolveDeviceDisplayStatus,
+  tickRetentionRecords,
+  type DeviceRetentionConfig,
+  type DeviceRetentionRecord,
+} from "./deviceRetention";
 import { DeviceGroupPanel } from "./DeviceGroupPanel";
 import {
   THEME_PRESETS,
@@ -1689,6 +1698,7 @@ function App() {
   };
 
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [retentionMap, setRetentionMap] = useState<Record<string, DeviceRetentionRecord>>({});
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
   const [developerOptionsSnapshot, setDeveloperOptionsSnapshot] = useState<DeveloperOptionSnapshot>(
     createDeveloperOptionSnapshot(),
@@ -2327,6 +2337,7 @@ function App() {
   const dashboardCopyTimerRef = useRef<number | null>(null);
   const adbInfoRef = useRef<AdbInfo | null>(null);
   const devicesRef = useRef<DeviceInfo[]>([]);
+  const retentionMapRef = useRef<Record<string, DeviceRetentionRecord>>({});
   const configRef = useRef<AppConfig | null>(null);
   const bugreportLogRequestRef = useRef(0);
   const logcatPendingRef = useRef<Record<string, string[]>>({});
@@ -4577,6 +4588,23 @@ function App() {
     prevTaskItemsRef.current = next;
   }, [taskState.items]);
 
+  const getDeviceRetentionConfig = (): DeviceRetentionConfig => ({
+    enabled: configRef.current?.device.device_retention_enabled !== false,
+    rebootTimeoutSec: clampRetentionTimeoutSec(configRef.current?.device.device_reboot_retention_timeout_sec, 90),
+    disconnectTimeoutSec: clampRetentionTimeoutSec(configRef.current?.device.device_disconnect_retention_timeout_sec, 45),
+  });
+
+  const handleDismissRetainedDevice = (serial: string) => {
+    const { mergedDevices, nextRetentionMap } = dismissRetainedDevice({
+      currentDevices: devicesRef.current,
+      retentionMap: retentionMapRef.current,
+      serial,
+    });
+    setRetentionMap(nextRetentionMap);
+    setDevices(mergedDevices);
+    setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, mergedDevices));
+  };
+
   const refreshDeviceDetails = async (options: { notifyOnError?: boolean } = {}) => {
     const refreshId = ++detailRefreshSeqRef.current;
     try {
@@ -4584,7 +4612,14 @@ function App() {
       if (refreshId !== detailRefreshSeqRef.current) {
         return;
       }
-      setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
+      const { mergedDevices, nextRetentionMap } = reconcileDevicesWithRetention({
+        currentDevices: devicesRef.current,
+        incomingDevices: response.data,
+        retentionMap: retentionMapRef.current,
+        config: getDeviceRetentionConfig(),
+      });
+      setRetentionMap(nextRetentionMap);
+      setDevices(mergedDevices);
     } catch (error) {
       if (options.notifyOnError) {
         pushToast(`Detail refresh failed: ${formatError(error)}`, "error");
@@ -4619,13 +4654,19 @@ function App() {
     const statesChanged = Array.from(nextBySerial.entries()).some(([serial, state]) => prevBySerial.get(serial) !== state);
     const shouldRefreshDetail = options.forceDetailRefresh === true || serialsChanged || statesChanged;
 
-    // Tracking snapshots contain summaries only; keep the last known detail to avoid UI flicker.
-    const mergedDevices = mergeDeviceDetails(devicesRef.current, nextDevices, {
-      preserveMissingDetail: true,
-      preserveMissingPlatforms: ["ios"],
+    // Tracking snapshots contain summaries only; reconcile with retention to keep rebooting/offline devices.
+    const { mergedDevices, nextRetentionMap, restoredSerials } = reconcileDevicesWithRetention({
+      currentDevices: devicesRef.current,
+      incomingDevices: nextDevices,
+      retentionMap: retentionMapRef.current,
+      config: getDeviceRetentionConfig(),
     });
+    setRetentionMap(nextRetentionMap);
     setDevices(mergedDevices);
     setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, mergedDevices));
+    if (restoredSerials.length > 0) {
+      scheduleDeviceDetailRefresh(500, { notifyOnError: false });
+    }
     if (options.allowDetailRefresh && shouldRefreshDetail) {
       scheduleDeviceDetailRefresh(800, { notifyOnError: false });
     }
@@ -4650,9 +4691,16 @@ function App() {
     deviceTrackingFallbackInFlightRef.current = true;
     try {
       const response = await listDevices(false, { recordError: false });
-      setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
-      setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, response.data));
-      if (configRef.current?.device.auto_refresh_enabled) {
+      const { mergedDevices, nextRetentionMap, restoredSerials } = reconcileDevicesWithRetention({
+        currentDevices: devicesRef.current,
+        incomingDevices: response.data,
+        retentionMap: retentionMapRef.current,
+        config: getDeviceRetentionConfig(),
+      });
+      setRetentionMap(nextRetentionMap);
+      setDevices(mergedDevices);
+      setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, mergedDevices));
+      if (restoredSerials.length > 0 || configRef.current?.device.auto_refresh_enabled) {
         scheduleDeviceDetailRefresh(800, { notifyOnError });
       }
     } catch (error) {
@@ -4686,9 +4734,15 @@ function App() {
       if (refreshId !== refreshSeqRef.current) {
         return;
       }
-      // listDevices(false) returns summaries only; keep the last known detail to avoid UI flicker.
-      setDevices((prev) => mergeDeviceDetails(prev, response.data, { preserveMissingDetail: true }));
-      setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, response.data));
+      const { mergedDevices, nextRetentionMap } = reconcileDevicesWithRetention({
+        currentDevices: devicesRef.current,
+        incomingDevices: response.data,
+        retentionMap: retentionMapRef.current,
+        config: getDeviceRetentionConfig(),
+      });
+      setRetentionMap(nextRetentionMap);
+      setDevices(mergedDevices);
+      setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, mergedDevices));
       void refreshDeviceDetails({ notifyOnError: false });
     } catch (error) {
       pushToast(formatError(error), "error");
@@ -4859,6 +4913,29 @@ function App() {
   useEffect(() => {
     devicesRef.current = devices;
   }, [devices]);
+
+  useEffect(() => {
+    retentionMapRef.current = retentionMap;
+  }, [retentionMap]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (Object.keys(retentionMapRef.current).length === 0) {
+        return;
+      }
+      const { mergedDevices, nextRetentionMap, expiredSerials } = tickRetentionRecords({
+        currentDevices: devicesRef.current,
+        retentionMap: retentionMapRef.current,
+        now: Date.now(),
+      });
+      setRetentionMap(nextRetentionMap);
+      if (expiredSerials.length > 0) {
+        setDevices(mergedDevices);
+        setSelectedSerials((prev) => resolveSelectedSerialsForContext(prev, mergedDevices));
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     configRef.current = config;
@@ -6655,6 +6732,8 @@ function App() {
       return;
     }
     const operationId = crypto.randomUUID();
+    const timeoutSec = clampRetentionTimeoutSec(configRef.current?.device.device_reboot_retention_timeout_sec, 90);
+    setRetentionMap((prev) => markDevicesForReboot(prev, devicesRef.current, targetSerials, mode, timeoutSec));
     setDeviceQuickActionStatuses(targetSerials, "reboot", "pending", operationId);
     setBusy(true);
     try {
@@ -16236,7 +16315,8 @@ function App() {
                               const groupLabel = groupMap[serial] ?? null;
                               const isSelected = selectedSerials.includes(serial);
                               const isActive = serial === activeSerial;
-                              const stateTone = getDeviceTone(device.summary.state);
+                              const displayStatus = resolveDeviceDisplayStatus(device, retentionMap[serial]);
+                              const isRetained = displayStatus.isRetained;
                               const screenRecordDeviceStatus = buildScreenRecordDeviceStatus(
                                 serial,
                                 screenRecordStatusBySerial[serial],
@@ -16249,7 +16329,7 @@ function App() {
                               return (
                                 <div
                                   key={serial}
-                                  className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
+                                  className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}${isRetained ? " is-retained" : ""}`}
                                   data-device-state={device.summary.state}
                                   onClick={(event) => handleDeviceRowSelect(event, serial, index)}
                                   tabIndex={0}
@@ -16333,7 +16413,19 @@ function App() {
                                   </div>
                                   <div className="device-cell device-status-actions">
                                     <div className="device-state">
-                                      <span className={`status-pill ${stateTone}`}>{device.summary.state}</span>
+                                      <span
+                                        className={`status-pill ${displayStatus.tone}`}
+                                        title={displayStatus.title}
+                                      >
+                                        {displayStatus.kind === "rebooting" ? (
+                                          <span className="rebooting-indicator">
+                                            <span className="pulse-dot" />
+                                            {displayStatus.label}
+                                          </span>
+                                        ) : (
+                                          displayStatus.label
+                                        )}
+                                      </span>
                                       {screenRecordDeviceStatus && (
                                         <span
                                           className={`status-pill screen-record-status ${screenRecordDeviceStatus.tone}`}
@@ -16352,25 +16444,39 @@ function App() {
                                       )}
                                     </div>
                                     <div className="device-actions">
-                                      <button
-                                        type="button"
-                                        className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          if (!isActive) {
-                                            handleSelectActiveSerial(serial);
+                                      {isRetained ? (
+                                        <button
+                                          type="button"
+                                          className="ghost danger-text"
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            handleDismissRetainedDevice(serial);
+                                          }}
+                                          title="Dismiss offline device from list"
+                                        >
+                                          Dismiss
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            if (!isActive) {
+                                              handleSelectActiveSerial(serial);
+                                            }
+                                          }}
+                                          disabled={busy || isActive}
+                                          aria-label={
+                                            isActive
+                                              ? `${modelLabel} is primary device`
+                                              : `Set ${modelLabel} as primary device`
                                           }
-                                        }}
-                                        disabled={busy || isActive}
-                                        aria-label={
-                                          isActive
-                                            ? `${modelLabel} is primary device`
-                                            : `Set ${modelLabel} as primary device`
-                                        }
-                                        title={isActive ? "Primary device" : "Set as primary device"}
-                                      >
-                                        {isActive ? "Primary" : "Set Primary"}
-                                      </button>
+                                          title={isActive ? "Primary device" : "Set as primary device"}
+                                        >
+                                          {isActive ? "Primary" : "Set Primary"}
+                                        </button>
+                                      )}
                                       <button
                                         type="button"
                                         className="ghost icon-only"
@@ -20118,6 +20224,89 @@ function App() {
                               Device connection state always follows <code>adb track-devices</code> events. <code>adb devices</code> is only used
                               for startup or recovery sync, not fixed polling.
                             </div>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={config.device.device_retention_enabled !== false}
+                                onChange={(event) =>
+                                  setConfig((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          device: {
+                                            ...prev.device,
+                                            device_retention_enabled: event.target.checked,
+                                          },
+                                        }
+                                      : prev,
+                                  )
+                                }
+                              />
+                              Retain rebooting and disconnected devices
+                            </label>
+                            <div className="muted settings-hint">
+                              Temporarily keeps rebooting and disconnected devices in the list with clear status to avoid losing selections.
+                            </div>
+                            {config.device.device_retention_enabled !== false && (
+                              <>
+                                <label>
+                                  Reboot retention timeout (sec)
+                                  <input
+                                    type="number"
+                                    min={10}
+                                    max={600}
+                                    value={config.device.device_reboot_retention_timeout_sec ?? 90}
+                                    onChange={(event) =>
+                                      setConfig((prev) =>
+                                        prev
+                                          ? {
+                                              ...prev,
+                                              device: {
+                                                ...prev.device,
+                                                device_reboot_retention_timeout_sec: clampRetentionTimeoutSec(
+                                                  parseIntegerSettingInput(
+                                                    event.target.value,
+                                                    prev.device.device_reboot_retention_timeout_sec ?? 90,
+                                                  ),
+                                                  90,
+                                                ),
+                                              },
+                                            }
+                                          : prev,
+                                      )
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  Disconnect retention timeout (sec)
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={300}
+                                    value={config.device.device_disconnect_retention_timeout_sec ?? 45}
+                                    onChange={(event) =>
+                                      setConfig((prev) =>
+                                        prev
+                                          ? {
+                                              ...prev,
+                                              device: {
+                                                ...prev.device,
+                                                device_disconnect_retention_timeout_sec: clampRetentionTimeoutSec(
+                                                  parseIntegerSettingInput(
+                                                    event.target.value,
+                                                    prev.device.device_disconnect_retention_timeout_sec ?? 45,
+                                                  ),
+                                                  45,
+                                                ),
+                                              },
+                                            }
+                                          : prev,
+                                      )
+                                    }
+                                  />
+                                </label>
+                              </>
+                            )}
 		                        </div>
 	                        <div className="settings-group settings-section-operations">
 	                          <h3>Commands</h3>

@@ -1,7 +1,7 @@
 {
   "name": "lazy-blacktea",
   "private": true,
-  "version": "0.0.90",
+  "version": "0.0.91",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,7 +20,7 @@
     "@tauri-apps/plugin-updater": "^2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-router-dom": "^6.30.3"
+    "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

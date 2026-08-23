@@ -664,6 +664,9 @@ export type DeviceSettings = {
   auto_connect: boolean;
   show_offline_devices: boolean;
   preferred_devices: string[];
+  device_retention_enabled?: boolean;
+  device_reboot_retention_timeout_sec?: number;
+  device_disconnect_retention_timeout_sec?: number;
 };
 
 export type CommandSettings = {

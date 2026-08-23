@@ -17,7 +17,7 @@ export default defineConfig(async () => ({
           if (id.includes("@tauri-apps")) {
             return "vendor-tauri";
           }
-          if (id.includes("react-router-dom")) {
+          if (id.includes("react-router")) {
             return "vendor-router";
           }
           if (id.includes("react")) {

@@ -2635,6 +2635,39 @@ button.ghost.icon-only {
   white-space: nowrap;
 }
 
+.device-row.is-retained {
+  opacity: 0.78;
+}
+
+.device-row.is-retained:hover {
+  opacity: 0.95;
+}
+
+.rebooting-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rebooting-indicator .pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: currentColor;
+  animation: reboot-pulse 1.4s infinite ease-in-out;
+}
+
+@keyframes reboot-pulse {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
 .device-actions {
   display: flex;
   align-items: center;

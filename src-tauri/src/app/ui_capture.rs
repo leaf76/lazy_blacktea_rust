@@ -43,7 +43,7 @@ pub fn validate_ui_dump_xml(xml: &str) -> Result<(), String> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(event)) => {
                 if depth == 0 {
-                    if event.name().as_ref() != b"hierarchy" {
+                    if event.name().as_ref() != "hierarchy" {
                         return Err("UI XML root element must be <hierarchy>".to_string());
                     }
                     saw_root = true;
@@ -52,7 +52,7 @@ pub fn validate_ui_dump_xml(xml: &str) -> Result<(), String> {
             }
             Ok(Event::Empty(event)) => {
                 if depth == 0 {
-                    if event.name().as_ref() != b"hierarchy" {
+                    if event.name().as_ref() != "hierarchy" {
                         return Err("UI XML root element must be <hierarchy>".to_string());
                     }
                     return Err("UI XML root element cannot be empty".to_string());
