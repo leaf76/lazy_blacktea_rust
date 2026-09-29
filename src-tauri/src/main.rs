@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    lazy_blacktea_rust_lib::app::platform::init_platform_environment();
     lazy_blacktea_rust_lib::run()
 }

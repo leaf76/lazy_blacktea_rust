@@ -24,6 +24,7 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    app::platform::init_platform_environment();
     init_logging();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())

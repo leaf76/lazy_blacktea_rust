@@ -48,7 +48,7 @@ jobs:
             bundles: dmg,app
             target: universal-apple-darwin
             meta_os: macos
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             bundles: appimage,deb
             target: ""
             meta_os: linux
@@ -445,6 +445,31 @@ jobs:
             echo "Upload failed, retrying in ${sleep_seconds}s (attempt ${attempt}/3)"
             sleep "$sleep_seconds"
           done
+
+      - name: Smoke test Linux AppImage launch before upload
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y xvfb
+          shopt -s nullglob
+          appimages=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          if [ "${#appimages[@]}" -gt 0 ]; then
+            APPIMAGE="${appimages[0]}"
+            chmod +x "$APPIMAGE"
+            echo "Smoke testing AppImage launch under xvfb: $APPIMAGE"
+            xvfb-run --auto-servernum "$APPIMAGE" --appimage-extract-and-run &
+            PID=$!
+            sleep 5
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "Smoke test passed: AppImage launched successfully."
+              kill -15 "$PID" 2>/dev/null || true
+            else
+              wait "$PID"
+              EXIT_CODE=$?
+              echo "Smoke test failed: AppImage crashed on launch with exit code $EXIT_CODE"
+              exit 1
+            fi
+          fi
 
       - name: Upload Linux assets to GitHub Release
         if: runner.os == 'Linux'

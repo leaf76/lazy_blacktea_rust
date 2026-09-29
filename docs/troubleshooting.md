@@ -184,6 +184,94 @@ If mirroring fails:
 1. Verify `scrcpy` is installed and available in `PATH`.
 2. Try running `scrcpy` directly in your terminal to see the error output.
 
+## Linux: AppImage Fails to Launch / WebKitGTK EGL Errors
+
+If launching the Linux AppImage fails with errors such as:
+
+```text
+/usr/lib/x86_64-linux-gnu/gvfs/libgvfscommon.so: undefined symbol: g_variant_builder_init_static
+Failed to load module: /usr/lib/x86_64-linux-gnu/gio/modules/libgvfsdbus.so
+Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...
+```
+
+### 1. Active Conda Environment or GIO Module Mismatch (`undefined symbol: g_variant_builder_init_static`)
+
+If you run the AppImage inside an active Conda environment (e.g. `(base)` prompt) or on a distribution with newer GIO modules, the dynamic linker may load an older `libglib-2.0.so` that conflicts with the host system's GVFS modules (`libgvfsdbus.so`).
+
+- Deactivate Conda before running:
+  ```bash
+  conda deactivate
+  ./Lazy.Blacktea_*.AppImage
+  ```
+- Or clear `LD_LIBRARY_PATH` and isolate `GIO_MODULE_DIR` for that invocation:
+  ```bash
+  LD_LIBRARY_PATH="" GIO_MODULE_DIR="" ./Lazy.Blacktea_*.AppImage
+  ```
+
+### 2. WebKitGTK Hardware Acceleration Conflicts (`EGL_BAD_PARAMETER`)
+
+WebKitGTK's hardware-accelerated DMA-BUF renderer can fail to initialize EGL displays on certain Linux compositors (particularly Wayland, NVIDIA proprietary drivers, or Mesa driver mismatches with bundled AppImage libraries).
+
+- Disable DMA-BUF renderer (set automatically in newer builds):
+  ```bash
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Lazy.Blacktea_*.AppImage
+  ```
+- If running under Wayland still fails, fallback to software compositing or force X11 / XWayland:
+  ```bash
+  WEBKIT_DISABLE_COMPOSITING_MODE=1 ./Lazy.Blacktea_*.AppImage
+  # or
+  GDK_BACKEND=x11 ./Lazy.Blacktea_*.AppImage
+  ```
+- If the bundled Wayland client library causes ABI mismatch:
+  ```bash
+  LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libwayland-client.so.0 ./Lazy.Blacktea_*.AppImage
+  ```
+
+### 3. FUSE Missing on Ubuntu 24.04+ (`dlopen(): error loading libfuse.so.2`)
+
+Ubuntu 24.04 ships with FUSE 3 by default. Running Type 2 AppImages may require installing the FUSE 2 compatibility library:
+
+```bash
+sudo apt install libfuse2t64
+# On older Ubuntu 22.04:
+# sudo apt install libfuse2
+```
+
+### 4. Wayland Clipboard Fallback Warning
+
+If you see:
+
+```text
+WARN: Tried to initialize the wayland data control protocol clipboard, but failed. Falling back to the X11 clipboard protocol.
+```
+
+This is a non-fatal warning from `arboard` (clipboard manager) indicating that your Wayland compositor (such as GNOME Wayland) does not support the `wlr-data-control` protocol extension. The clipboard manager automatically and safely falls back to the X11 clipboard protocol.
+
+### 5. Quick Launch Helper Script
+
+You can use the helper script included in the repository to automatically apply all Linux environment fixes:
+
+```bash
+# Standard launch with isolation and DMA-BUF workaround
+./scripts/launch_linux.sh ./Lazy.Blacktea_*.AppImage
+
+# Force X11 backend if Wayland has issues
+./scripts/launch_linux.sh --x11 ./Lazy.Blacktea_*.AppImage
+
+# Bypass FUSE requirement by extracting and running
+./scripts/launch_linux.sh --extract ./Lazy.Blacktea_*.AppImage
+```
+
+### 6. Recommended Alternative: Native `.deb` Package
+
+On Ubuntu or Debian, install the native `.deb` package provided on GitHub Releases instead of AppImage:
+
+```bash
+sudo apt install ./Lazy.Blacktea_*_amd64.deb
+```
+
+Native packages link against your host system's WebKitGTK and Mesa libraries directly, avoiding AppImage bundling conflicts.
+
 ## GitHub Release Upload Missing Binaries
 
 If a release page temporarily shows `assets: []` for a new tag:

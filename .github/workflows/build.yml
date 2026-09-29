@@ -18,7 +18,7 @@ jobs:
         include:
           - os: macos-latest
             bundles: dmg,app
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             bundles: appimage,deb
           - os: windows-latest
             bundles: nsis,msi
@@ -85,6 +85,31 @@ jobs:
 
       - name: Build Tauri bundles
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+
+      - name: Smoke test Linux AppImage launch
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y xvfb
+          shopt -s nullglob
+          appimages=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          if [ "${#appimages[@]}" -gt 0 ]; then
+            APPIMAGE="${appimages[0]}"
+            chmod +x "$APPIMAGE"
+            echo "Smoke testing AppImage launch under xvfb: $APPIMAGE"
+            xvfb-run --auto-servernum "$APPIMAGE" --appimage-extract-and-run &
+            PID=$!
+            sleep 5
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "Smoke test passed: AppImage launched successfully."
+              kill -15 "$PID" 2>/dev/null || true
+            else
+              wait "$PID"
+              EXIT_CODE=$?
+              echo "Smoke test failed: AppImage crashed on launch with exit code $EXIT_CODE"
+              exit 1
+            fi
+          fi
 
       - name: Upload bundles
         uses: actions/upload-artifact@v4
