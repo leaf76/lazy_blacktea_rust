@@ -86,6 +86,14 @@ jobs:
       - name: Build Tauri bundles
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
 
+      - name: Patch Linux AppImage (remove bundled libwayland)
+        if: runner.os == 'Linux'
+        run: bash scripts/patch_linux_appimage.sh
+
+      - name: Package Linux portable tarball
+        if: runner.os == 'Linux'
+        run: bash scripts/package_linux_tarball.sh
+
       - name: Smoke test Linux AppImage launch
         if: runner.os == 'Linux'
         run: |

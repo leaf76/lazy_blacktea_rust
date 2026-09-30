@@ -249,10 +249,10 @@ This is a non-fatal warning from `arboard` (clipboard manager) indicating that y
 
 ### 5. Quick Launch Helper Script
 
-You can use the helper script included in the repository to automatically apply all Linux environment fixes:
+You can use the helper script included in the repository to automatically apply all Linux environment fixes, including auto-detecting and preloading host `libwayland-client.so.0` to avoid Mesa/EGL ABI mismatches:
 
 ```bash
-# Standard launch with isolation and DMA-BUF workaround
+# Standard launch with isolation, host Wayland preloading, and DMA-BUF workaround
 ./scripts/launch_linux.sh ./Lazy.Blacktea_*.AppImage
 
 # Force X11 backend if Wayland has issues
@@ -262,15 +262,30 @@ You can use the helper script included in the repository to automatically apply 
 ./scripts/launch_linux.sh --extract ./Lazy.Blacktea_*.AppImage
 ```
 
-### 6. Recommended Alternative: Native `.deb` Package
+### 6. Portable Zero-Install Alternative: `.tar.gz` (No FUSE / No Root)
 
-On Ubuntu or Debian, install the native `.deb` package provided on GitHub Releases instead of AppImage:
+If you cannot run installer packages (`.deb`) or lack root/sudo permissions, download the portable tarball from GitHub Releases (`Lazy.Blacktea_*_amd64.tar.gz`):
+
+```bash
+tar -xzf Lazy.Blacktea_*_amd64.tar.gz
+cd lazy-blacktea
+./launch.sh
+```
+
+Benefits:
+- Requires **zero FUSE** (does not use virtual filesystem mounting).
+- Requires **zero root/sudo** permissions.
+- Links against host system WebKitGTK and Mesa drivers directly without bundled library collisions.
+
+### 7. Recommended System Package: Native `.deb` Package
+
+On Ubuntu or Debian with administrator access, install the native `.deb` package provided on GitHub Releases instead of AppImage:
 
 ```bash
 sudo apt install ./Lazy.Blacktea_*_amd64.deb
 ```
 
-Native packages link against your host system's WebKitGTK and Mesa libraries directly, avoiding AppImage bundling conflicts.
+Native packages link against your host system's WebKitGTK and Mesa libraries directly and integrate into your desktop application menu.
 
 ## GitHub Release Upload Missing Binaries
 

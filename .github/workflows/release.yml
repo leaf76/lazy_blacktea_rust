@@ -446,6 +446,14 @@ jobs:
             sleep "$sleep_seconds"
           done
 
+      - name: Patch Linux AppImage (remove bundled libwayland)
+        if: runner.os == 'Linux'
+        run: bash scripts/patch_linux_appimage.sh
+
+      - name: Package Linux portable tarball
+        if: runner.os == 'Linux'
+        run: bash scripts/package_linux_tarball.sh
+
       - name: Smoke test Linux AppImage launch before upload
         if: runner.os == 'Linux'
         run: |
@@ -481,6 +489,7 @@ jobs:
           files=(
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/tarball/*.tar.gz
           )
           if [ "${#files[@]}" -eq 0 ]; then
             echo "No Linux release assets found."

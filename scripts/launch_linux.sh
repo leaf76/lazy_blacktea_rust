@@ -77,6 +77,19 @@ export WEBKIT_DISABLE_DMABUF_RENDERER=1
 export GIO_MODULE_DIR=""
 export LD_LIBRARY_PATH=""
 
+# Auto-detect host libwayland-client.so.0 to prevent Mesa/EGL ABI mismatches
+if [[ -z "${LD_PRELOAD:-}" ]]; then
+  for candidate in \
+    /usr/lib/x86_64-linux-gnu/libwayland-client.so.0 \
+    /usr/lib64/libwayland-client.so.0 \
+    /usr/lib/libwayland-client.so.0; do
+    if [[ -f "$candidate" ]]; then
+      export LD_PRELOAD="$candidate"
+      break
+    fi
+  done
+fi
+
 if [[ "$USE_X11" -eq 1 ]]; then
   echo "Mode: Forcing X11 backend (GDK_BACKEND=x11)"
   export GDK_BACKEND=x11
@@ -94,7 +107,9 @@ if [[ "$USE_EXTRACT" -eq 1 ]]; then
   (
     cd "$TMP_DIR"
     "$APPIMAGE_PATH" --appimage-extract >/dev/null 2>&1
-    ./squashfs-root/AppRun
+    # Remove bundled incompatible Wayland libraries to force host driver alignment
+    rm -f squashfs-root/usr/lib/libwayland*.so* 2>/dev/null || true
+    ./squashfs-root/AppRun "$@"
   )
   exit 0
 fi
