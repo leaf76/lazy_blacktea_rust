@@ -89,5 +89,5 @@ echo "Creating portable tarball: $OUT_TAR"
 tar -czf "$OUT_TAR" -C "$STAGE_DIR" lazy-blacktea
 
 echo "Verifying portable tarball..."
-tar -tzf "$OUT_TAR" | head -n 10
-echo "Portable tarball created successfully: $OUT_TAR"
+tar -tzf "$OUT_TAR" >/dev/null
+echo "Portable tarball created and verified successfully: $OUT_TAR"
