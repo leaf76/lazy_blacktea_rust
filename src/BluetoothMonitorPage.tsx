@@ -205,6 +205,8 @@ export const BluetoothMonitorPage = ({
     error: true,
   });
   const [rawOpen, setRawOpen] = useState(false);
+  const [rawTab, setRawTab] = useState<"dumpsys" | "metrics">("dumpsys");
+  const [rawSearch, setRawSearch] = useState("");
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [bondSearch, setBondSearch] = useState("");
@@ -483,8 +485,41 @@ export const BluetoothMonitorPage = ({
     [handleCopyText],
   );
 
+  const rawMetricsJson = useMemo(() => {
+    if (!snapshot && !stateSummary) {
+      return "";
+    }
+    const { raw_text: _rawText, ...parsedSnapshot } = snapshot ?? { raw_text: undefined };
+    return JSON.stringify(
+      {
+        serial,
+        state: stateSummary,
+        snapshot: snapshot ? parsedSnapshot : null,
+      },
+      null,
+      2,
+    );
+  }, [serial, snapshot, stateSummary]);
+
+  const activeRawText = rawTab === "dumpsys" ? snapshot?.raw_text?.trim() ?? "" : rawMetricsJson;
+
+  const filteredRawLines = useMemo(() => {
+    if (!activeRawText) {
+      return [];
+    }
+    const lines = activeRawText.split("\n");
+    const query = rawSearch.trim().toLowerCase();
+    if (!query) {
+      return lines;
+    }
+    return lines.filter((line) => line.toLowerCase().includes(query));
+  }, [activeRawText, rawSearch]);
+
   const handleCopyRaw = async () => {
-    await handleCopyText(snapshot?.raw_text?.trim() ?? "", "Copied raw snapshot to clipboard.");
+    await handleCopyText(
+      activeRawText,
+      rawTab === "dumpsys" ? "Copied raw dumpsys to clipboard." : "Copied state & metrics JSON to clipboard.",
+    );
   };
 
   const handleMonitorAction = async () => {
@@ -1004,11 +1039,33 @@ export const BluetoothMonitorPage = ({
         <section className="panel bluetooth-monitor-raw">
           <div className="bluetooth-monitor-raw-header">
             <div>
-              <h3>Raw Bluetooth Snapshot</h3>
-              <p className="muted">Low-level diagnostic dump for deeper inspection.</p>
+              <h3>{rawTab === "dumpsys" ? "Raw Bluetooth Snapshot (dumpsys)" : "Raw State & Metrics (JSON)"}</h3>
+              <p className="muted">Low-level diagnostic dump and parsed state/metrics for troubleshooting.</p>
             </div>
-            <div className="button-row">
-              <button type="button" className="ghost" onClick={handleCopyRaw} disabled={!snapshot?.raw_text?.trim()}>
+            <div className="button-row compact">
+              <div className="toggle-group">
+                <button
+                  type="button"
+                  className={`toggle ${rawTab === "dumpsys" ? "active" : ""}`}
+                  onClick={() => setRawTab("dumpsys")}
+                >
+                  Raw Dumpsys
+                </button>
+                <button
+                  type="button"
+                  className={`toggle ${rawTab === "metrics" ? "active" : ""}`}
+                  onClick={() => setRawTab("metrics")}
+                >
+                  Metrics JSON
+                </button>
+              </div>
+              <input
+                value={rawSearch}
+                onChange={(event) => setRawSearch(event.target.value)}
+                placeholder="Filter lines…"
+                aria-label="Filter raw bluetooth diagnostics"
+              />
+              <button type="button" className="ghost" onClick={handleCopyRaw} disabled={!activeRawText}>
                 Copy
               </button>
             </div>
@@ -1016,11 +1073,17 @@ export const BluetoothMonitorPage = ({
           {copyNotice ? <p className="muted">{copyNotice}</p> : null}
           <div className="logcat-output bluetooth-monitor-raw-output">
             <div className="logcat-viewport">
-              {(snapshot?.raw_text?.trim() || "No snapshot yet.").split("\n").map((line, index) => (
-                <div key={`${index}-${line}`} className="logcat-line">
-                  {line}
+              {filteredRawLines.length > 0 ? (
+                filteredRawLines.map((line, index) => (
+                  <div key={`${index}-${line}`} className="logcat-line">
+                    {line}
+                  </div>
+                ))
+              ) : (
+                <div className="logcat-line muted">
+                  {activeRawText ? "No lines match your filter." : "No snapshot yet."}
                 </div>
-              ))}
+              )}
             </div>
           </div>
         </section>

@@ -1,5 +1,8 @@
-import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
+import { useMemo, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { isTauriRuntime } from "./tauriEnv";
 import type { UiNodeInfo } from "./ui_bounds";
+import { buildUiNodeSelectors } from "./uiInspectorSelectors";
 
 type UiNodesParseSummary = {
   nodes: UiNodeInfo[];
@@ -100,7 +103,30 @@ const UiInspectorPage = ({
   setUiHierarchyFrameToken,
   uiXml,
   uiXmlView,
-}: UiInspectorPageProps) => (
+}: UiInspectorPageProps) => {
+  const [copiedSelector, setCopiedSelector] = useState<string | null>(null);
+  const selectedSelectors = useMemo(
+    () => (uiSelectedNode ? buildUiNodeSelectors(uiSelectedNode) : null),
+    [uiSelectedNode],
+  );
+
+  const handleCopySelector = async (label: string, value: string) => {
+    try {
+      if (isTauriRuntime()) {
+        await writeText(value);
+      } else if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      }
+      setCopiedSelector(label);
+      window.setTimeout(() => {
+        setCopiedSelector((prev) => (prev === label ? null : prev));
+      }, 1800);
+    } catch {
+      setCopiedSelector(null);
+    }
+  };
+
+  return (
   <div className="page-section page-section-stretch ui-inspector-workspace">
     <div className="page-header">
       <div>
@@ -295,6 +321,42 @@ const UiInspectorPage = ({
                     <span className="ui-node-meta-label">Bounds</span>
                     <span className="ui-node-meta-value">{uiSelectedNode.bounds}</span>
                   </div>
+                  {selectedSelectors && (
+                    <>
+                      <div className="ui-node-meta-row">
+                        <span className="ui-node-meta-label">XPath</span>
+                        <span className="ui-node-meta-value" style={{ fontFamily: "var(--font-code)" }}>
+                          {selectedSelectors.xpath}
+                        </span>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => void handleCopySelector("xpath", selectedSelectors.xpath)}
+                        >
+                          {copiedSelector === "xpath" ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                      <div className="ui-node-meta-row">
+                        <span className="ui-node-meta-label">UiSelector</span>
+                        <span className="ui-node-meta-value" style={{ fontFamily: "var(--font-code)" }}>
+                          {selectedSelectors.uiSelector}
+                        </span>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => void handleCopySelector("uiselector", selectedSelectors.uiSelector)}
+                        >
+                          {copiedSelector === "uiselector" ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                      {selectedSelectors.flags.length > 0 && (
+                        <div className="ui-node-meta-row">
+                          <span className="ui-node-meta-label">Flags</span>
+                          <span className="ui-node-meta-value">{selectedSelectors.flags.join(", ")}</span>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </>
               )}
               {uiHoveredNode && (
@@ -403,6 +465,7 @@ const UiInspectorPage = ({
       </div>
     </section>
   </div>
-);
+  );
+};
 
 export default UiInspectorPage;

@@ -43,6 +43,18 @@ import {
   type DeviceQuickFilterId,
 } from "./deviceQuickFilters";
 import {
+  DEFAULT_IMAGE_PREVIEW_ZOOM,
+  formatImageZoomLabel,
+  stepImageZoom,
+  type ImagePreviewZoomState,
+} from "./imagePreviewZoom";
+import {
+  createLogcatRecordingSyncSession,
+  finalizeLogcatRecordingSyncSession,
+  sliceLogcatLinesForRecording,
+  type LogcatRecordingSyncSession,
+} from "./logcatRecordingSync";
+import {
   formatApkInstallFailureMessage,
   resolveApkInstallEventPatch,
   type ApkInstallEventPayload,
@@ -2169,6 +2181,13 @@ function App() {
   const [deviceQuickFilters, setDeviceQuickFilters] = useState<DeviceQuickFilterId[]>([]);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [shortcutsOverlayOpen, setShortcutsOverlayOpen] = useState(false);
+  const [filePreviewZoom, setFilePreviewZoom] = useState<ImagePreviewZoomState>(DEFAULT_IMAGE_PREVIEW_ZOOM);
+  useEffect(() => {
+    setFilePreviewZoom(DEFAULT_IMAGE_PREVIEW_ZOOM);
+  }, [filePreviewDevicePath]);
+  const [logcatSyncSessionBySerial, setLogcatSyncSessionBySerial] = useState<
+    Record<string, LogcatRecordingSyncSession>
+  >({});
   const deviceSearchInputRef = useRef<HTMLInputElement | null>(null);
   const deviceListRef = useRef<HTMLDivElement | null>(null);
   const [apkPath, setApkPath] = useState("");
@@ -9734,6 +9753,110 @@ function App() {
       );
       setLogcatLastExport(response.data.output_path);
       pushToast("Logcat exported.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleLogcatMirrorLaunch = async () => {
+    const serial = ensureSingleSelection("scrcpy mirror");
+    if (!serial) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await launchScrcpy([serial]);
+      pushToast(`Launched scrcpy mirror for ${serial}.`, "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleLogcatToggleSyncedRecording = async () => {
+    const serial = ensureSingleSelection("synced screen recording");
+    if (!serial) {
+      return;
+    }
+    const isRunning = screenRecordStatusBySerial[serial]?.running === true;
+    setBusy(true);
+    try {
+      if (!isRunning) {
+        const startResponse = await startScreenRecord(serial);
+        setScreenRecordStatusBySerial((prev) => ({
+          ...prev,
+          [serial]: {
+            serial,
+            running: true,
+            backend: startResponse.data.backend,
+            display_path: startResponse.data.display_path,
+            segment_count: 1,
+          },
+        }));
+        const session = createLogcatRecordingSyncSession(serial, rawLogcatLines);
+        setLogcatSyncSessionBySerial((prev) => ({ ...prev, [serial]: session }));
+        pushToast(`Recording started with logcat sync for ${serial}.`, "info");
+      } else {
+        const stopResponse = await stopScreenRecord(serial);
+        setScreenRecordStatusBySerial((prev) => ({
+          ...prev,
+          [serial]: {
+            serial,
+            running: false,
+            backend: stopResponse.data.backend,
+            display_path: stopResponse.data.output_path,
+            segment_count: stopResponse.data.segment_count,
+          },
+        }));
+        setLogcatSyncSessionBySerial((prev) => {
+          const existing = prev[serial];
+          if (!existing) {
+            return prev;
+          }
+          return {
+            ...prev,
+            [serial]: finalizeLogcatRecordingSyncSession(existing, rawLogcatLines),
+          };
+        });
+        pushToast(
+          `Recording stopped (${stopResponse.data.output_path}). Ready to export synced logcat slice.`,
+          "info",
+        );
+      }
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleExportSyncedLogcatSlice = async () => {
+    const serial = ensureSingleSelection("synced logcat export");
+    if (!serial) {
+      return;
+    }
+    const session = logcatSyncSessionBySerial[serial];
+    if (!session) {
+      pushToast("No synced recording session recorded for this device.", "error");
+      return;
+    }
+    const sliced = sliceLogcatLinesForRecording(rawLogcatLines, session);
+    if (!sliced.length) {
+      pushToast("No logcat lines captured during that recording window.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await exportLogcat(
+        serial,
+        sliced,
+        config?.file_gen_output_path || config?.output_path,
+      );
+      setLogcatLastExport(response.data.output_path);
+      pushToast(`Exported ${sliced.length} synced logcat lines.`, "info");
     } catch (error) {
       pushToast(formatError(error), "error");
     } finally {
@@ -17997,7 +18120,61 @@ function App() {
                             <>
                               {isImage ? (
                                 imageSrc ? (
-                                  <img className="preview-image" src={imageSrc} alt={entry.name} />
+                                  <div className="stack" style={{ gap: 8 }}>
+                                    <div className="button-row compact">
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={() => setFilePreviewZoom((prev) => stepImageZoom(prev, "out"))}
+                                      >
+                                        Zoom -
+                                      </button>
+                                      <span className="badge">{formatImageZoomLabel(filePreviewZoom)}</span>
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={() => setFilePreviewZoom((prev) => stepImageZoom(prev, "in"))}
+                                      >
+                                        Zoom +
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={() => setFilePreviewZoom({ mode: "custom", scale: 1 })}
+                                      >
+                                        100%
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={() => setFilePreviewZoom(DEFAULT_IMAGE_PREVIEW_ZOOM)}
+                                      >
+                                        Fit
+                                      </button>
+                                    </div>
+                                    <div
+                                      style={{
+                                        overflow: "auto",
+                                        maxHeight: 420,
+                                        borderRadius: 8,
+                                      }}
+                                    >
+                                      <img
+                                        className="preview-image"
+                                        src={imageSrc}
+                                        alt={entry.name}
+                                        style={
+                                          filePreviewZoom.mode === "custom"
+                                            ? {
+                                                maxWidth: "none",
+                                                maxHeight: "none",
+                                                width: `${Math.round(filePreviewZoom.scale * 100)}%`,
+                                              }
+                                            : undefined
+                                        }
+                                      />
+                                    </div>
+                                  </div>
                                 ) : (
                                   <p className="muted">Image preview requires the desktop app runtime.</p>
                                 )
@@ -18285,6 +18462,45 @@ function App() {
                             />
                             Follow newest
                           </label>
+                          {!activeDeviceIsIos && activeSerial && (
+                            <div className="logcat-button-group">
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => void handleLogcatMirrorLaunch()}
+                                disabled={busy}
+                                title="Launch scrcpy mirror alongside Logcat"
+                              >
+                                Mirror (scrcpy)
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => void handleLogcatToggleSyncedRecording()}
+                                disabled={busy}
+                                title="Record screen while marking start/end window in Logcat"
+                              >
+                                {screenRecordStatusBySerial[activeSerial]?.running
+                                  ? "Stop Sync Record"
+                                  : "Record + Sync"}
+                              </button>
+                              {logcatSyncSessionBySerial[activeSerial]?.endedAtMs != null && (
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() => void handleExportSyncedLogcatSlice()}
+                                  disabled={busy}
+                                >
+                                  Export Slice (
+                                  {sliceLogcatLinesForRecording(
+                                    rawLogcatLines,
+                                    logcatSyncSessionBySerial[activeSerial],
+                                  ).length}
+                                  )
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="logcat-toolbar-row">
