@@ -2,6 +2,7 @@ import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 import type {
   AdbInfo,
   ApkBatchInstallResult,
+  ApkInfo,
   AppConfig,
   AppBasicInfo,
   AppIcon,
@@ -399,6 +400,31 @@ export const setBluetoothState = async (serials: string[], enable: boolean) => {
     trace_id: traceId,
     traceId,
   });
+};
+
+export const inspectApk = async (apkPath: string, options?: InvokeErrorOptions) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<ApkInfo>>(
+    "inspect_apk",
+    {
+      apk_path: apkPath,
+      apkPath,
+      trace_id: traceId,
+      traceId,
+    },
+    options,
+  );
+};
+
+export const cancelApkInstall = async (traceId: string, options?: InvokeErrorOptions) => {
+  return tauriInvoke<CommandResponse<boolean>>(
+    "cancel_apk_install",
+    {
+      trace_id: traceId,
+      traceId,
+    },
+    options,
+  );
 };
 
 export const installApkBatch = async (

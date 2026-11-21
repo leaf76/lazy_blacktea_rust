@@ -66,6 +66,14 @@ pub struct BugreportHandle {
     pub child: Arc<Mutex<Option<Child>>>,
 }
 
+pub type ChildSlot = Arc<Mutex<Option<Child>>>;
+pub type ApkInstallChildrenMap = Arc<Mutex<HashMap<String, ChildSlot>>>;
+
+pub struct ApkInstallHandle {
+    pub cancel_flag: Arc<AtomicBool>,
+    pub active_children: ApkInstallChildrenMap,
+}
+
 pub struct AppState {
     pub scheduler: Arc<TaskScheduler>,
     pub recording_processes: Mutex<HashMap<String, RecordingSession>>,
@@ -74,6 +82,7 @@ pub struct AppState {
     pub perf_monitors: Mutex<HashMap<String, PerfMonitorHandle>>,
     pub net_profilers: Mutex<HashMap<String, NetProfilerHandle>>,
     pub bugreport_processes: Mutex<HashMap<String, BugreportHandle>>,
+    pub apk_install_processes: Mutex<HashMap<String, ApkInstallHandle>>,
     pub bluetooth_monitors: Mutex<HashMap<String, BluetoothMonitorHandle>>,
     pub device_tracker: Mutex<Option<DeviceTrackerHandle>>,
     pub terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
@@ -89,6 +98,7 @@ impl AppState {
             perf_monitors: Mutex::new(HashMap::new()),
             net_profilers: Mutex::new(HashMap::new()),
             bugreport_processes: Mutex::new(HashMap::new()),
+            apk_install_processes: Mutex::new(HashMap::new()),
             bluetooth_monitors: Mutex::new(HashMap::new()),
             device_tracker: Mutex::new(None),
             terminal_sessions: Mutex::new(HashMap::new()),

@@ -26,6 +26,12 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { ApkInspectionCard } from "./ApkInspectionCard";
+import {
+  formatApkInstallFailureMessage,
+  resolveApkInstallEventPatch,
+  type ApkInstallEventPayload,
+} from "./apkInspector";
 import { getAdbIssueRecoveryMessages } from "./adbIssues";
 import { isTauriRuntime } from "./tauriEnv";
 import {
@@ -37,6 +43,7 @@ import {
 } from "./desktopNotifications";
 import type {
   AdbInfo,
+  ApkInfo,
   AppConfig,
   AppBasicInfo,
   AdbCommandLibrarySettings,
@@ -73,6 +80,7 @@ import type {
 import {
   adbConnect,
   adbPair,
+  cancelApkInstall,
   cancelBugreport,
   captureScreenshot,
   captureUiHierarchy,
@@ -94,6 +102,7 @@ import {
   getConfig,
   getScreenRecordStatus,
   importThemeBackground,
+  inspectApk,
   installApkBatch,
   installIosConfigurationProfile,
   launchApp,
@@ -441,15 +450,7 @@ type FileTransferProgress = {
   message?: string | null;
   trace_id: string;
 };
-type ApkInstallEvent = {
-  serial: string;
-  event: "start" | "complete";
-  success?: boolean | null;
-  message?: string | null;
-  error_code?: string | null;
-  raw_output?: string | null;
-  trace_id: string;
-};
+type ApkInstallEvent = ApkInstallEventPayload;
 type DeviceTrackingSnapshotPayload = { trace_id: string; devices: DeviceInfo[] };
 type LogcatLineEntry = { id: number; text: string };
 type PerfMonitorState = {
@@ -2161,6 +2162,10 @@ function App() {
   const [apkLaunchPackage, setApkLaunchPackage] = useState("");
   const [apkInstallSummary, setApkInstallSummary] = useState<string[]>([]);
   const [installBusy, setInstallBusy] = useState(false);
+  const [activeApkInstallTraceId, setActiveApkInstallTraceId] = useState<string | null>(null);
+  const [apkInspectionInfo, setApkInspectionInfo] = useState<ApkInfo | null>(null);
+  const [apkInspectionLoading, setApkInspectionLoading] = useState(false);
+  const [apkInspectionError, setApkInspectionError] = useState<string | null>(null);
   const [latestApkInstallTaskId, setLatestApkInstallTaskId] = useState<string | null>(null);
   const [screenRecordStatusBySerial, setScreenRecordStatusBySerial] = useState<Record<string, ScreenRecordStatus>>({});
   const [screenRecordPendingBySerial, setScreenRecordPendingBySerial] = useState<
@@ -2318,6 +2323,7 @@ function App() {
   const topActionsMenuWasOpenRef = useRef(false);
   const fileTransferTaskByTraceIdRef = useRef<Record<string, string>>({});
   const apkInstallTaskByTraceIdRef = useRef<Record<string, string>>({});
+  const apkInstallCancelRequestedRef = useRef(false);
   const prevTaskItemsRef = useRef<TaskItem[] | null>(null);
   const notifiedTaskIdsRef = useRef<Set<string>>(new Set());
   const appsDetailsSeqRef = useRef(0);
@@ -3387,6 +3393,52 @@ function App() {
       if (apkInstallerPersistTimerRef.current != null) {
         window.clearTimeout(apkInstallerPersistTimerRef.current);
       }
+    };
+  }, [apkBundlePath, apkInstallMode, apkPath, apkPaths]);
+
+  useEffect(() => {
+    const targetPath = (
+      apkInstallMode === "single"
+        ? apkPath
+        : apkInstallMode === "bundle"
+          ? apkBundlePath
+          : apkPaths[0] ?? ""
+    ).trim();
+    if (!targetPath || !isTauriRuntime()) {
+      setApkInspectionInfo(null);
+      setApkInspectionError(null);
+      setApkInspectionLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setApkInspectionLoading(true);
+    setApkInspectionError(null);
+    const timer = window.setTimeout(() => {
+      void inspectApk(targetPath, { recordError: false })
+        .then((response) => {
+          if (cancelled) {
+            return;
+          }
+          setApkInspectionInfo(response.data);
+          setApkInspectionError(null);
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+          setApkInspectionInfo(null);
+          setApkInspectionError(formatError(error));
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setApkInspectionLoading(false);
+          }
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [apkBundlePath, apkInstallMode, apkPath, apkPaths]);
 
@@ -5852,27 +5904,13 @@ function App() {
         return;
       }
 
-      if (payload.event === "start") {
+      const patch = resolveApkInstallEventPatch(payload);
+      if (patch) {
         dispatchTasks({
           type: "TASK_UPDATE_DEVICE",
           id: taskId,
           serial,
-          patch: { status: "running", progress: null, message: payload.message ?? "Installing..." },
-        });
-        return;
-      }
-
-      if (payload.event === "complete") {
-        const status: TaskStatus = payload.success === true ? "success" : "error";
-        const message =
-          payload.success === true
-            ? payload.message ?? "Installed."
-            : payload.raw_output ?? payload.message ?? payload.error_code ?? "Install failed.";
-        dispatchTasks({
-          type: "TASK_UPDATE_DEVICE",
-          id: taskId,
-          serial,
-          patch: { status, progress: null, message },
+          patch,
         });
       }
     });
@@ -8162,12 +8200,18 @@ function App() {
 
     const serials = Array.from(new Set(selectedSerials));
 
+    apkInstallCancelRequestedRef.current = false;
     setApkInstallSummary([]);
     setBusy(true);
     setInstallBusy(true);
+    let wasCancelled = false;
     try {
       const summaries: string[] = [];
       for (const path of paths) {
+        if (apkInstallCancelRequestedRef.current) {
+          wasCancelled = true;
+          break;
+        }
         const name = path.split(/[/\\\\]/).pop() ?? path;
         const taskId = beginTask({
           kind: "apk_install",
@@ -8176,6 +8220,7 @@ function App() {
         });
         setLatestApkInstallTaskId(taskId);
         const traceId = crypto.randomUUID();
+        setActiveApkInstallTraceId(traceId);
         dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: traceId });
         apkInstallTaskByTraceIdRef.current[traceId] = taskId;
         serials.forEach((serial) => {
@@ -8183,7 +8228,7 @@ function App() {
             type: "TASK_UPDATE_DEVICE",
             id: taskId,
             serial,
-            patch: { status: "running", progress: null, message: "Installing..." },
+            patch: { status: "running", progress: null, message: "Preparing install..." },
           });
         });
         try {
@@ -8201,21 +8246,55 @@ function App() {
           dispatchTasks({ type: "TASK_SET_TRACE", id: taskId, trace_id: response.trace_id });
           const results = Object.values(response.data.results || {});
           const successCount = results.filter((item) => item.success).length;
-          summaries.push(`${path}: Installed ${successCount}/${results.length} device(s)`);
+          const cancelledInBatch =
+            apkInstallCancelRequestedRef.current ||
+            results.some(
+              (item) =>
+                !item.success &&
+                item.error_code === "INSTALL_FAILED_ABORTED" &&
+                item.raw_output.toLowerCase().includes("cancelled"),
+            );
+          if (cancelledInBatch) {
+            wasCancelled = true;
+          }
+          summaries.push(
+            cancelledInBatch
+              ? `${path}: Cancelled (${successCount}/${results.length} installed)`
+              : `${path}: Installed ${successCount}/${results.length} device(s)`,
+          );
           results.forEach((item) => {
+            const itemCancelled =
+              !item.success &&
+              item.error_code === "INSTALL_FAILED_ABORTED" &&
+              item.raw_output.toLowerCase().includes("cancelled");
             dispatchTasks({
               type: "TASK_UPDATE_DEVICE",
               id: taskId,
               serial: item.serial,
               patch: {
-                status: item.success ? "success" : "error",
-                progress: null,
-                message: item.success ? "Installed." : item.raw_output || item.error_code,
+                status: item.success ? "success" : itemCancelled ? "cancelled" : "error",
+                progress: item.success ? 100 : null,
+                message: item.success
+                  ? "Installed."
+                  : itemCancelled
+                    ? "Cancelled."
+                    : formatApkInstallFailureMessage(item.error_code, null, item.raw_output),
               },
             });
           });
-          const hasError = results.some((item) => !item.success);
-          dispatchTasks({ type: "TASK_SET_STATUS", id: taskId, status: hasError ? "error" : "success" });
+          const hasError = results.some(
+            (item) =>
+              !item.success &&
+              !(
+                item.error_code === "INSTALL_FAILED_ABORTED" &&
+                item.raw_output.toLowerCase().includes("cancelled")
+              ),
+          );
+          dispatchTasks({
+            type: "TASK_SET_STATUS",
+            id: taskId,
+            status: cancelledInBatch ? "cancelled" : hasError ? "error" : "success",
+          });
         } catch (error) {
           serials.forEach((serial) => {
             dispatchTasks({
@@ -8229,12 +8308,13 @@ function App() {
           throw error;
         } finally {
           delete apkInstallTaskByTraceIdRef.current[traceId];
+          setActiveApkInstallTraceId(null);
         }
       }
       setApkInstallSummary(summaries);
-      pushToast("APK install completed.", "info");
+      pushToast(wasCancelled ? "APK install cancelled." : "APK install completed.", "info");
 
-      if (apkLaunchAfterInstall) {
+      if (!wasCancelled && apkLaunchAfterInstall) {
         const error = validatePackageName(apkLaunchPackage);
         if (error) {
           pushToast(error, "error");
@@ -8249,6 +8329,20 @@ function App() {
     } finally {
       setBusy(false);
       setInstallBusy(false);
+      setActiveApkInstallTraceId(null);
+    }
+  };
+
+  const handleCancelApkInstall = async () => {
+    apkInstallCancelRequestedRef.current = true;
+    if (!activeApkInstallTraceId) {
+      return;
+    }
+    try {
+      await cancelApkInstall(activeApkInstallTraceId, { recordError: false });
+      pushToast("Cancelling APK install…", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
     }
   };
 
@@ -17104,6 +17198,16 @@ function App() {
                           )}
                         </div>
                       )}
+                      <ApkInspectionCard
+                        info={apkInspectionInfo}
+                        loading={apkInspectionLoading}
+                        error={apkInspectionError}
+                        selectedDevices={selectedDevices}
+                        onUsePackageForLaunch={(pkg) => {
+                          setApkLaunchAfterInstall(true);
+                          setApkLaunchPackage(pkg);
+                        }}
+                      />
                       <div className="grid-two">
                         <label className="toggle">
                           <input
@@ -17145,9 +17249,21 @@ function App() {
                           onChange={(event) => setApkExtraArgs(event.target.value)}
                           placeholder="e.g. --force-queryable"
                         />
-                        <button onClick={handleInstallApk} disabled={busy || !selectedSerials.length}>
-                          {installBusy ? "Installing…" : "Install"}
-                        </button>
+                        <div className="button-row compact">
+                          <button onClick={handleInstallApk} disabled={busy || !selectedSerials.length}>
+                            {installBusy ? "Installing…" : "Install"}
+                          </button>
+                          {installBusy && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => void handleCancelApkInstall()}
+                              disabled={!activeApkInstallTraceId}
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <div className="form-row">
                         <label>Launch After Install</label>
@@ -17239,6 +17355,9 @@ function App() {
                                         <div className="task-device-main">
                                           <strong>{serial}</strong>
                                           <span className={`status-pill ${entryTone}`}>{entry.status}</span>
+                                          {entry.status === "running" && entry.progress != null && (
+                                            <span className="badge">{entry.progress}%</span>
+                                          )}
                                           {entry.message && <span className="muted">{entry.message}</span>}
                                         </div>
                                       </div>

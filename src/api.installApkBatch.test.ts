@@ -87,4 +87,32 @@ describe("api.installApkBatch", () => {
       }),
     );
   });
+
+  it("invokes inspect_apk and cancel_apk_install with snake_case and camelCase keys", async () => {
+    const invokeMock = invoke as unknown as {
+      mockResolvedValue: (value: unknown) => void;
+    };
+    invokeMock.mockResolvedValue({ trace_id: "trace-123", data: null });
+
+    const { inspectApk, cancelApkInstall } = await import("./api");
+    await inspectApk("/tmp/app-debug.apk");
+    expect(invoke).toHaveBeenCalledWith(
+      "inspect_apk",
+      expect.objectContaining({
+        apk_path: "/tmp/app-debug.apk",
+        apkPath: "/tmp/app-debug.apk",
+        trace_id: "trace-123",
+        traceId: "trace-123",
+      }),
+    );
+
+    await cancelApkInstall("trace-cancel-1");
+    expect(invoke).toHaveBeenCalledWith(
+      "cancel_apk_install",
+      expect.objectContaining({
+        trace_id: "trace-cancel-1",
+        traceId: "trace-cancel-1",
+      }),
+    );
+  });
 });

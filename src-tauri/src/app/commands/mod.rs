@@ -14,7 +14,10 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use zip::ZipArchive;
 
-use crate::app::adb::apk::{extract_split_apks, get_apk_info, is_split_bundle, normalize_apk_path};
+use crate::app::adb::apk::{
+    extract_split_apks, get_apk_info, is_split_bundle, normalize_apk_path,
+    supports_push_and_pm_install,
+};
 use crate::app::adb::apps::{
     package_entry_to_app_info, parse_dumpsys_components_summary, parse_dumpsys_data_dir,
     parse_dumpsys_first_install_time, parse_dumpsys_granted_permissions,
@@ -59,7 +62,7 @@ use crate::app::diagnostics;
 use crate::app::error::AppError;
 use crate::app::ios;
 use crate::app::models::{
-    AdbInfo, ApkBatchInstallResult, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo,
+    AdbInfo, ApkBatchInstallResult, ApkInfo, ApkInstallErrorCode, ApkInstallResult, AppBasicInfo,
     AppComponentsSummary, AppIcon, AppInfo, BugreportExtractIndexSummary, BugreportExtractQuery,
     BugreportExtractResult, BugreportLogAroundPage, BugreportLogFilters, BugreportLogPage,
     BugreportLogSearchResult, BugreportLogSummary, BugreportResult, CommandResponse, CommandResult,
@@ -80,8 +83,9 @@ use crate::app::perf::parse::{
     MARK_MEMINFO, MARK_NETDEV, MARK_PROC_STAT,
 };
 use crate::app::state::{
-    AppState, BugreportHandle, LogcatHandle, NetProfilerHandle, PerfMonitorHandle, RecordingHandle,
-    RecordingLogcatCapture, RecordingSession, SegmentedRecordingShared,
+    ApkInstallChildrenMap, ApkInstallHandle, AppState, BugreportHandle, LogcatHandle,
+    NetProfilerHandle, PerfMonitorHandle, RecordingHandle, RecordingLogcatCapture,
+    RecordingSession, SegmentedRecordingShared,
 };
 use crate::app::terminal::{TerminalSession, TERMINAL_EVENT_NAME};
 use crate::app::ui_capture::{normalize_ui_dump_xml, png_bytes_to_data_url, validate_png_bytes};
@@ -952,11 +956,17 @@ pub struct ApkInstallEvent {
     pub serial: String,
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub success: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_output: Option<String>,
     pub trace_id: String,
@@ -3477,6 +3487,268 @@ pub fn set_bluetooth_state(
     })
 }
 
+enum CancellableCommandOutcome {
+    Completed(crate::app::adb::runner::CommandOutput),
+    Cancelled,
+    TimedOut,
+}
+
+struct ApkInstallProcessGuard<'a> {
+    state: &'a AppState,
+    trace_id: String,
+}
+
+impl Drop for ApkInstallProcessGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.state.apk_install_processes.lock() {
+            map.remove(&self.trace_id);
+        }
+    }
+}
+
+fn kill_apk_install_handle(handle: &ApkInstallHandle) {
+    handle.cancel_flag.store(true, Ordering::SeqCst);
+    if let Ok(mut children) = handle.active_children.lock() {
+        for (_, slot) in children.drain() {
+            if let Ok(mut guard) = slot.lock() {
+                if let Some(mut child) = guard.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+}
+
+fn emit_apk_install_event(app: &Option<AppHandle>, event: ApkInstallEvent) {
+    if let Some(app_emit) = app {
+        let trace_id = event.trace_id.clone();
+        if let Err(err) = app_emit.emit(APK_INSTALL_EVENT_NAME, event) {
+            warn!(trace_id = %trace_id, error = %err, "failed to emit apk install event");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cancellable_adb_command<F>(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+    serial: &str,
+    cancel_flag: &Arc<AtomicBool>,
+    active_children: &ApkInstallChildrenMap,
+    trace_id: &str,
+    on_progress: Option<Arc<F>>,
+) -> Result<CancellableCommandOutcome, AppError>
+where
+    F: Fn(u8) + Send + Sync + 'static,
+{
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Ok(CancellableCommandOutcome::Cancelled);
+    }
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| AppError::system(format!("Failed to spawn command: {err}"), trace_id))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::system("Failed to capture stdout", trace_id))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::system("Failed to capture stderr", trace_id))?;
+
+    let child_slot = Arc::new(std::sync::Mutex::new(Some(child)));
+    if let Ok(mut map) = active_children.lock() {
+        map.insert(serial.to_string(), Arc::clone(&child_slot));
+    }
+
+    let stdout_buffer = Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buffer = Arc::new(std::sync::Mutex::new(String::new()));
+    let last_progress = Arc::new(std::sync::Mutex::new(None::<u8>));
+
+    let spawn_reader = |mut stream: Box<dyn Read + Send>,
+                        buffer: Arc<std::sync::Mutex<String>>,
+                        progress_cb: Option<Arc<F>>,
+                        last_pct: Arc<std::sync::Mutex<Option<u8>>>| {
+        std::thread::spawn(move || {
+            let mut temp = [0u8; 4096];
+            let mut pending = String::new();
+            loop {
+                let read_count = match stream.read(&mut temp) {
+                    Ok(0) => break,
+                    Ok(count) => count,
+                    Err(_) => break,
+                };
+                let chunk = String::from_utf8_lossy(&temp[..read_count]).to_string();
+                if let Ok(mut guard) = buffer.lock() {
+                    append_limited(&mut guard, &chunk, 200_000);
+                }
+                if let Some(cb) = &progress_cb {
+                    pending.push_str(&chunk);
+                    let mut start = 0usize;
+                    for (index, ch) in pending.char_indices() {
+                        if ch == '\n' || ch == '\r' {
+                            let line = pending[start..index].trim();
+                            start = index + ch.len_utf8();
+                            if !line.is_empty() {
+                                if let Some(percent) = parse_progress_percent(line) {
+                                    let should_emit = last_pct
+                                        .lock()
+                                        .map(|mut guard| {
+                                            if *guard != Some(percent) {
+                                                *guard = Some(percent);
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        })
+                                        .unwrap_or(false);
+                                    if should_emit {
+                                        cb(percent);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if start > 0 {
+                        pending = pending[start..].to_string();
+                    }
+                }
+            }
+        })
+    };
+
+    let stdout_handle = spawn_reader(
+        Box::new(stdout),
+        Arc::clone(&stdout_buffer),
+        on_progress.clone(),
+        Arc::clone(&last_progress),
+    );
+    let stderr_handle = spawn_reader(
+        Box::new(stderr),
+        Arc::clone(&stderr_buffer),
+        on_progress,
+        last_progress,
+    );
+
+    let start = Instant::now();
+    enum WaitOutcome {
+        Exited(std::process::ExitStatus),
+        Cancelled,
+        TimedOut,
+    }
+    let wait_outcome = loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            if let Ok(mut guard) = child_slot.lock() {
+                if let Some(mut child) = guard.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+            break Ok(WaitOutcome::Cancelled);
+        }
+
+        let wait_result = if let Ok(mut guard) = child_slot.lock() {
+            match guard.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => {
+                        guard.take();
+                        Ok(Some(status))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(err) => Err(err),
+                },
+                None => {
+                    // Child was taken & killed by cancellation handler.
+                    break Ok(WaitOutcome::Cancelled);
+                }
+            }
+        } else {
+            break Err(AppError::system(
+                "Install process lock poisoned".to_string(),
+                trace_id,
+            ));
+        };
+
+        match wait_result {
+            Ok(Some(status)) => {
+                break Ok(WaitOutcome::Exited(status));
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    if let Ok(mut guard) = child_slot.lock() {
+                        if let Some(mut child) = guard.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                    break Ok(WaitOutcome::TimedOut);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                if let Ok(mut guard) = child_slot.lock() {
+                    if let Some(mut child) = guard.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+                break Err(AppError::system(
+                    format!("Failed to poll command: {err}"),
+                    trace_id,
+                ));
+            }
+        }
+    };
+
+    if let Ok(mut map) = active_children.lock() {
+        map.remove(serial);
+    }
+
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+
+    match wait_outcome? {
+        WaitOutcome::Cancelled => Ok(CancellableCommandOutcome::Cancelled),
+        WaitOutcome::TimedOut => Ok(CancellableCommandOutcome::TimedOut),
+        WaitOutcome::Exited(status) => {
+            let stdout_value = stdout_buffer
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            let stderr_value = stderr_buffer
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            Ok(CancellableCommandOutcome::Completed(
+                crate::app::adb::runner::CommandOutput {
+                    stdout: stdout_value,
+                    stderr: stderr_value,
+                    exit_code: status.code(),
+                },
+            ))
+        }
+    }
+}
+
+fn cleanup_remote_temp_apk(adb_program: &str, serial: &str, remote_path: &str, trace_id: &str) {
+    let args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "rm".to_string(),
+        "-f".to_string(),
+        remote_path.to_string(),
+    ];
+    let _ = run_command_with_timeout(adb_program, &args, Duration::from_secs(5), trace_id);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_apk_batch_inner(
     serials: Vec<String>,
@@ -3560,6 +3832,21 @@ fn install_apk_batch_inner(
 
     let use_parallel = load_config(&trace_id)?.command.parallel_execution;
     let scheduler = Arc::clone(&state.scheduler);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let active_children: ApkInstallChildrenMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut map) = state.apk_install_processes.lock() {
+        map.insert(
+            trace_id.clone(),
+            ApkInstallHandle {
+                cancel_flag: Arc::clone(&cancel_flag),
+                active_children: Arc::clone(&active_children),
+            },
+        );
+    }
+    let _guard = ApkInstallProcessGuard {
+        state,
+        trace_id: trace_id.clone(),
+    };
 
     let mut handles = Vec::new();
     for serial in serials {
@@ -3569,25 +3856,26 @@ fn install_apk_batch_inner(
         let apk_path_clone = apk_path.clone();
         let adb_program_clone = adb_program.clone();
         let scheduler_clone = Arc::clone(&scheduler);
+        let cancel_flag_clone = Arc::clone(&cancel_flag);
+        let active_children_clone = Arc::clone(&active_children);
         let app_clone = app.clone();
         handles.push(std::thread::spawn(move || {
             let start_device = std::time::Instant::now();
-            if let Some(app_emit) = &app_clone {
-                if let Err(err) = app_emit.emit(
-                    APK_INSTALL_EVENT_NAME,
-                    ApkInstallEvent {
-                        serial: serial.clone(),
-                        event: "start".to_string(),
-                        success: None,
-                        message: Some("Installing...".to_string()),
-                        error_code: None,
-                        raw_output: None,
-                        trace_id: trace_clone.clone(),
-                    },
-                ) {
-                    warn!(trace_id = %trace_clone, error = %err, "failed to emit apk install event");
-                }
-            }
+            emit_apk_install_event(
+                &app_clone,
+                ApkInstallEvent {
+                    serial: serial.clone(),
+                    event: "start".to_string(),
+                    stage: Some("validating".to_string()),
+                    progress: None,
+                    success: None,
+                    message: Some("Preparing install...".to_string()),
+                    error_code: None,
+                    error_description: None,
+                    raw_output: None,
+                    trace_id: trace_clone.clone(),
+                },
+            );
             let _permit = scheduler_clone.acquire_global();
             let device_lock = scheduler_clone.device_lock(&serial);
             let _device_guard = match device_lock.lock() {
@@ -3602,126 +3890,407 @@ fn install_apk_batch_inner(
                         duration_seconds: start_device.elapsed().as_secs_f64(),
                         device_model: None,
                     };
-                    if let Some(app_emit) = &app_clone {
-                        if let Err(err) = app_emit.emit(
-                            APK_INSTALL_EVENT_NAME,
-                            ApkInstallEvent {
-                                serial: result_item.serial.clone(),
-                                event: "complete".to_string(),
-                                success: Some(false),
-                                message: Some("Failed to access the device. Please try again.".to_string()),
-                                error_code: Some(result_item.error_code.code().to_string()),
-                                raw_output: Some(truncate_for_event(
-                                    result_item.raw_output.trim(),
-                                    APK_INSTALL_OUTPUT_MAX_LEN,
-                                )),
-                                trace_id: trace_clone.clone(),
-                            },
-                        ) {
-                            warn!(trace_id = %trace_clone, error = %err, "failed to emit apk install event");
-                        }
-                    }
+                    emit_apk_install_event(
+                        &app_clone,
+                        ApkInstallEvent {
+                            serial: result_item.serial.clone(),
+                            event: "complete".to_string(),
+                            stage: Some("complete".to_string()),
+                            progress: None,
+                            success: Some(false),
+                            message: Some(
+                                "Failed to access the device. Please try again.".to_string(),
+                            ),
+                            error_code: Some(result_item.error_code.code().to_string()),
+                            error_description: Some(
+                                result_item.error_code.description().to_string(),
+                            ),
+                            raw_output: Some(truncate_for_event(
+                                result_item.raw_output.trim(),
+                                APK_INSTALL_OUTPUT_MAX_LEN,
+                            )),
+                            trace_id: trace_clone.clone(),
+                        },
+                    );
                     return result_item;
                 }
             };
-            let mut args = vec!["-s".to_string(), serial.clone()];
-            if let Some(paths) = split_paths {
-                args.push("install-multiple".to_string());
-                if replace {
-                    args.push("-r".to_string());
-                }
-                if allow_downgrade {
-                    args.push("-d".to_string());
-                }
-                if grant {
-                    args.push("-g".to_string());
-                }
-                if allow_test_packages {
-                    args.push("-t".to_string());
-                }
-                args.extend(extra_args_list.clone());
-                args.extend(paths);
-            } else {
-                args.push("install".to_string());
-                if replace {
-                    args.push("-r".to_string());
-                }
-                if allow_downgrade {
-                    args.push("-d".to_string());
-                }
-                if grant {
-                    args.push("-g".to_string());
-                }
-                if allow_test_packages {
-                    args.push("-t".to_string());
-                }
-                args.extend(extra_args_list.clone());
-                args.push(apk_path_clone);
-            }
-            let output = run_command_with_timeout(
-                &adb_program_clone,
-                &args,
-                Duration::from_secs(180),
-                &trace_clone,
-            );
-            let elapsed = start_device.elapsed().as_secs_f64();
-            let result_item = match output {
-                Ok(output) => {
-                    let raw = if output.stdout.trim().is_empty() {
-                        output.stderr.clone()
-                    } else {
-                        output.stdout.clone()
-                    };
-                    let error_code = ApkInstallErrorCode::from_output(&raw);
-                    let success = error_code == ApkInstallErrorCode::Success;
-                    ApkInstallResult {
-                        serial,
-                        success,
-                        error_code,
-                        raw_output: raw,
-                        duration_seconds: elapsed,
-                        device_model: None,
-                    }
-                }
-                Err(err) => ApkInstallResult {
-                    serial,
-                    success: false,
-                    error_code: ApkInstallErrorCode::UnknownError,
-                    raw_output: err.error,
-                    duration_seconds: elapsed,
-                    device_model: None,
-                },
-            };
 
-            if let Some(app_emit) = &app_clone {
-                let raw_trimmed = result_item.raw_output.trim();
-                let raw_output = if raw_trimmed.is_empty() {
-                    None
-                } else {
-                    Some(truncate_for_event(raw_trimmed, APK_INSTALL_OUTPUT_MAX_LEN))
-                };
-                let message = if result_item.success {
-                    Some("Installed.".to_string())
-                } else if let Some(raw) = raw_output.clone() {
-                    Some(raw)
-                } else {
-                    Some(result_item.error_code.code().to_string())
-                };
-                if let Err(err) = app_emit.emit(
-                    APK_INSTALL_EVENT_NAME,
+            let mut was_cancelled = false;
+            let result_item = if split_paths.is_none()
+                && supports_push_and_pm_install(&extra_args_list)
+            {
+                let short_id = Uuid::new_v4().simple().to_string();
+                let remote_tmp = format!("/data/local/tmp/lb_install_{}.apk", &short_id[..12]);
+                emit_apk_install_event(
+                    &app_clone,
                     ApkInstallEvent {
-                        serial: result_item.serial.clone(),
-                        event: "complete".to_string(),
-                        success: Some(result_item.success),
-                        message,
-                        error_code: Some(result_item.error_code.code().to_string()),
-                        raw_output,
+                        serial: serial.clone(),
+                        event: "progress".to_string(),
+                        stage: Some("pushing".to_string()),
+                        progress: Some(0),
+                        success: None,
+                        message: Some("Pushing APK... (0%)".to_string()),
+                        error_code: None,
+                        error_description: None,
+                        raw_output: None,
                         trace_id: trace_clone.clone(),
                     },
-                ) {
-                    warn!(trace_id = %trace_clone, error = %err, "failed to emit apk install event");
+                );
+
+                let push_args = vec![
+                    "-s".to_string(),
+                    serial.clone(),
+                    "push".to_string(),
+                    "-p".to_string(),
+                    apk_path_clone.clone(),
+                    remote_tmp.clone(),
+                ];
+                let progress_app = app_clone.clone();
+                let progress_serial = serial.clone();
+                let progress_trace = trace_clone.clone();
+                let progress_cb = Arc::new(move |percent: u8| {
+                    emit_apk_install_event(
+                        &progress_app,
+                        ApkInstallEvent {
+                            serial: progress_serial.clone(),
+                            event: "progress".to_string(),
+                            stage: Some("pushing".to_string()),
+                            progress: Some(percent),
+                            success: None,
+                            message: Some(format!("Pushing APK... ({percent}%)")),
+                            error_code: None,
+                            error_description: None,
+                            raw_output: None,
+                            trace_id: progress_trace.clone(),
+                        },
+                    );
+                });
+
+                let push_outcome = run_cancellable_adb_command(
+                    &adb_program_clone,
+                    &push_args,
+                    Duration::from_secs(300),
+                    &serial,
+                    &cancel_flag_clone,
+                    &active_children_clone,
+                    &trace_clone,
+                    Some(progress_cb),
+                );
+
+                let install_res = match push_outcome {
+                    Ok(CancellableCommandOutcome::Cancelled) => {
+                        was_cancelled = true;
+                        ApkInstallResult {
+                            serial: serial.clone(),
+                            success: false,
+                            error_code: ApkInstallErrorCode::InstallFailedAborted,
+                            raw_output: "Installation cancelled by user".to_string(),
+                            duration_seconds: start_device.elapsed().as_secs_f64(),
+                            device_model: None,
+                        }
+                    }
+                    Ok(CancellableCommandOutcome::TimedOut) => ApkInstallResult {
+                        serial: serial.clone(),
+                        success: false,
+                        error_code: ApkInstallErrorCode::UnknownError,
+                        raw_output: "Timed out while pushing APK to device".to_string(),
+                        duration_seconds: start_device.elapsed().as_secs_f64(),
+                        device_model: None,
+                    },
+                    Err(err) => ApkInstallResult {
+                        serial: serial.clone(),
+                        success: false,
+                        error_code: ApkInstallErrorCode::UnknownError,
+                        raw_output: err.error,
+                        duration_seconds: start_device.elapsed().as_secs_f64(),
+                        device_model: None,
+                    },
+                    Ok(CancellableCommandOutcome::Completed(push_output)) => {
+                        if push_output.exit_code != Some(0) {
+                            let raw = if push_output.stderr.trim().is_empty() {
+                                push_output.stdout
+                            } else {
+                                push_output.stderr
+                            };
+                            let error_code = ApkInstallErrorCode::from_output(&raw);
+                            ApkInstallResult {
+                                serial: serial.clone(),
+                                success: false,
+                                error_code,
+                                raw_output: if raw.trim().is_empty() {
+                                    "Failed to push APK to device".to_string()
+                                } else {
+                                    raw
+                                },
+                                duration_seconds: start_device.elapsed().as_secs_f64(),
+                                device_model: None,
+                            }
+                        } else {
+                            emit_apk_install_event(
+                                &app_clone,
+                                ApkInstallEvent {
+                                    serial: serial.clone(),
+                                    event: "progress".to_string(),
+                                    stage: Some("installing".to_string()),
+                                    progress: Some(100),
+                                    success: None,
+                                    message: Some("Installing package...".to_string()),
+                                    error_code: None,
+                                    error_description: None,
+                                    raw_output: None,
+                                    trace_id: trace_clone.clone(),
+                                },
+                            );
+
+                            let mut pm_args = vec![
+                                "-s".to_string(),
+                                serial.clone(),
+                                "shell".to_string(),
+                                "pm".to_string(),
+                                "install".to_string(),
+                            ];
+                            if replace {
+                                pm_args.push("-r".to_string());
+                            }
+                            if allow_downgrade {
+                                pm_args.push("-d".to_string());
+                            }
+                            if grant {
+                                pm_args.push("-g".to_string());
+                            }
+                            if allow_test_packages {
+                                pm_args.push("-t".to_string());
+                            }
+                            pm_args.push(remote_tmp.clone());
+
+                            let pm_outcome = run_cancellable_adb_command::<fn(u8)>(
+                                &adb_program_clone,
+                                &pm_args,
+                                Duration::from_secs(300),
+                                &serial,
+                                &cancel_flag_clone,
+                                &active_children_clone,
+                                &trace_clone,
+                                None,
+                            );
+
+                            match pm_outcome {
+                                Ok(CancellableCommandOutcome::Cancelled) => {
+                                    was_cancelled = true;
+                                    ApkInstallResult {
+                                        serial: serial.clone(),
+                                        success: false,
+                                        error_code: ApkInstallErrorCode::InstallFailedAborted,
+                                        raw_output: "Installation cancelled by user".to_string(),
+                                        duration_seconds: start_device.elapsed().as_secs_f64(),
+                                        device_model: None,
+                                    }
+                                }
+                                Ok(CancellableCommandOutcome::TimedOut) => ApkInstallResult {
+                                    serial: serial.clone(),
+                                    success: false,
+                                    error_code: ApkInstallErrorCode::UnknownError,
+                                    raw_output: "Command timed out".to_string(),
+                                    duration_seconds: start_device.elapsed().as_secs_f64(),
+                                    device_model: None,
+                                },
+                                Err(err) => ApkInstallResult {
+                                    serial: serial.clone(),
+                                    success: false,
+                                    error_code: ApkInstallErrorCode::UnknownError,
+                                    raw_output: err.error,
+                                    duration_seconds: start_device.elapsed().as_secs_f64(),
+                                    device_model: None,
+                                },
+                                Ok(CancellableCommandOutcome::Completed(output)) => {
+                                    let raw = if output.stdout.trim().is_empty() {
+                                        output.stderr
+                                    } else if output.stderr.trim().is_empty() {
+                                        output.stdout
+                                    } else {
+                                        format!(
+                                            "{}\n{}",
+                                            output.stdout.trim(),
+                                            output.stderr.trim()
+                                        )
+                                    };
+                                    let error_code = ApkInstallErrorCode::from_output(&raw);
+                                    let success = error_code == ApkInstallErrorCode::Success;
+                                    ApkInstallResult {
+                                        serial: serial.clone(),
+                                        success,
+                                        error_code,
+                                        raw_output: raw,
+                                        duration_seconds: start_device.elapsed().as_secs_f64(),
+                                        device_model: None,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
+                cleanup_remote_temp_apk(&adb_program_clone, &serial, &remote_tmp, &trace_clone);
+                install_res
+            } else {
+                emit_apk_install_event(
+                    &app_clone,
+                    ApkInstallEvent {
+                        serial: serial.clone(),
+                        event: "progress".to_string(),
+                        stage: Some("installing".to_string()),
+                        progress: None,
+                        success: None,
+                        message: Some("Installing package...".to_string()),
+                        error_code: None,
+                        error_description: None,
+                        raw_output: None,
+                        trace_id: trace_clone.clone(),
+                    },
+                );
+
+                let mut args = vec!["-s".to_string(), serial.clone()];
+                if let Some(paths) = split_paths {
+                    args.push("install-multiple".to_string());
+                    if replace {
+                        args.push("-r".to_string());
+                    }
+                    if allow_downgrade {
+                        args.push("-d".to_string());
+                    }
+                    if grant {
+                        args.push("-g".to_string());
+                    }
+                    if allow_test_packages {
+                        args.push("-t".to_string());
+                    }
+                    args.extend(extra_args_list.clone());
+                    args.extend(paths);
+                } else {
+                    args.push("install".to_string());
+                    if replace {
+                        args.push("-r".to_string());
+                    }
+                    if allow_downgrade {
+                        args.push("-d".to_string());
+                    }
+                    if grant {
+                        args.push("-g".to_string());
+                    }
+                    if allow_test_packages {
+                        args.push("-t".to_string());
+                    }
+                    args.extend(extra_args_list.clone());
+                    args.push(apk_path_clone);
                 }
-            }
+
+                let outcome = run_cancellable_adb_command::<fn(u8)>(
+                    &adb_program_clone,
+                    &args,
+                    Duration::from_secs(300),
+                    &serial,
+                    &cancel_flag_clone,
+                    &active_children_clone,
+                    &trace_clone,
+                    None,
+                );
+                let elapsed = start_device.elapsed().as_secs_f64();
+                match outcome {
+                    Ok(CancellableCommandOutcome::Cancelled) => {
+                        was_cancelled = true;
+                        ApkInstallResult {
+                            serial: serial.clone(),
+                            success: false,
+                            error_code: ApkInstallErrorCode::InstallFailedAborted,
+                            raw_output: "Installation cancelled by user".to_string(),
+                            duration_seconds: elapsed,
+                            device_model: None,
+                        }
+                    }
+                    Ok(CancellableCommandOutcome::TimedOut) => ApkInstallResult {
+                        serial: serial.clone(),
+                        success: false,
+                        error_code: ApkInstallErrorCode::UnknownError,
+                        raw_output: "Command timed out".to_string(),
+                        duration_seconds: elapsed,
+                        device_model: None,
+                    },
+                    Ok(CancellableCommandOutcome::Completed(output)) => {
+                        let raw = if output.stdout.trim().is_empty() {
+                            output.stderr
+                        } else if output.stderr.trim().is_empty() {
+                            output.stdout
+                        } else {
+                            format!("{}\n{}", output.stdout.trim(), output.stderr.trim())
+                        };
+                        let error_code = ApkInstallErrorCode::from_output(&raw);
+                        let success = error_code == ApkInstallErrorCode::Success;
+                        ApkInstallResult {
+                            serial: serial.clone(),
+                            success,
+                            error_code,
+                            raw_output: raw,
+                            duration_seconds: elapsed,
+                            device_model: None,
+                        }
+                    }
+                    Err(err) => ApkInstallResult {
+                        serial: serial.clone(),
+                        success: false,
+                        error_code: ApkInstallErrorCode::UnknownError,
+                        raw_output: err.error,
+                        duration_seconds: elapsed,
+                        device_model: None,
+                    },
+                }
+            };
+
+            let raw_trimmed = result_item.raw_output.trim();
+            let raw_output = if raw_trimmed.is_empty() {
+                None
+            } else {
+                Some(truncate_for_event(raw_trimmed, APK_INSTALL_OUTPUT_MAX_LEN))
+            };
+            let error_description = if result_item.success {
+                None
+            } else {
+                Some(result_item.error_code.description().to_string())
+            };
+            let message = if result_item.success {
+                Some("Installed.".to_string())
+            } else if was_cancelled {
+                Some("Cancelled.".to_string())
+            } else if result_item.error_code != ApkInstallErrorCode::UnknownError {
+                Some(result_item.error_code.description().to_string())
+            } else if let Some(raw) = raw_output.clone() {
+                Some(raw)
+            } else {
+                Some(result_item.error_code.description().to_string())
+            };
+
+            emit_apk_install_event(
+                &app_clone,
+                ApkInstallEvent {
+                    serial: result_item.serial.clone(),
+                    event: "complete".to_string(),
+                    stage: Some(
+                        if was_cancelled {
+                            "cancelled"
+                        } else {
+                            "complete"
+                        }
+                        .to_string(),
+                    ),
+                    progress: if result_item.success { Some(100) } else { None },
+                    success: Some(result_item.success),
+                    message,
+                    error_code: Some(result_item.error_code.code().to_string()),
+                    error_description,
+                    raw_output,
+                    trace_id: trace_clone.clone(),
+                },
+            );
 
             result_item
         }));
@@ -3749,6 +4318,43 @@ fn install_apk_batch_inner(
     result.total_duration_seconds = start.elapsed().as_secs_f64();
 
     Ok(result)
+}
+
+#[tauri::command(async)]
+pub fn inspect_apk(
+    apk_path: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<ApkInfo>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    ensure_non_empty(&apk_path, "apk_path", &trace_id)?;
+    let info = get_apk_info(&apk_path);
+    Ok(CommandResponse {
+        trace_id,
+        data: info,
+    })
+}
+
+#[tauri::command]
+pub fn cancel_apk_install(
+    trace_id: String,
+    state: State<'_, AppState>,
+) -> Result<CommandResponse<bool>, AppError> {
+    let trace_id = trace_id.trim().to_string();
+    ensure_non_empty(&trace_id, "trace_id", &trace_id)?;
+    let cancelled = if let Ok(mut map) = state.apk_install_processes.lock() {
+        if let Some(handle) = map.remove(&trace_id) {
+            kill_apk_install_handle(&handle);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    Ok(CommandResponse {
+        trace_id,
+        data: cancelled,
+    })
 }
 
 #[tauri::command(async)]
@@ -4439,6 +5045,11 @@ pub fn shutdown_all(state: &AppState) {
                     let _ = child.wait();
                 }
             }
+        }
+    }
+    if let Ok(mut map) = state.apk_install_processes.lock() {
+        for (_, handle) in map.drain() {
+            kill_apk_install_handle(&handle);
         }
     }
     // Monitor threads: signal stop; they own short-lived adb children and exit promptly.

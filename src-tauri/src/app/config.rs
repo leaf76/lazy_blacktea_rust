@@ -821,6 +821,44 @@ pub fn load_config_from_path(path: &Path, trace_id: &str) -> Result<AppConfig, A
     Ok(validate_config(config))
 }
 
+const CONFIG_REPLACE_MAP_PATHS: &[&[&str]] = &[&["device_groups"], &["terminal", "buffers"]];
+
+fn is_replace_map_path(path: &[&str]) -> bool {
+    CONFIG_REPLACE_MAP_PATHS.contains(&path)
+}
+
+fn merge_json_preserving_unknown(
+    existing: serde_json::Value,
+    updated: serde_json::Value,
+    path: &[&str],
+) -> serde_json::Value {
+    match (existing, updated) {
+        (serde_json::Value::Object(mut existing_map), serde_json::Value::Object(updated_map)) => {
+            for (key, updated_val) in updated_map {
+                let mut child_path = Vec::with_capacity(path.len() + 1);
+                child_path.extend_from_slice(path);
+                child_path.push(key.as_str());
+                if is_replace_map_path(&child_path) {
+                    existing_map.insert(key, updated_val);
+                    continue;
+                }
+                match existing_map.remove(&key) {
+                    Some(existing_val) if existing_val.is_object() && updated_val.is_object() => {
+                        let merged =
+                            merge_json_preserving_unknown(existing_val, updated_val, &child_path);
+                        existing_map.insert(key, merged);
+                    }
+                    _ => {
+                        existing_map.insert(key, updated_val);
+                    }
+                }
+            }
+            serde_json::Value::Object(existing_map)
+        }
+        (_, updated_val) => updated_val,
+    }
+}
+
 pub fn save_config_to_path(
     config: &AppConfig,
     path: &Path,
@@ -833,7 +871,7 @@ pub fn save_config_to_path(
             AppError::system(format!("Failed to create config dir: {err}"), &trace_id)
         })?;
     }
-    if path.exists() {
+    let existing_json = if path.exists() {
         if let Err(err) = fs::copy(path, backup_path) {
             warn!(
                 trace_id = %trace_id,
@@ -841,8 +879,39 @@ pub fn save_config_to_path(
                 "Failed to backup config file"
             );
         }
-    }
-    let payload = serde_json::to_string_pretty(config)
+        match fs::read_to_string(path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(val) if val.is_object() => Some(val),
+                Ok(_) => None,
+                Err(err) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        error = %err,
+                        "Existing config JSON is invalid; overwriting without unknown-key merge"
+                    );
+                    None
+                }
+            },
+            Err(err) => {
+                warn!(
+                    trace_id = %trace_id,
+                    error = %err,
+                    "Failed to read existing config before save"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let updated_value = serde_json::to_value(config)
+        .map_err(|err| AppError::system(format!("Failed to serialize config: {err}"), &trace_id))?;
+    let merged_value = match existing_json {
+        Some(existing) => merge_json_preserving_unknown(existing, updated_value, &[]),
+        None => updated_value,
+    };
+    let payload = serde_json::to_string_pretty(&merged_value)
         .map_err(|err| AppError::system(format!("Failed to serialize config: {err}"), &trace_id))?;
     fs::write(path, payload)
         .map_err(|err| AppError::system(format!("Failed to write config: {err}"), &trace_id))?;
@@ -1653,5 +1722,76 @@ mod tests {
         assert!(lines
             .iter()
             .all(|line| line.len() <= TERMINAL_PERSIST_MAX_LINE_CHARS));
+    }
+
+    #[test]
+    fn save_config_preserves_unknown_keys_while_replacing_dynamic_maps() {
+        let dir = TempDir::new().expect("tmp");
+        let path = dir.path().join("config.json");
+        let backup = dir.path().join("config.backup.json");
+
+        // Simulate a shared ~/.lazy_blacktea_config.json previously written by PyQt6
+        // containing PyQt6-only top-level ("updates") and nested ("ui.density") keys,
+        // plus a device group and terminal buffer entry that will be removed in Rust.
+        let initial = serde_json::json!({
+            "ui": {
+                "theme": "light",
+                "density": "compact",
+                "window_width": 1200
+            },
+            "updates": {
+                "auto_check": true,
+                "check_interval_hours": 24,
+                "skipped_version": "0.0.55"
+            },
+            "device_groups": {
+                "keep_group": ["SER-1"],
+                "deleted_group": ["SER-2"]
+            },
+            "terminal": {
+                "restore_sessions": ["SER-1"],
+                "buffers": {
+                    "SER-1": ["line1"],
+                    "SER-2": ["old-line"]
+                }
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&initial).unwrap()).expect("write initial");
+
+        let mut loaded = load_config_from_path(&path, "c1-trace").expect("load");
+        loaded.ui.theme = "dark".to_string();
+        loaded.device_groups.remove("deleted_group");
+        loaded.terminal.buffers.remove("SER-2");
+
+        save_config_to_path(&loaded, &path, &backup, "c1-trace").expect("save");
+
+        let raw = fs::read_to_string(&path).expect("read saved");
+        let saved: serde_json::Value = serde_json::from_str(&raw).expect("parse saved");
+
+        // Unknown PyQt6 keys preserved
+        assert_eq!(saved["ui"]["density"], "compact");
+        assert_eq!(saved["updates"]["auto_check"], true);
+        assert_eq!(saved["updates"]["skipped_version"], "0.0.55");
+        // Known Rust updates applied
+        assert_eq!(saved["ui"]["theme"], "dark");
+        // Deleted dynamic map entries are truly removed (no resurrection)
+        assert!(saved["device_groups"].get("keep_group").is_some());
+        assert!(saved["device_groups"].get("deleted_group").is_none());
+        assert!(saved["terminal"]["buffers"].get("SER-1").is_some());
+        assert!(saved["terminal"]["buffers"].get("SER-2").is_none());
+    }
+
+    #[test]
+    fn save_config_recovers_when_existing_file_is_corrupted_json() {
+        let dir = TempDir::new().expect("tmp");
+        let path = dir.path().join("config.json");
+        let backup = dir.path().join("config.backup.json");
+        fs::write(&path, "{not valid json").expect("write corrupted");
+
+        let config = AppConfig::default();
+        save_config_to_path(&config, &path, &backup, "c1-corrupt").expect("save should succeed");
+
+        let reloaded = load_config_from_path(&path, "c1-corrupt").expect("reload");
+        assert_eq!(reloaded.ui.theme, config.ui.theme);
     }
 }

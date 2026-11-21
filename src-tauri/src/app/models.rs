@@ -675,13 +675,25 @@ impl ApkInstallErrorCode {
     }
 
     pub fn from_output(output: &str) -> Self {
-        if output.is_empty() {
+        if output.trim().is_empty() {
             return ApkInstallErrorCode::UnknownError;
         }
-        let upper = output.to_uppercase();
-        if upper.contains("SUCCESS") {
+        let lines: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let has_failure = lines
+            .iter()
+            .any(|line| line.contains("Failure") || line.starts_with("Error"));
+        if !has_failure
+            && lines
+                .iter()
+                .any(|line| line.eq_ignore_ascii_case("success"))
+        {
             return ApkInstallErrorCode::Success;
         }
+        let upper = output.to_uppercase();
         for code in [
             ApkInstallErrorCode::InstallFailedAlreadyExists,
             ApkInstallErrorCode::InstallFailedUpdateIncompatible,
@@ -775,6 +787,28 @@ mod tests {
         let output = "Failure [INSTALL_FAILED_VERSION_DOWNGRADE]";
         let code = ApkInstallErrorCode::from_output(output);
         assert_eq!(code, ApkInstallErrorCode::InstallFailedVersionDowngrade);
+    }
+
+    #[test]
+    fn apk_error_code_does_not_misclassify_substring_success_as_success() {
+        let output =
+            "adb: failed to install /tmp/my_success_build.apk: Failure [INSTALL_FAILED_OLDER_SDK]";
+        assert_eq!(
+            ApkInstallErrorCode::from_output(output),
+            ApkInstallErrorCode::InstallFailedOlderSdk
+        );
+
+        let error_with_success_line = "Error: something broke\nSuccess\n";
+        assert_eq!(
+            ApkInstallErrorCode::from_output(error_with_success_line),
+            ApkInstallErrorCode::UnknownError
+        );
+
+        let clean_success = "Performing Streamed Install\nSuccess\n";
+        assert_eq!(
+            ApkInstallErrorCode::from_output(clean_success),
+            ApkInstallErrorCode::Success
+        );
     }
 
     #[test]
