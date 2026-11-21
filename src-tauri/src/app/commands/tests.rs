@@ -9,10 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
+    crate::app::test_env_lock()
 }
 
 fn valid_test_png_bytes() -> Vec<u8> {

@@ -187,17 +187,14 @@ mod tests {
 
     #[test]
     fn export_succeeds_without_adb_and_includes_history() {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = LOCK
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .expect("env lock");
+        let _guard = crate::app::test_env_lock();
 
         let dir = TempDir::new().expect("tmp");
         let config_path = dir.path().join("config.json");
         let out_dir = dir.path().join("out");
 
-        std::env::set_var("LAZY_BLACKTEA_CONFIG_PATH", &config_path);
+        let _env_guard =
+            crate::app::TestEnvVarGuard::set("LAZY_BLACKTEA_CONFIG_PATH", &config_path);
         fs::write(
             &config_path,
             serde_json::json!({
@@ -222,7 +219,5 @@ mod tests {
         assert!(content.contains("\"trace_id\""));
         assert!(content.contains("\"ios\""));
         assert!(content.contains("\"idevicescreenshot\"") || content.contains("\"usbmuxd\""));
-
-        std::env::remove_var("LAZY_BLACKTEA_CONFIG_PATH");
     }
 }

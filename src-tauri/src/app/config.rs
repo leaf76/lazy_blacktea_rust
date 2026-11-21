@@ -1680,11 +1680,12 @@ mod tests {
 
     #[test]
     fn imports_theme_background_with_validation() {
+        let _guard = crate::app::test_env_lock();
         let dir = TempDir::new().expect("tmp");
         let source = dir.path().join("source.png");
         fs::write(&source, b"png").expect("write image");
         let theme_dir = dir.path().join("managed");
-        std::env::set_var("LAZY_BLACKTEA_THEME_DIR", &theme_dir);
+        let _env_guard = crate::app::TestEnvVarGuard::set("LAZY_BLACKTEA_THEME_DIR", &theme_dir);
 
         let imported =
             import_theme_background_from_path(&source, "theme-trace").expect("import background");
@@ -1694,8 +1695,6 @@ mod tests {
             imported_path.extension().and_then(|value| value.to_str()),
             Some("png")
         );
-
-        std::env::remove_var("LAZY_BLACKTEA_THEME_DIR");
     }
 
     #[test]
