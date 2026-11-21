@@ -18,6 +18,7 @@ Rust (edition 2021) backend for the Tauri v2 desktop app; exposes commands to th
 - Command API contract: success `{ trace_id, data }`, error `{ error, code, trace_id }` (keep client errors user-safe).
 - Use `tracing` and include `trace_id` in logs; never log secrets/tokens/PII.
 - Avoid blocking the UI thread: long-running work should run in threads and report progress via events.
+- Windows Rust tests require `LAZY_BLACKTEA_TEST_MANIFEST=1` with `cargo test --lib --all-features` (avoids `0xc0000139` missing Common Controls v6 and `CVT1100`/`LNK1123` manifest clashes with `smoke`/`soak` binaries). Never leave `LAZY_BLACKTEA_TEST_MANIFEST` set during `tauri build`.
 
 ## ANTI-PATTERNS
 

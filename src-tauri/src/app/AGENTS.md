@@ -22,6 +22,8 @@ Backend domain modules backing Tauri commands: device discovery, ADB operations,
 - Validate all external input (device serials, user-provided paths, ADB output) and return user-safe errors.
 - Prefer pure parsing helpers in `adb/*` with tests; keep command handlers thin.
 - Long-running operations should be cancellable or bounded; store handles in `state.rs` registries.
+- `config.rs` preserves unknown JSON keys in `~/.lazy_blacktea_config.json` for coexistence with the PyQt6 edition; any new user-editable `HashMap` field in `AppConfig` must be registered in `CONFIG_REPLACE_MAP_PATHS` so deleted keys do not resurrect on save.
+- `ApkInstallErrorCode::from_output` must match standalone `Success` lines with no `Failure`/`Error` lines (never substring-match `SUCCESS`).
 
 ## ANTI-PATTERNS
 

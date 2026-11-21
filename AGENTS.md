@@ -84,7 +84,10 @@ npm run test
 npm run build
 cd src-tauri && cargo fmt --all -- --check
 cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings
+# macOS/Linux:
 cd src-tauri && cargo test --all --all-features
+# Windows (PowerShell; unset before `tauri build`):
+cd src-tauri && $env:LAZY_BLACKTEA_TEST_MANIFEST="1"; cargo test --lib --all-features
 ```
 
 ### Repo Smoke Helpers
