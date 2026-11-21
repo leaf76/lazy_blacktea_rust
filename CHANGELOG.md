@@ -2,7 +2,7 @@
 
 All notable changes to **Lazy Blacktea (Tauri / Rust)** are documented in this file.
 
-## Unreleased
+## 0.0.95 - 2026-11-22
 
 ### Added
 - **Shared Config Coexistence (`~/.lazy_blacktea_config.json`)**: Saving settings now recursively merges with existing JSON on disk so unknown keys from the PyQt6 edition (such as `updates`) are preserved, while user-editable maps (`device_groups`, `terminal.buffers`) still delete cleanly.
