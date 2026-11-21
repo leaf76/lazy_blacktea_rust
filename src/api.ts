@@ -309,6 +309,91 @@ export const adbConnect = async (address: string) => {
   });
 };
 
+export type AdbServerAction = "start" | "kill" | "restart";
+export type LogcatBufferSizeOption = "256K" | "1M" | "4M" | "8M" | "16M" | "32M" | "64M";
+
+export const adbServerControl = async (action: AdbServerAction, options?: InvokeErrorOptions) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<HostCommandResult>>(
+    "adb_server_control",
+    {
+      action,
+      trace_id: traceId,
+      traceId,
+    },
+    options,
+  );
+};
+
+export const adbRootDevices = async (serials: string[], options?: InvokeErrorOptions) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<CommandResult[]>>(
+    "adb_root_devices",
+    {
+      serials,
+      trace_id: traceId,
+      traceId,
+    },
+    options,
+  );
+};
+
+export const setLogcatBufferSize = async (
+  serials: string[],
+  size: LogcatBufferSizeOption,
+  options?: InvokeErrorOptions,
+) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<CommandResult[]>>(
+    "set_logcat_buffer_size",
+    {
+      serials,
+      size,
+      trace_id: traceId,
+      traceId,
+    },
+    options,
+  );
+};
+
+export const pullDeviceDcimBatch = async (
+  serials: string[],
+  outputDir: string,
+  options?: InvokeErrorOptions,
+) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<CommandResult[]>>(
+    "pull_device_dcim_batch",
+    {
+      serials,
+      output_dir: outputDir,
+      outputDir,
+      trace_id: traceId,
+      traceId,
+    },
+    options,
+  );
+};
+
+export const exportDiscoveryServiceDump = async (
+  serials: string[],
+  outputDir: string,
+  options?: InvokeErrorOptions,
+) => {
+  const traceId = createTraceId();
+  return tauriInvoke<CommandResponse<CommandResult[]>>(
+    "export_discovery_service_dump",
+    {
+      serials,
+      output_dir: outputDir,
+      outputDir,
+      trace_id: traceId,
+      traceId,
+    },
+    options,
+  );
+};
+
 export const runShell = async (
   serials: string[],
   command: string,

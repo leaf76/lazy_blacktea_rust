@@ -132,6 +132,39 @@ pub fn parse_battery_level(output: &str) -> Option<u8> {
     None
 }
 
+/// Parses battery capacity in mAh from `/sys/class/power_supply/battery/charge_full_design`
+/// (usually microamp-hours like `5000000`) or `dumpsys battery` (`Charge counter: 4500000`).
+pub fn parse_battery_capacity_mah(output: &str) -> Option<u32> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let raw_num = if let Some(rest) = trimmed.strip_prefix("Charge counter:") {
+            rest.trim()
+        } else {
+            trimmed
+        };
+        if let Ok(value) = raw_num.parse::<u64>() {
+            if value == 0 {
+                continue;
+            }
+            // Values >= 100_000 are microamp-hours (uAh); convert to mAh.
+            let mah = if value >= 100_000 {
+                (value / 1_000) as u32
+            } else if (500..=30_000).contains(&value) {
+                value as u32
+            } else {
+                continue;
+            };
+            if mah > 0 {
+                return Some(mah);
+            }
+        }
+    }
+    None
+}
+
 pub fn parse_settings_bool(output: &str) -> Option<bool> {
     let value = output
         .lines()
@@ -484,6 +517,17 @@ mod tests {
     fn parses_battery_level() {
         let output = "AC powered: false\nlevel: 87\nstatus: 2\n";
         assert_eq!(parse_battery_level(output), Some(87));
+    }
+
+    #[test]
+    fn parses_battery_capacity_mah_from_sysfs_and_dumpsys() {
+        assert_eq!(parse_battery_capacity_mah("5000000\n"), Some(5000));
+        assert_eq!(parse_battery_capacity_mah("4500\n"), Some(4500));
+        assert_eq!(
+            parse_battery_capacity_mah("AC powered: true\nCharge counter: 3820000\nlevel: 80\n"),
+            Some(3820)
+        );
+        assert_eq!(parse_battery_capacity_mah("0\n"), None);
     }
 
     #[test]

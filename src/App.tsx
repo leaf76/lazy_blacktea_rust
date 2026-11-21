@@ -29,6 +29,7 @@ import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { ApkInspectionCard } from "./ApkInspectionCard";
 import { CommandPaletteModal } from "./CommandPaletteModal";
 import { DeviceQuickFilterBar } from "./DeviceQuickFilterBar";
+import { DeviceUtilitiesPanel } from "./DeviceUtilitiesPanel";
 import { ShortcutsOverlayModal } from "./ShortcutsOverlayModal";
 import {
   buildDevicePaletteItems,
@@ -108,6 +109,7 @@ import type {
 import {
   adbConnect,
   adbPair,
+  adbServerControl,
   cancelApkInstall,
   cancelBugreport,
   captureScreenshot,
@@ -515,6 +517,7 @@ type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
 const ACTIONS_SHELL_TABS = [
   { id: "adb-shell", label: "ADB Shell" },
   { id: "shell", label: "Shell" },
+  { id: "utilities", label: "Utilities" },
 ] as const;
 type ActionsShellTabId = (typeof ACTIONS_SHELL_TABS)[number]["id"];
 
@@ -17246,6 +17249,24 @@ function App() {
                         </Suspense>
                       </div>
                     )}
+                    {activeActionsShellTabConfig.id === "utilities" && (
+                      <div
+                        id="actions-shell-panel-utilities"
+                        className="shell-actions-tab-panel"
+                        role="tabpanel"
+                        aria-labelledby="actions-shell-tab-utilities"
+                      >
+                        <DeviceUtilitiesPanel
+                          targetSerials={adbCommandTargetSerials}
+                          outputDir={config?.file_gen_output_path || config?.output_path || ""}
+                          disabled={busy}
+                          onNotify={pushToast}
+                          onAfterServerChange={() => {
+                            void refreshDevices();
+                          }}
+                        />
+                      </div>
+                    )}
                     {activeActionsShellTabConfig.id === "shell" && (
                       <div
                         id="actions-shell-panel-shell"
@@ -20067,6 +20088,43 @@ function App() {
                             </button>
                             <button type="button" className="ghost" onClick={handleCheckAdb} disabled={busy}>
                               Test
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost"
+                              disabled={busy}
+                              onClick={async () => {
+                                setBusy(true);
+                                try {
+                                  await adbServerControl("restart");
+                                  pushToast("ADB server restarted.", "info");
+                                  await refreshDevices();
+                                } catch (error) {
+                                  pushToast(formatError(error), "error");
+                                } finally {
+                                  setBusy(false);
+                                }
+                              }}
+                            >
+                              Restart ADB Server
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost"
+                              disabled={busy}
+                              onClick={async () => {
+                                setBusy(true);
+                                try {
+                                  await adbServerControl("kill");
+                                  pushToast("ADB server stopped.", "info");
+                                } catch (error) {
+                                  pushToast(formatError(error), "error");
+                                } finally {
+                                  setBusy(false);
+                                }
+                              }}
+                            >
+                              Kill ADB Server
                             </button>
                           </div>
                           {adbInfo && (

@@ -8786,3 +8786,330 @@ fn kill_bugreport_process(child_holder: &Arc<std::sync::Mutex<Option<std::proces
         }
     }
 }
+
+pub(crate) fn validate_adb_server_action(action: &str) -> Result<&'static str, String> {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "start" => Ok("start"),
+        "kill" => Ok("kill"),
+        "restart" => Ok("restart"),
+        _ => Err("Invalid ADB server action. Expected start, kill, or restart.".to_string()),
+    }
+}
+
+pub(crate) fn validate_logcat_buffer_size(size: &str) -> Result<&'static str, String> {
+    match size.trim().to_ascii_uppercase().as_str() {
+        "256K" => Ok("256K"),
+        "1M" => Ok("1M"),
+        "4M" => Ok("4M"),
+        "8M" => Ok("8M"),
+        "16M" => Ok("16M"),
+        "32M" => Ok("32M"),
+        "64M" => Ok("64M"),
+        _ => Err(
+            "Unsupported logcat buffer size. Allowed: 256K, 1M, 4M, 8M, 16M, 32M, 64M.".to_string(),
+        ),
+    }
+}
+
+#[tauri::command(async)]
+pub fn adb_server_control(
+    action: String,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<HostCommandResult>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    let normalized =
+        validate_adb_server_action(&action).map_err(|msg| AppError::validation(msg, &trace_id))?;
+    let adb_program = get_adb_program(&trace_id)?;
+    let timeout = Duration::from_secs(15);
+
+    let result = match normalized {
+        "start" => {
+            let out = run_command_with_timeout(
+                &adb_program,
+                &["start-server".to_string()],
+                timeout,
+                &trace_id,
+            )?;
+            HostCommandResult {
+                stdout: out.stdout,
+                stderr: out.stderr,
+                exit_code: out.exit_code,
+            }
+        }
+        "kill" => {
+            let out = run_command_with_timeout(
+                &adb_program,
+                &["kill-server".to_string()],
+                timeout,
+                &trace_id,
+            )?;
+            HostCommandResult {
+                stdout: out.stdout,
+                stderr: out.stderr,
+                exit_code: out.exit_code,
+            }
+        }
+        "restart" => {
+            let kill_out = run_command_with_timeout(
+                &adb_program,
+                &["kill-server".to_string()],
+                timeout,
+                &trace_id,
+            )?;
+            let start_out = run_command_with_timeout(
+                &adb_program,
+                &["start-server".to_string()],
+                timeout,
+                &trace_id,
+            )?;
+            HostCommandResult {
+                stdout: format!("{}\n{}", kill_out.stdout.trim(), start_out.stdout.trim())
+                    .trim()
+                    .to_string(),
+                stderr: format!("{}\n{}", kill_out.stderr.trim(), start_out.stderr.trim())
+                    .trim()
+                    .to_string(),
+                exit_code: start_out.exit_code,
+            }
+        }
+        _ => unreachable!(),
+    };
+
+    Ok(CommandResponse {
+        trace_id,
+        data: result,
+    })
+}
+
+#[tauri::command(async)]
+pub fn adb_root_devices(
+    serials: Vec<String>,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    if serials.is_empty() {
+        return Err(AppError::validation("serials is required", &trace_id));
+    }
+    let adb_program = get_adb_program(&trace_id)?;
+    let scheduler = Arc::clone(&state.scheduler);
+    let mut results = Vec::with_capacity(serials.len());
+
+    for serial in serials {
+        ensure_non_empty(&serial, "serial", &trace_id)?;
+        let _permit = scheduler.acquire_global();
+        let device_lock = scheduler.device_lock(&serial);
+        let _guard = device_lock
+            .lock()
+            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
+        let args = vec!["-s".to_string(), serial.clone(), "root".to_string()];
+        let out =
+            run_command_with_timeout(&adb_program, &args, Duration::from_secs(20), &trace_id)?;
+        results.push(CommandResult {
+            serial,
+            stdout: out.stdout,
+            stderr: out.stderr,
+            exit_code: out.exit_code,
+        });
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
+}
+
+#[tauri::command(async)]
+pub fn set_logcat_buffer_size(
+    serials: Vec<String>,
+    size: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    if serials.is_empty() {
+        return Err(AppError::validation("serials is required", &trace_id));
+    }
+    let normalized_size =
+        validate_logcat_buffer_size(&size).map_err(|msg| AppError::validation(msg, &trace_id))?;
+    let adb_program = get_adb_program(&trace_id)?;
+    let scheduler = Arc::clone(&state.scheduler);
+    let mut results = Vec::with_capacity(serials.len());
+
+    for serial in serials {
+        ensure_non_empty(&serial, "serial", &trace_id)?;
+        let _permit = scheduler.acquire_global();
+        let device_lock = scheduler.device_lock(&serial);
+        let _guard = device_lock
+            .lock()
+            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
+        let args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "logcat".to_string(),
+            "-b".to_string(),
+            "main".to_string(),
+            "-G".to_string(),
+            normalized_size.to_string(),
+        ];
+        let out =
+            run_command_with_timeout(&adb_program, &args, Duration::from_secs(15), &trace_id)?;
+        results.push(CommandResult {
+            serial,
+            stdout: out.stdout,
+            stderr: out.stderr,
+            exit_code: out.exit_code,
+        });
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
+}
+
+#[tauri::command(async)]
+pub fn pull_device_dcim_batch(
+    serials: Vec<String>,
+    output_dir: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    if serials.is_empty() {
+        return Err(AppError::validation("serials is required", &trace_id));
+    }
+    ensure_non_empty(&output_dir, "output_dir", &trace_id)?;
+    let base_dir = PathBuf::from(output_dir.trim());
+    fs::create_dir_all(&base_dir).map_err(|err| {
+        AppError::system(
+            format!("Failed to prepare output directory: {err}"),
+            &trace_id,
+        )
+    })?;
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let scheduler = Arc::clone(&state.scheduler);
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let mut results = Vec::with_capacity(serials.len());
+
+    for serial in serials {
+        ensure_non_empty(&serial, "serial", &trace_id)?;
+        let safe_serial = sanitize_filename_component(&serial);
+        let dest_dir = base_dir.join(format!("{safe_serial}_dcim_{timestamp}"));
+        fs::create_dir_all(&dest_dir).map_err(|err| {
+            AppError::system(
+                format!("Failed to create DCIM output dir: {err}"),
+                &trace_id,
+            )
+        })?;
+        let dest_str = dest_dir.to_string_lossy().to_string();
+
+        let _permit = scheduler.acquire_global();
+        let device_lock = scheduler.device_lock(&serial);
+        let _guard = device_lock
+            .lock()
+            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
+        let args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "pull".to_string(),
+            "/sdcard/DCIM".to_string(),
+            dest_str.clone(),
+        ];
+        let out =
+            run_command_with_timeout(&adb_program, &args, Duration::from_secs(300), &trace_id)?;
+        let stdout = if out.exit_code == Some(0) {
+            format!("{dest_str}\n{}", out.stdout.trim())
+                .trim()
+                .to_string()
+        } else {
+            out.stdout
+        };
+        results.push(CommandResult {
+            serial,
+            stdout,
+            stderr: out.stderr,
+            exit_code: out.exit_code,
+        });
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
+}
+
+#[tauri::command(async)]
+pub fn export_discovery_service_dump(
+    serials: Vec<String>,
+    output_dir: String,
+    state: State<'_, AppState>,
+    trace_id: Option<String>,
+) -> Result<CommandResponse<Vec<CommandResult>>, AppError> {
+    let trace_id = resolve_trace_id(trace_id);
+    if serials.is_empty() {
+        return Err(AppError::validation("serials is required", &trace_id));
+    }
+    ensure_non_empty(&output_dir, "output_dir", &trace_id)?;
+    let base_dir = PathBuf::from(output_dir.trim());
+    fs::create_dir_all(&base_dir).map_err(|err| {
+        AppError::system(
+            format!("Failed to prepare output directory: {err}"),
+            &trace_id,
+        )
+    })?;
+
+    let adb_program = get_adb_program(&trace_id)?;
+    let scheduler = Arc::clone(&state.scheduler);
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let mut results = Vec::with_capacity(serials.len());
+
+    for serial in serials {
+        ensure_non_empty(&serial, "serial", &trace_id)?;
+        let _permit = scheduler.acquire_global();
+        let device_lock = scheduler.device_lock(&serial);
+        let _guard = device_lock
+            .lock()
+            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
+        let args = vec![
+            "-s".to_string(),
+            serial.clone(),
+            "shell".to_string(),
+            "dumpsys".to_string(),
+            "activity".to_string(),
+            "service".to_string(),
+            "DiscoveryService".to_string(),
+        ];
+        let out =
+            run_command_with_timeout(&adb_program, &args, Duration::from_secs(30), &trace_id)?;
+        if out.exit_code == Some(0) {
+            let safe_serial = sanitize_filename_component(&serial);
+            let out_file = base_dir.join(format!("{safe_serial}_discovery_{timestamp}.txt"));
+            fs::write(&out_file, &out.stdout).map_err(|err| {
+                AppError::system(
+                    format!("Failed to write DiscoveryService dump: {err}"),
+                    &trace_id,
+                )
+            })?;
+            results.push(CommandResult {
+                serial,
+                stdout: out_file.to_string_lossy().to_string(),
+                stderr: out.stderr,
+                exit_code: out.exit_code,
+            });
+        } else {
+            results.push(CommandResult {
+                serial,
+                stdout: out.stdout,
+                stderr: out.stderr,
+                exit_code: out.exit_code,
+            });
+        }
+    }
+
+    Ok(CommandResponse {
+        trace_id,
+        data: results,
+    })
+}

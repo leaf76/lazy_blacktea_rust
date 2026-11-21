@@ -1813,3 +1813,17 @@ fn running_terminal_session_response_reuses_existing_session() {
 
     session.stop();
 }
+
+#[test]
+fn validates_adb_server_action_and_logcat_buffer_size() {
+    assert_eq!(validate_adb_server_action("start").unwrap(), "start");
+    assert_eq!(validate_adb_server_action(" KILL ").unwrap(), "kill");
+    assert_eq!(validate_adb_server_action("Restart").unwrap(), "restart");
+    assert!(validate_adb_server_action("reboot").is_err());
+
+    assert_eq!(validate_logcat_buffer_size("4m").unwrap(), "4M");
+    assert_eq!(validate_logcat_buffer_size("16M").unwrap(), "16M");
+    assert_eq!(validate_logcat_buffer_size("256k").unwrap(), "256K");
+    assert!(validate_logcat_buffer_size("999G").is_err());
+    assert!(validate_logcat_buffer_size("1M; rm -rf /").is_err());
+}
