@@ -271,4 +271,17 @@ describe("theme settings", () => {
     expect(getContrastRatio(css["--color-text-muted"], css["--color-bg-panel"])).toBeGreaterThanOrEqual(3);
     expect(getContrastRatio(css["--color-primary-contrast"], css["--color-primary"])).toBeGreaterThanOrEqual(4.5);
   });
+
+  it("maps UI density into spacing CSS variables with cozy default", () => {
+    const compactCss = buildThemeCssVariables(
+      { ...baseUi(), density: "compact" },
+      { isTauriRuntime: false },
+    );
+    const comfortableCss = buildThemeCssVariables(
+      { ...baseUi(), density: "comfortable" },
+      { isTauriRuntime: false },
+    );
+    expect(compactCss["--form-control-height"]).toBe("28px");
+    expect(comfortableCss["--form-control-height"]).toBe("38px");
+  });
 });

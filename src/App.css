@@ -8379,3 +8379,163 @@ textarea:disabled {
     min-width: min(360px, 86vw);
   }
 }
+
+/* Phase 2 (A2): Command Palette, Shortcuts Overlay, Quick Filter Chips, Sticky Batch Bar & Density */
+.app-shell[data-density="compact"] .panel {
+  padding: var(--density-panel-padding, 10px);
+}
+
+.app-shell[data-density="compact"] .device-row {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.app-shell[data-density="comfortable"] .panel {
+  padding: var(--density-panel-padding, 18px);
+}
+
+.app-shell[data-density="comfortable"] .device-row {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.quick-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.quick-filter-chip {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--color-border);
+  background: var(--surface-control-bg);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.quick-filter-chip.active {
+  background: var(--surface-active-bg);
+  border-color: var(--nav-active-border);
+  color: var(--nav-active-text);
+  font-weight: 600;
+}
+
+.sticky-batch-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-10);
+  background: var(--surface-panel-bg);
+  box-shadow: var(--shadow-card);
+}
+
+.command-palette-backdrop {
+  align-items: flex-start;
+  padding-top: 10vh;
+}
+
+.command-palette-modal {
+  width: min(640px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.command-palette-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.command-palette-input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  font-size: 14px;
+}
+
+.command-palette-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  max-height: 52vh;
+}
+
+.command-palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.command-palette-item.is-active,
+.command-palette-item:hover {
+  background: var(--surface-active-bg);
+  border-color: var(--nav-active-border);
+}
+
+.command-palette-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.command-palette-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.command-palette-empty {
+  padding: 18px 10px;
+  text-align: center;
+}
+
+.shortcuts-modal {
+  width: min(560px, 92vw);
+  padding: 16px;
+}
+
+.shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.shortcut-kbd {
+  min-width: 140px;
+  text-align: center;
+  font-family: var(--font-code);
+}

@@ -75,6 +75,14 @@ fn default_theme_opacity() -> f32 {
     1.0
 }
 
+fn default_ui_density() -> String {
+    "cozy".to_string()
+}
+
+fn is_allowed_ui_density(value: &str) -> bool {
+    matches!(value, "compact" | "cozy" | "comfortable")
+}
+
 pub const THEME_BACKGROUND_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const THEME_COPY_TITLE_MAX_CHARS: usize = 80;
 const THEME_COPY_SUBTITLE_MAX_CHARS: usize = 120;
@@ -163,6 +171,8 @@ pub struct UiSettings {
     pub window_y: i32,
     pub ui_scale: f32,
     pub theme: String,
+    #[serde(default = "default_ui_density")]
+    pub density: String,
     pub font_size: i32,
     pub show_console_panel: bool,
     pub single_selection: bool,
@@ -180,6 +190,7 @@ impl Default for UiSettings {
             window_y: 100,
             ui_scale: 1.0,
             theme: "dark".to_string(),
+            density: default_ui_density(),
             font_size: 10,
             show_console_panel: false,
             single_selection: true,
@@ -1145,6 +1156,10 @@ fn validate_config(mut config: AppConfig) -> AppConfig {
     if !(0.5..=3.0).contains(&config.ui.ui_scale) {
         config.ui.ui_scale = 1.0;
     }
+    config.ui.density = config.ui.density.trim().to_ascii_lowercase();
+    if !is_allowed_ui_density(&config.ui.density) {
+        config.ui.density = default_ui_density();
+    }
     config.ui.font_size = config.ui.font_size.clamp(10, 18);
     config.ui.theme_style = validate_theme_style(config.ui.theme_style);
     if config.ui.default_output_path.trim().is_empty() {
@@ -1737,6 +1752,7 @@ mod tests {
             "ui": {
                 "theme": "light",
                 "density": "compact",
+                "custom_pyqt_flag": true,
                 "window_width": 1200
             },
             "updates": {
@@ -1759,6 +1775,7 @@ mod tests {
         fs::write(&path, serde_json::to_string_pretty(&initial).unwrap()).expect("write initial");
 
         let mut loaded = load_config_from_path(&path, "c1-trace").expect("load");
+        assert_eq!(loaded.ui.density, "compact");
         loaded.ui.theme = "dark".to_string();
         loaded.device_groups.remove("deleted_group");
         loaded.terminal.buffers.remove("SER-2");
@@ -1768,8 +1785,9 @@ mod tests {
         let raw = fs::read_to_string(&path).expect("read saved");
         let saved: serde_json::Value = serde_json::from_str(&raw).expect("parse saved");
 
-        // Unknown PyQt6 keys preserved
+        // Shared and unknown PyQt6 keys preserved
         assert_eq!(saved["ui"]["density"], "compact");
+        assert_eq!(saved["ui"]["custom_pyqt_flag"], true);
         assert_eq!(saved["updates"]["auto_check"], true);
         assert_eq!(saved["updates"]["skipped_version"], "0.0.55");
         // Known Rust updates applied

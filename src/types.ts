@@ -609,6 +609,8 @@ export type ScrcpyInfo = {
   command_path: string;
 };
 
+export type UiDensity = "compact" | "cozy" | "comfortable";
+
 export type UiSettings = {
   window_width: number;
   window_height: number;
@@ -616,6 +618,7 @@ export type UiSettings = {
   window_y: number;
   ui_scale: number;
   theme: string;
+  density?: UiDensity;
   font_size: number;
   show_console_panel: boolean;
   single_selection: boolean;

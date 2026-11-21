@@ -27,6 +27,21 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { ApkInspectionCard } from "./ApkInspectionCard";
+import { CommandPaletteModal } from "./CommandPaletteModal";
+import { DeviceQuickFilterBar } from "./DeviceQuickFilterBar";
+import { ShortcutsOverlayModal } from "./ShortcutsOverlayModal";
+import {
+  buildDevicePaletteItems,
+  buildRecentTaskPaletteItems,
+  isEditableKeyboardTarget,
+  type CommandPaletteItem,
+} from "./commandPalette";
+import {
+  getNextKeyboardDeviceIndex,
+  matchesDeviceQuickFilters,
+  toggleDeviceQuickFilter,
+  type DeviceQuickFilterId,
+} from "./deviceQuickFilters";
 import {
   formatApkInstallFailureMessage,
   resolveApkInstallEventPatch,
@@ -75,6 +90,7 @@ import type {
   ThemeBackgroundKind,
   ThemeBackgroundSource,
   ThemeStyleSettings,
+  UiDensity,
   ScrcpyInfo,
 } from "./types";
 import {
@@ -306,6 +322,7 @@ import {
   mergeSavedThemeBackgroundSourceIntoDraft,
   normalizeThemeFontSize,
   normalizeThemeStyleSettings,
+  normalizeUiDensity,
   resolveThemeCopy,
 } from "./theme";
 import { clampIosRefreshIntervalSec, clampRefreshIntervalSec, getIosAutoRefreshIntervalMs } from "./deviceAutoRefresh";
@@ -2149,6 +2166,11 @@ function App() {
   const deviceContextMenuWasOpenRef = useRef(false);
   const deviceQuickSelectionHintShownRef = useRef(false);
   const [searchText, setSearchText] = useState("");
+  const [deviceQuickFilters, setDeviceQuickFilters] = useState<DeviceQuickFilterId[]>([]);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [shortcutsOverlayOpen, setShortcutsOverlayOpen] = useState(false);
+  const deviceSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const deviceListRef = useRef<HTMLDivElement | null>(null);
   const [apkPath, setApkPath] = useState("");
   const [apkBundlePath, setApkBundlePath] = useState("");
   const [apkPaths, setApkPaths] = useState<string[]>([]);
@@ -6048,24 +6070,45 @@ function App() {
     }
   }, [groupFilter, groupOptions]);
 
+  const selectedSerialSet = useMemo(() => new Set(selectedSerials), [selectedSerials]);
+
   const visibleDevices = useMemo(() => {
     const bySearch = filterDevicesBySearch(devices, searchText);
-    if (groupFilter === "all") {
-      return bySearch;
+    const byGroup =
+      groupFilter === "all"
+        ? bySearch
+        : bySearch.filter((device) => groupMap[device.summary.serial] === groupFilter);
+    if (deviceQuickFilters.length === 0) {
+      return byGroup;
     }
-    return bySearch.filter((device) => groupMap[device.summary.serial] === groupFilter);
-  }, [devices, groupFilter, groupMap, searchText]);
+    return byGroup.filter((device) =>
+      matchesDeviceQuickFilters(device, deviceQuickFilters, {
+        selectedSerialSet,
+        screenRecordStatusBySerial,
+      }),
+    );
+  }, [
+    devices,
+    deviceQuickFilters,
+    groupFilter,
+    groupMap,
+    screenRecordStatusBySerial,
+    searchText,
+    selectedSerialSet,
+  ]);
 
   const connectedDevicesCount = useMemo(
     () => devices.filter((device) => device.summary.state === "device").length,
     [devices],
   );
 
-  const hasDeviceFilters = searchText.trim().length > 0 || groupFilter !== "all";
+  const hasDeviceFilters =
+    searchText.trim().length > 0 || groupFilter !== "all" || deviceQuickFilters.length > 0;
 
   const clearDeviceFilters = () => {
     setSearchText("");
     setGroupFilter("all");
+    setDeviceQuickFilters([]);
   };
 
   const applyDeviceGroupFilter = (group: string) => {
@@ -12052,6 +12095,7 @@ function App() {
     ...withDeviceGroups(base, options.groupMap ?? groupMap),
     ui: {
       ...base.ui,
+      density: normalizeUiDensity(base.ui.density),
       font_size: normalizeThemeFontSize(base.ui.font_size),
       theme_style: normalizeThemeStyleSettings(base.ui.theme_style),
     },
@@ -15599,8 +15643,159 @@ function App() {
         convertFileSrc,
       })
     : {}) as CSSProperties;
+  const activeUiDensity = normalizeUiDensity(config?.ui.density);
+
+  useEffect(() => {
+    if (isDetachedPopupWindow) {
+      return;
+    }
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setShortcutsOverlayOpen(false);
+        setCommandPaletteOpen((prev) => !prev);
+        return;
+      }
+      if (isEditableKeyboardTarget(event.target as HTMLElement | null)) {
+        return;
+      }
+      if (event.key === "?" && !mod && !event.altKey) {
+        event.preventDefault();
+        setCommandPaletteOpen(false);
+        setShortcutsOverlayOpen((prev) => !prev);
+        return;
+      }
+      if (event.key === "/" && !mod && !event.altKey) {
+        event.preventDefault();
+        if (location.pathname !== "/devices") {
+          navigate("/devices");
+          window.setTimeout(() => {
+            deviceSearchInputRef.current?.focus();
+          }, 40);
+        } else {
+          deviceSearchInputRef.current?.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [isDetachedPopupWindow, location.pathname, navigate]);
+
+  const commandPaletteItems = useMemo<CommandPaletteItem[]>(() => {
+    const navItems: CommandPaletteItem[] = [
+      { id: "nav:/", category: "navigation", title: "Dashboard", subtitle: "Overview & device cards", keywords: ["home", "overview"] },
+      { id: "nav:/devices", category: "navigation", title: "Device Manager", subtitle: "Connected Android & iOS devices", keywords: ["adb", "groups", "filter"] },
+      { id: "nav:/bluetooth", category: "navigation", title: "Bluetooth Monitor", subtitle: "BLE scanning, advertising & events", keywords: ["bt", "ble"] },
+      { id: "nav:/logcat", category: "navigation", title: "Logcat", subtitle: "Live Android logcat & iOS syslog", keywords: ["logs", "syslog"] },
+      { id: "nav:/network", category: "navigation", title: "Network Profiler", subtitle: "Per-app RX/TX traffic", keywords: ["net", "uid"] },
+      { id: "nav:/developer-options", category: "navigation", title: "Developer Options", subtitle: "Batch Android developer settings", keywords: ["dev", "animation", "stay awake"] },
+      { id: "nav:/ui-inspector", category: "navigation", title: "UI Inspector", subtitle: "Screenshot bounds & XML hierarchy", keywords: ["uiautomator", "xpath", "layout"] },
+      { id: "nav:/bugreport", category: "navigation", title: "Bugreport", subtitle: "Generate Android bugreports", keywords: ["bugreportz", "zip"] },
+      { id: "nav:/bugreport-logviewer", category: "navigation", title: "Bugreport Logs", subtitle: "Search indexed bugreport logcat", keywords: ["fts", "analyze"] },
+      { id: "nav:/apps", category: "navigation", title: "App Manager", subtitle: "Installed packages & permissions", keywords: ["pm", "uninstall", "clear data"] },
+      { id: "nav:/files", category: "navigation", title: "File Explorer", subtitle: "Browse, push, pull & preview device files", keywords: ["sdcard", "transfer"] },
+      { id: "nav:/apk-installer", category: "navigation", title: "APK Installer", subtitle: "Install APK / APKS / XAPK bundles", keywords: ["install", "sideload"] },
+      { id: "nav:/profiles", category: "navigation", title: "Profiles", subtitle: "iOS configuration profiles", keywords: ["mobileconfig", "ios"] },
+      { id: "nav:/actions", category: "navigation", title: "Shell Commands", subtitle: "ADB Command Library & interactive terminal", keywords: ["shell", "terminal", "snippets"] },
+      { id: "nav:/performance", category: "navigation", title: "Performance Monitor", subtitle: "CPU, memory, network & FPS", keywords: ["perf", "fps"] },
+      { id: "nav:/tasks", category: "navigation", title: "Task Center", subtitle: "Active & recent background tasks", keywords: ["history", "jobs"] },
+      { id: "nav:/settings", category: "navigation", title: "Settings", subtitle: "Connectivity, Appearance, System & Operations", keywords: ["preferences", "theme", "density"] },
+    ];
+    const actionItems: CommandPaletteItem[] = [
+      { id: "action:refresh", category: "action", title: "Refresh Devices", subtitle: "Re-scan connected devices", disabled: busy },
+      { id: "action:connect", category: "action", title: "Connect Wireless Device", subtitle: "Open ADB Pair / Connect modal", disabled: busy },
+      {
+        id: "action:screenshot",
+        category: "action",
+        title: screenshotCommandLabel,
+        subtitle: `${selectedCount} selected`,
+        disabled: busy || selectedCount === 0 || screenshotActionMeta.disabled,
+      },
+      {
+        id: "action:record",
+        category: "action",
+        title: screenRecordCommandLabel,
+        subtitle: `${selectedCount} selected`,
+        disabled: busy || selectedCount === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled,
+      },
+      {
+        id: "action:mirror",
+        category: "action",
+        title: mirrorCommandLabel,
+        subtitle: "Launch scrcpy mirror",
+        disabled: busy || selectedCount === 0 || !hasSelectedAndroidActionTarget,
+      },
+      { id: "action:shortcuts", category: "action", title: "Show Keyboard Shortcuts", shortcut: "?" },
+    ];
+    return [
+      ...actionItems,
+      ...buildDevicePaletteItems(devices),
+      ...navItems,
+      ...buildRecentTaskPaletteItems(taskState.items),
+    ];
+  }, [
+    busy,
+    devices,
+    hasSelectedAndroidActionTarget,
+    mirrorCommandLabel,
+    screenRecordActionMeta.disabled,
+    screenRecordCommandLabel,
+    screenRecordStatusLoading,
+    screenshotActionMeta.disabled,
+    screenshotCommandLabel,
+    selectedCount,
+    taskState.items,
+  ]);
+
+  const handleSelectCommandPaletteItem = (item: CommandPaletteItem) => {
+    if (item.id.startsWith("nav:")) {
+      const target = item.id.slice(4);
+      if (target === "/actions") {
+        setActiveActionsShellTab("adb-shell");
+      }
+      navigate(target);
+      return;
+    }
+    if (item.id.startsWith("device:")) {
+      const serial = item.id.slice("device:".length);
+      handleSelectActiveSerial(serial);
+      setSelectedSerials((prev) => (prev.includes(serial) ? prev : [serial]));
+      navigate("/devices");
+      return;
+    }
+    if (item.id.startsWith("task:")) {
+      navigate("/tasks");
+      return;
+    }
+    switch (item.id) {
+      case "action:refresh":
+        void refreshDevices();
+        break;
+      case "action:connect":
+        openPairingModal();
+        break;
+      case "action:screenshot":
+        void handleQuickScreenshot();
+        break;
+      case "action:record":
+        void handleQuickScreenRecord();
+        break;
+      case "action:mirror":
+        void handleScrcpyLaunch();
+        break;
+      case "action:shortcuts":
+        setShortcutsOverlayOpen(true);
+        break;
+    }
+  };
+
   return (
-    <div className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`} style={themeCssVariables}>
+    <div
+      className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`}
+      data-density={activeUiDensity}
+      style={themeCssVariables}
+    >
       {!isDetachedPopupWindow && (
       <aside className="sidebar">
         <div className="brand">
@@ -15643,6 +15838,25 @@ function App() {
           </div>
         </nav>
         <div className="sidebar-footer">
+          <div className="button-row compact">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setCommandPaletteOpen(true)}
+              title="Open Command Palette (Ctrl+K)"
+            >
+              Palette (Ctrl+K)
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setShortcutsOverlayOpen(true)}
+              title="Keyboard Shortcuts (?)"
+              aria-label="Keyboard Shortcuts"
+            >
+              ?
+            </button>
+          </div>
           <button className="ghost" onClick={openPairingModal} disabled={busy}>
             Connect Device
           </button>
@@ -16262,9 +16476,10 @@ function App() {
                         <div className="device-filter-bar">
                           <div className="device-filter-main">
                             <input
+                              ref={deviceSearchInputRef}
                               value={searchText}
                               onChange={(event) => setSearchText(event.target.value)}
-                              placeholder="Search by serial or model"
+                              placeholder="Search by serial or model (/)"
                               aria-label="Search devices"
                             />
                             <select
@@ -16358,7 +16573,15 @@ function App() {
                             <span className="device-selection-count muted">{selectedCount} selected</span>
                           </div>
                         </div>
-                        <div className="device-list device-list-stretch">
+                        <DeviceQuickFilterBar
+                          activeFilters={deviceQuickFilters}
+                          onToggle={(id) =>
+                            setDeviceQuickFilters((prev) => toggleDeviceQuickFilter(prev, id))
+                          }
+                          onClearAll={clearDeviceFilters}
+                          hasAnyFilter={hasDeviceFilters}
+                        />
+                        <div ref={deviceListRef} className="device-list device-list-stretch">
                           <div className="device-list-header">
                             <span />
                             <span>Identity</span>
@@ -16424,12 +16647,47 @@ function App() {
                                 <div
                                   key={serial}
                                   className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}${isRetained ? " is-retained" : ""}`}
+                                  data-device-row-index={index}
                                   data-device-state={device.summary.state}
                                   onClick={(event) => handleDeviceRowSelect(event, serial, index)}
                                   tabIndex={0}
                                   onKeyDown={(event) => {
                                     const target = event.target as HTMLElement | null;
                                     if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
+                                      return;
+                                    }
+                                    const mod = event.ctrlKey || event.metaKey;
+                                    if (mod && event.key.toLowerCase() === "a") {
+                                      event.preventDefault();
+                                      if (event.shiftKey) {
+                                        clearSelection();
+                                      } else {
+                                        selectAllVisible();
+                                      }
+                                      return;
+                                    }
+                                    const nextIdx = getNextKeyboardDeviceIndex(
+                                      index,
+                                      event.key,
+                                      visibleDevices.length,
+                                    );
+                                    if (nextIdx !== null) {
+                                      event.preventDefault();
+                                      const nextRow = deviceListRef.current?.querySelector<HTMLElement>(
+                                        `[data-device-row-index="${nextIdx}"]`,
+                                      );
+                                      nextRow?.focus();
+                                      return;
+                                    }
+                                    if (event.key === " " || event.key === "Enter") {
+                                      event.preventDefault();
+                                      if (deviceSelectionMode === "multi") {
+                                        toggleDevice(serial);
+                                      } else {
+                                        setSelectedSerials([serial]);
+                                        handleSelectActiveSerial(serial);
+                                      }
+                                      lastSelectedIndexRef.current = index;
                                       return;
                                     }
                                     openDeviceQuickContextMenuFromKeyboard(event, serial, {
@@ -16656,6 +16914,17 @@ function App() {
                                 disabled={busy || selectedCount === 0 || !hasSelectedAndroidActionTarget}
                               >
                                 {mirrorCommandLabel}
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => {
+                                  setActiveActionsShellTab("adb-shell");
+                                  navigate("/actions");
+                                }}
+                                disabled={busy || selectedCount === 0 || !hasSelectedAndroidActionTarget}
+                              >
+                                Run Shell
                               </button>
                               <button type="button" className="danger" onClick={requestRebootConfirm} disabled={busy || selectedCount === 0 || rebootActionMeta.disabled}>
                                 {rebootDirectCommandLabel}
@@ -19816,6 +20085,29 @@ function App() {
                                   }
                                 />
                               </label>
+                              <label>
+                                UI density
+                                <select
+                                  value={normalizeUiDensity(config.ui.density)}
+                                  onChange={(event) =>
+                                    setConfig((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            ui: {
+                                              ...prev.ui,
+                                              density: normalizeUiDensity(event.target.value) as UiDensity,
+                                            },
+                                          }
+                                        : prev,
+                                    )
+                                  }
+                                >
+                                  <option value="compact">Compact</option>
+                                  <option value="cozy">Cozy</option>
+                                  <option value="comfortable">Comfortable</option>
+                                </select>
+                              </label>
                               <div className="theme-color-grid">
                                 <label>
                                   Primary
@@ -19861,6 +20153,7 @@ function App() {
                                             ...prev,
                                             ui: {
                                               ...prev.ui,
+                                              density: "cozy",
                                               font_size: 13,
                                               theme_style: buildDefaultThemeStyleSettings(),
                                             },
@@ -21838,6 +22131,18 @@ function App() {
           </div>
         </div>
       )}
+
+      <CommandPaletteModal
+        open={commandPaletteOpen}
+        items={commandPaletteItems}
+        onClose={() => setCommandPaletteOpen(false)}
+        onSelect={handleSelectCommandPaletteItem}
+      />
+
+      <ShortcutsOverlayModal
+        open={shortcutsOverlayOpen}
+        onClose={() => setShortcutsOverlayOpen(false)}
+      />
 
       <div className="toast-stack" role="status" aria-live="polite">
         {toasts.map((toast) => (

@@ -6,6 +6,7 @@ import type {
   ThemeColorSettings,
   ThemeCopyOverrides,
   ThemeStyleSettings,
+  UiDensity,
   UiSettings,
 } from "./types";
 
@@ -447,11 +448,51 @@ export const resolveThemeBackgroundImage = (
   return preset.backgroundImage;
 };
 
+export const DEFAULT_UI_DENSITY: UiDensity = "cozy";
+
+export const normalizeUiDensity = (value?: string | null): UiDensity => {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "compact" || normalized === "cozy" || normalized === "comfortable") {
+    return normalized;
+  }
+  return DEFAULT_UI_DENSITY;
+};
+
+const DENSITY_TOKENS: Record<
+  UiDensity,
+  {
+    "--form-row-gap": string;
+    "--form-control-height": string;
+    "--density-panel-padding": string;
+    "--density-row-padding": string;
+  }
+> = {
+  compact: {
+    "--form-row-gap": "5px",
+    "--form-control-height": "28px",
+    "--density-panel-padding": "10px",
+    "--density-row-padding": "4px 8px",
+  },
+  cozy: {
+    "--form-row-gap": "8px",
+    "--form-control-height": "34px",
+    "--density-panel-padding": "14px",
+    "--density-row-padding": "8px 10px",
+  },
+  comfortable: {
+    "--form-row-gap": "12px",
+    "--form-control-height": "38px",
+    "--density-panel-padding": "18px",
+    "--density-row-padding": "11px 12px",
+  },
+};
+
 export const buildThemeCssVariables = (
   ui: UiSettings,
   options: { isTauriRuntime: boolean; convertFileSrc?: (path: string) => string },
 ): Record<string, string> => {
   const theme = normalizeThemeStyleSettings(ui.theme_style);
+  const density = normalizeUiDensity(ui.density);
   const preset = resolvePresetForUi(theme.preset_id, ui.theme);
   const colors = theme.colors;
   const isRepeat = theme.background_fit === "repeat";
@@ -462,6 +503,7 @@ export const buildThemeCssVariables = (
   const mutedTextColor = ensureReadableColor(colors.muted_text, preset.colors.muted, panelColor, 3);
   return {
     ...THEME_MODE_TOKENS[preset.mode],
+    ...DENSITY_TOKENS[density],
     "--color-bg-app": preset.colors.app,
     "--color-bg-panel": panelColor,
     "--color-bg-subtle": preset.colors.subtle,
