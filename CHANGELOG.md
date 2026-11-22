@@ -2,6 +2,26 @@
 
 All notable changes to **Lazy Blacktea (Tauri / Rust)** are documented in this file.
 
+## 0.0.96 - 2026-11-22
+
+### Performance
+- **Release Binary Optimization**: Enabled `[profile.release]` (`lto = "thin"`, `codegen-units = 1`, `strip = true`) in `src-tauri/Cargo.toml` for smaller, faster release builds.
+- **Single-Spawn Device Refresh & On-Device GMS Filtering**: Merged `getprop` into the single-spawn `adb shell` device detail batch script with early-bail semantics (`getprop || exit 42`), and filtered `dumpsys package com.google.android.gms` on-device via `sed` to extract `versionName` directly—cutting USB transfer volume by ~90% (from ~36k to ~3.7k lines) and trimming device refresh latency by ~30%.
+- **Frontend Route Code-Splitting**: Converted `DevicesPage`, `LogcatPage`, and `SettingsPage` to `React.lazy` chunks, bringing the main Vite bundle below 500 kB (`446 kB`).
+
+### Fixed
+- **Windows & Linux ADB Auto-Detection**: Extended `locator.rs` fallback search paths to cover standard Windows (`%LOCALAPPDATA%\Android\Sdk`, `%USERPROFILE%\AppData\Local\Android\Sdk`) and Linux (`$HOME/Android/Sdk`) Android SDK installations when `adb` is not on `PATH`.
+- **UI Remount-on-Render Bugs**: Lifted `NetProfilerLineChart`, `NetworkBreakdownPanel`, and `FileTypeIcon` out of the `App()` render scope so state and charts no longer unmount/remount on parent re-renders.
+- **CI Test Stability**: Shared a single process-wide environment lock across Rust unit tests to eliminate parallel env-var race conditions in CI.
+
+### Security
+- Patched all 8 npm Dependabot alerts (`vite` 7.3.8, `vitest` / `@vitest/mocker` 4.1.12, `source-map-js`; `npm audit` reports 0 vulnerabilities).
+- Upgraded `rustls` to `0.23.46` and migrated the direct `zip` crate dependency from `v2` to `v9` (`9.8.1`).
+
+### Refactored
+- Split `src-tauri/src/app/commands/mod.rs` into 7 focused domain submodules (`apps`, `bluetooth`, `bugreport`, `files`, `ios`, `logcat`, `monitors`) re-exported via `pub use`.
+- Extracted 8 shared UI components (`src/components/`) and 5 core route pages (`src/pages/`) from `src/App.tsx`, sinking page-local state closer to each view.
+
 ## 0.0.95 - 2026-11-22
 
 ### Added
