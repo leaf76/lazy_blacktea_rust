@@ -1382,7 +1382,10 @@ fn build_device_detail_script() -> String {
         (DETAIL_SECTION_BLUETOOTH, "settings get global bluetooth_on"),
         (DETAIL_SECTION_BT_STATE, "cmd bluetooth_manager get-state"),
         (DETAIL_SECTION_AUDIO, "dumpsys audio"),
-        (DETAIL_SECTION_GMS, "dumpsys package com.google.android.gms"),
+        (
+            DETAIL_SECTION_GMS,
+            "dumpsys package com.google.android.gms | sed -n '/versionName/p; /versionName/q'",
+        ),
         (DETAIL_SECTION_WM, "wm size"),
         (DETAIL_SECTION_DF, "df -k /data"),
         (DETAIL_SECTION_MEM, "cat /proc/meminfo"),

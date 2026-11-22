@@ -118,12 +118,16 @@ fn is_default_adb_alias(value: &str) -> bool {
 fn resolve_default_adb_program() -> String {
     let path_env = std::env::var_os("PATH");
     let home_env = std::env::var_os("HOME");
+    let local_app_data_env = std::env::var_os("LOCALAPPDATA");
+    let user_profile_env = std::env::var_os("USERPROFILE");
     let android_sdk_root = std::env::var_os("ANDROID_SDK_ROOT");
     let android_home = std::env::var_os("ANDROID_HOME");
 
     resolve_default_adb_program_from_values(
         path_env.as_deref(),
         home_env.as_deref(),
+        local_app_data_env.as_deref(),
+        user_profile_env.as_deref(),
         android_sdk_root.as_deref(),
         android_home.as_deref(),
         true,
@@ -133,6 +137,8 @@ fn resolve_default_adb_program() -> String {
 fn resolve_default_adb_program_from_values(
     path_env: Option<&OsStr>,
     home_env: Option<&OsStr>,
+    local_app_data_env: Option<&OsStr>,
+    user_profile_env: Option<&OsStr>,
     android_sdk_root: Option<&OsStr>,
     android_home: Option<&OsStr>,
     include_system_fallbacks: bool,
@@ -140,6 +146,8 @@ fn resolve_default_adb_program_from_values(
     let candidates = build_default_adb_candidates(
         path_env,
         home_env,
+        local_app_data_env,
+        user_profile_env,
         android_sdk_root,
         android_home,
         include_system_fallbacks,
@@ -150,6 +158,8 @@ fn resolve_default_adb_program_from_values(
 fn build_default_adb_candidates(
     path_env: Option<&OsStr>,
     home_env: Option<&OsStr>,
+    local_app_data_env: Option<&OsStr>,
+    user_profile_env: Option<&OsStr>,
     android_sdk_root: Option<&OsStr>,
     android_home: Option<&OsStr>,
     include_system_fallbacks: bool,
@@ -171,9 +181,26 @@ fn build_default_adb_candidates(
             sdk_roots.push(PathBuf::from(root));
         }
     }
+    if let Some(local_app_data) = local_app_data_env {
+        if !local_app_data.is_empty() {
+            sdk_roots.push(PathBuf::from(local_app_data).join("Android").join("Sdk"));
+        }
+    }
+    if let Some(user_profile) = user_profile_env {
+        if !user_profile.is_empty() {
+            sdk_roots.push(
+                PathBuf::from(user_profile)
+                    .join("AppData")
+                    .join("Local")
+                    .join("Android")
+                    .join("Sdk"),
+            );
+        }
+    }
     if let Some(home) = home_env {
         if !home.is_empty() {
             sdk_roots.push(PathBuf::from(home).join("Library/Android/sdk"));
+            sdk_roots.push(PathBuf::from(home).join("Android").join("Sdk"));
         }
     }
     for root in sdk_roots {
@@ -234,7 +261,8 @@ mod tests {
 
     #[test]
     fn resolves_empty_to_default_adb() {
-        let resolved = resolve_default_adb_program_from_values(None, None, None, None, false);
+        let resolved =
+            resolve_default_adb_program_from_values(None, None, None, None, None, None, false);
         assert_eq!(resolved, "adb");
     }
 
@@ -288,6 +316,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             false,
         );
 
@@ -298,12 +328,58 @@ mod tests {
     }
 
     #[test]
+    fn resolves_windows_local_app_data_sdk_candidate() {
+        let temp_dir = test_temp_dir();
+        let platform_tools = temp_dir.join("Android").join("Sdk").join("platform-tools");
+        fs::create_dir_all(&platform_tools).expect("create sdk platform-tools");
+        let adb_path = platform_tools.join(adb_binary_name());
+        fs::write(&adb_path, b"adb").expect("create adb file");
+
+        let resolved = resolve_default_adb_program_from_values(
+            None,
+            None,
+            Some(temp_dir.as_os_str()),
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(resolved, adb_path.to_string_lossy());
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn resolves_linux_home_android_sdk_candidate() {
+        let temp_dir = test_temp_dir();
+        let platform_tools = temp_dir.join("Android").join("Sdk").join("platform-tools");
+        fs::create_dir_all(&platform_tools).expect("create linux sdk platform-tools");
+        let adb_path = platform_tools.join(adb_binary_name());
+        fs::write(&adb_path, b"adb").expect("create adb file");
+
+        let resolved = resolve_default_adb_program_from_values(
+            None,
+            Some(temp_dir.as_os_str()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(resolved, adb_path.to_string_lossy());
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn returns_adb_when_no_candidate_exists() {
         let temp_dir = test_temp_dir();
         let path_env = std::env::join_paths([temp_dir.as_path()]).expect("join PATH");
         let resolved = resolve_default_adb_program_from_values(
             Some(path_env.as_os_str()),
             Some(OsStr::new("/path/that/does/not/exist")),
+            None,
+            None,
             None,
             None,
             false,

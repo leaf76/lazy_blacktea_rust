@@ -1350,6 +1350,12 @@ fn build_device_detail_script_runs_getprop_first_with_early_exit() {
         )),
         "unexpected script prefix: {script}"
     );
+    assert!(
+        script.contains(
+            "dumpsys package com.google.android.gms | sed -n '/versionName/p; /versionName/q'"
+        ),
+        "expected GMS probe to filter versionName on-device: {script}"
+    );
 }
 
 #[test]
