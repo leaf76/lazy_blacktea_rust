@@ -34,7 +34,10 @@ pub fn extract_split_apks(path: &str) -> Result<SplitApkBundle, String> {
         let mut file = archive
             .by_index(i)
             .map_err(|err| format!("Failed to read bundle: {err}"))?;
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|err| format!("Invalid bundle entry name: {err}"))?
+            .into_owned();
         if !name.to_lowercase().ends_with(".apk") {
             continue;
         }
@@ -232,9 +235,11 @@ pub fn get_apk_info(path: &str) -> ApkInfo {
                     let mut apk_entries = Vec::new();
                     for idx in 0..archive.len() {
                         if let Ok(entry) = archive.by_index(idx) {
-                            let name = entry.name().to_string();
-                            if name.to_lowercase().ends_with(".apk") {
-                                apk_entries.push(name);
+                            if let Ok(name) = entry.name() {
+                                let name = name.into_owned();
+                                if name.to_lowercase().ends_with(".apk") {
+                                    apk_entries.push(name);
+                                }
                             }
                         }
                     }
@@ -276,7 +281,7 @@ pub fn get_apk_info(path: &str) -> ApkInfo {
                 let mut has_manifest = false;
                 for idx in 0..archive.len() {
                     if let Ok(entry) = archive.by_index(idx) {
-                        if entry.name() == "AndroidManifest.xml" {
+                        if entry.name().is_ok_and(|name| name == "AndroidManifest.xml") {
                             has_manifest = true;
                             break;
                         }

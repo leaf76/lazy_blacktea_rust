@@ -1131,7 +1131,10 @@ fn find_bugreport_entry(archive: &mut ZipArchive<File>) -> Result<usize, String>
         let file = archive
             .by_index(idx)
             .map_err(|err| format!("Failed to scan bugreport zip: {err}"))?;
-        let name = file.name().to_ascii_lowercase();
+        let name = file
+            .name()
+            .map_err(|err| format!("Failed to read bugreport zip entry name: {err}"))?
+            .to_ascii_lowercase();
         if name.ends_with(".txt") && (name.contains("bugreport") || name.contains("main_entry")) {
             let size = file.size();
             if size >= chosen_size {

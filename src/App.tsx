@@ -13,7 +13,6 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { createPortal } from "react-dom";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -24,7 +23,6 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { ApkInspectionCard } from "./ApkInspectionCard";
 import { CommandPaletteModal } from "./CommandPaletteModal";
-import { DeviceQuickFilterBar } from "./DeviceQuickFilterBar";
 import { DeviceUtilitiesPanel } from "./DeviceUtilitiesPanel";
 import { ShortcutsOverlayModal } from "./ShortcutsOverlayModal";
 import {
@@ -34,17 +32,9 @@ import {
   type CommandPaletteItem,
 } from "./commandPalette";
 import {
-  getNextKeyboardDeviceIndex,
   matchesDeviceQuickFilters,
-  toggleDeviceQuickFilter,
   type DeviceQuickFilterId,
 } from "./deviceQuickFilters";
-import {
-  DEFAULT_IMAGE_PREVIEW_ZOOM,
-  formatImageZoomLabel,
-  stepImageZoom,
-  type ImagePreviewZoomState,
-} from "./imagePreviewZoom";
 import {
   createLogcatRecordingSyncSession,
   finalizeLogcatRecordingSyncSession,
@@ -93,11 +83,8 @@ import type {
   PerfEvent,
   ScreenRecordStatus,
   TerminalEvent,
-  ThemeBackgroundFit,
-  ThemeBackgroundKind,
   ThemeBackgroundSource,
   ThemeStyleSettings,
-  UiDensity,
   ScrcpyInfo,
 } from "./types";
 import {
@@ -204,7 +191,6 @@ import {
   type LogTextChip,
   type LogTextChipKind,
 } from "./logTextFilters";
-import { formatBytes } from "./perf";
 import {
   buildDashboardCardViews,
   buildDefaultDashboardSettings,
@@ -260,11 +246,9 @@ import {
 } from "./taskNotificationRules";
 import {
   DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS,
-  DEVICE_ITEM_INFO_FIELD_OPTIONS,
   applyGroupAssignment,
   applyDeviceDetailPatch,
   buildDeviceInfoCopyItems,
-  buildDeviceItemInfoFields,
   buildDeviceGroupOptions,
   buildIosToolGuidanceRows,
   buildTopbarOverview,
@@ -275,8 +259,6 @@ import {
   flattenDeviceGroups,
   countAvailableIosTools,
   countIosToolsTotal,
-  formatIosRefreshHint,
-  formatIosTrustLabel,
   getIosConfigurationProfileEligibleSerials,
   getIosCrashReportEligibleSerials,
   formatPrimaryDeviceLabel,
@@ -295,7 +277,6 @@ import {
   type DeviceContextActionId,
   type DeviceInfoCopyItem,
   type DeviceItemInfoFieldId,
-  type DeviceQuickMenuAction,
   type DeviceQuickMenuSource,
 } from "./deviceUtils";
 import {
@@ -303,16 +284,12 @@ import {
   dismissRetainedDevice,
   markDevicesForReboot,
   reconcileDevicesWithRetention,
-  resolveDeviceDisplayStatus,
   tickRetentionRecords,
   type DeviceRetentionConfig,
   type DeviceRetentionRecord,
 } from "./deviceRetention";
-import { DeviceGroupPanel } from "./DeviceGroupPanel";
 import {
-  THEME_PRESETS,
   buildConfigWithThemeStyleUpdate,
-  buildDefaultThemeStyleSettings,
   buildThemeCssVariables,
   mergeSavedThemeBackgroundSourceIntoDraft,
   normalizeThemeFontSize,
@@ -320,8 +297,7 @@ import {
   normalizeUiDensity,
   resolveThemeCopy,
 } from "./theme";
-import { clampIosRefreshIntervalSec, clampRefreshIntervalSec, getIosAutoRefreshIntervalMs } from "./deviceAutoRefresh";
-import { parseIntegerSettingInput } from "./settingsInput";
+import { clampRefreshIntervalSec, getIosAutoRefreshIntervalMs } from "./deviceAutoRefresh";
 import {
   LOGCAT_INACTIVITY_EVENTS,
   LOGCAT_INACTIVITY_TIMEOUT_MS,
@@ -360,14 +336,12 @@ import {
 } from "./bugreportWindow";
 import {
   buildScreenRecordActionMeta,
-  buildScreenRecordDeviceStatus,
   buildScreenRecordSelectionStatus,
   type ScreenRecordPendingAction,
 } from "./screenRecord";
 import {
   buildDeviceCommandStatusStack,
   buildDeviceQuickActionButtonLabel,
-  buildDeviceQuickActionDeviceStatus,
   buildDeviceQuickActionSelectionStatus,
   type DeviceQuickActionKind,
   type DeviceQuickActionPhase,
@@ -452,7 +426,6 @@ import {
 import {
   LOGCAT_LINE_HEIGHT_PX,
   LOGCAT_OUTPUT_PADDING_PX,
-  LogcatOutput,
   type LogcatLineEntry,
 } from "./components/LogcatOutput";
 import { AdvancedToggleButton, LogLiveFilterBar } from "./components/LogLiveFilterBar";
@@ -467,16 +440,14 @@ import {
   PerformancePage,
   type PerfMonitorState,
 } from "./components/PerformancePage";
+import { AppsPage, getAppDisplayName, getAppIconKey } from "./pages/AppsPage";
+import type { DeviceCatalogActionEntry } from "./pages/DevicesPage";
+import { FilesPage, getFileKind } from "./pages/FilesPage";
+import type { UpdateUiStatus } from "./pages/SettingsPage";
 import appPackage from "../package.json";
 import "./App.css";
 
 type Toast = { id: string; message: string; tone: "info" | "error" };
-const HOST_OS_LABELS = {
-  linux: "Linux",
-  macos: "macOS",
-  windows: "Windows",
-  unknown: "Unknown",
-};
 type BugreportProgress = { serial: string; progress: number; trace_id: string };
 type FileTransferProgress = {
   serial: string;
@@ -488,16 +459,6 @@ type FileTransferProgress = {
 type ApkInstallEvent = ApkInstallEventPayload;
 type DeviceTrackingSnapshotPayload = { trace_id: string; devices: DeviceInfo[] };
 type RebootMode = "normal" | "recovery" | "bootloader";
-type DeviceCatalogActionEntry = DeviceQuickMenuAction & {
-  onSelect: () => void;
-};
-const SETTINGS_TABS = [
-  { id: "connectivity", label: "Connectivity" },
-  { id: "appearance", label: "Appearance" },
-  { id: "system", label: "System" },
-  { id: "operations", label: "Operations" },
-] as const;
-type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
 const ACTIONS_SHELL_TABS = [
   { id: "adb-shell", label: "ADB Shell" },
   { id: "shell", label: "Shell" },
@@ -631,6 +592,18 @@ const LazyBugreportPage = lazy(() => import("./BugreportMainPage"));
 const LazyAdbCommandLibraryPanel = lazy(async () => {
   const module = await import("./AdbCommandLibraryPanel");
   return { default: module.AdbCommandLibraryPanel };
+});
+const LazyDevicesPage = lazy(async () => {
+  const module = await import("./pages/DevicesPage");
+  return { default: module.DevicesPage };
+});
+const LazyLogcatPage = lazy(async () => {
+  const module = await import("./pages/LogcatPage");
+  return { default: module.LogcatPage };
+});
+const LazySettingsPage = lazy(async () => {
+  const module = await import("./pages/SettingsPage");
+  return { default: module.SettingsPage };
 });
 
 // Stable wrapper for route content. The per-route views are defined inside App() (so they close
@@ -872,16 +845,6 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [appVersion, setAppVersion] = useState(appPackage.version);
   const appVersionLabel = appVersion.trim() || "--";
-  type UpdateUiStatus =
-    | "idle"
-    | "checking"
-    | "up_to_date"
-    | "update_available"
-    | "publishing_pending"
-    | "installing"
-    | "installed"
-    | "installed_needs_restart"
-    | "error";
   const UPDATE_AUTO_CHECK_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
   const [updateStatus, setUpdateStatus] = useState<UpdateUiStatus>("idle");
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -965,8 +928,6 @@ function App() {
   const [logcatSearchRegex, setLogcatSearchRegex] = useState(false);
   const [logcatSearchCaseSensitive, setLogcatSearchCaseSensitive] = useState(false);
   const [logcatSearchOnly, setLogcatSearchOnly] = useState(false);
-  const [logcatSearchOpen, setLogcatSearchOpen] = useState(false);
-  const [logcatLiveFilterExpanded, setLogcatLiveFilterExpanded] = useState(false);
   const [logcatAutoScroll, setLogcatAutoScroll] = useState(true);
   const [logcatActiveFilterSummary, setLogcatActiveFilterSummary] = useState("");
   const [logcatLastExport, setLogcatLastExport] = useState("");
@@ -1247,10 +1208,6 @@ function App() {
   const [deviceQuickFilters, setDeviceQuickFilters] = useState<DeviceQuickFilterId[]>([]);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [shortcutsOverlayOpen, setShortcutsOverlayOpen] = useState(false);
-  const [filePreviewZoom, setFilePreviewZoom] = useState<ImagePreviewZoomState>(DEFAULT_IMAGE_PREVIEW_ZOOM);
-  useEffect(() => {
-    setFilePreviewZoom(DEFAULT_IMAGE_PREVIEW_ZOOM);
-  }, [filePreviewDevicePath]);
   const [logcatSyncSessionBySerial, setLogcatSyncSessionBySerial] = useState<
     Record<string, LogcatRecordingSyncSession>
   >({});
@@ -1377,7 +1334,6 @@ function App() {
   const [profileConfirmOpen, setProfileConfirmOpen] = useState(false);
   const [profileInstalling, setProfileInstalling] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>("connectivity");
   const [activeDashboardCardId, setActiveDashboardCardId] = useState<DashboardCardId>("overview");
   const [dashboardConfigOpen, setDashboardConfigOpen] = useState(false);
   const [dashboardDraft, setDashboardDraft] = useState<DashboardSettings>(buildDefaultDashboardSettings());
@@ -9481,176 +9437,6 @@ function App() {
     ? `${filteredFiles.length} of ${files.length} items`
     : `${files.length} items`;
 
-  type FileKind = "folder" | "apk" | "image" | "archive" | "text" | "file";
-
-  const getFileKind = (entry: DeviceFileEntry): FileKind => {
-    if (entry.is_dir) {
-      return "folder";
-    }
-    const lower = entry.name.toLowerCase();
-    const ext = lower.includes(".") ? lower.split(".").pop() ?? "" : "";
-    if (["apk", "apks", "xapk"].includes(ext)) {
-      return "apk";
-    }
-    if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "heic"].includes(ext)) {
-      return "image";
-    }
-    if (["zip", "tar", "gz", "tgz", "7z", "rar", "bz2", "xz"].includes(ext)) {
-      return "archive";
-    }
-    if (["txt", "log", "json", "xml", "md", "csv", "yaml", "yml"].includes(ext)) {
-      return "text";
-    }
-    return "file";
-  };
-
-  const getFileKindLabel = (kind: FileKind) => {
-    if (kind === "folder") {
-      return "Folder";
-    }
-    if (kind === "apk") {
-      return "APK";
-    }
-    if (kind === "image") {
-      return "Image";
-    }
-    if (kind === "archive") {
-      return "Archive";
-    }
-    if (kind === "text") {
-      return "Text";
-    }
-    return "File";
-  };
-
-  const FileTypeIcon = ({ kind }: { kind: FileKind }) => {
-    if (kind === "folder") {
-      return (
-        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
-          <path
-            d="M2.5 4.5h3.9l1.2 1.2H13.5c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1h-11c-.6 0-1-.4-1-1V5.5c0-.6.4-1 1-1Z"
-            fill="currentColor"
-            opacity="0.9"
-          />
-          <path
-            d="M1.5 6h13"
-            stroke="currentColor"
-            strokeOpacity="0.35"
-            strokeWidth="1"
-          />
-        </svg>
-      );
-    }
-
-    if (kind === "image") {
-      return (
-        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
-          <rect x="2.3" y="3" width="11.4" height="10" rx="2" fill="currentColor" opacity="0.25" />
-          <path
-            d="M4 11.2 6.2 8.8 8.1 10.7 10.1 8.5 12.3 11.2"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
-          <circle cx="6" cy="6.3" r="1" fill="currentColor" opacity="0.85" />
-        </svg>
-      );
-    }
-
-    if (kind === "archive") {
-      return (
-        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
-          <rect x="3" y="3.2" width="10" height="9.6" rx="2" fill="currentColor" opacity="0.25" />
-          <path
-            d="M6.2 4.7h3.6M6.2 6.3h3.6M7.8 7.9v4.1"
-            stroke="currentColor"
-            strokeWidth="1.1"
-            strokeLinecap="round"
-            opacity="0.9"
-          />
-          <path
-            d="M7.2 9.1h1.2"
-            stroke="currentColor"
-            strokeWidth="1.1"
-            strokeLinecap="round"
-            opacity="0.5"
-          />
-        </svg>
-      );
-    }
-
-    if (kind === "text") {
-      return (
-        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
-          <path
-            d="M4 2.5h5l3 3V13c0 .6-.4 1-1 1H4c-.6 0-1-.4-1-1V3.5c0-.6.4-1 1-1Z"
-            fill="currentColor"
-            opacity="0.22"
-          />
-          <path
-            d="M9 2.6V6h3"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.1"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            opacity="0.9"
-          />
-          <path
-            d="M5.1 7.6h6M5.1 9.4h6M5.1 11.2h4.2"
-            stroke="currentColor"
-            strokeWidth="1.1"
-            strokeLinecap="round"
-            opacity="0.7"
-          />
-        </svg>
-      );
-    }
-
-    if (kind === "apk") {
-      return (
-        <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
-          <rect x="5" y="2.7" width="6" height="10.6" rx="1.4" fill="currentColor" opacity="0.25" />
-          <path
-            d="M6.7 4.4h2.6"
-            stroke="currentColor"
-            strokeWidth="1.1"
-            strokeLinecap="round"
-            opacity="0.85"
-          />
-          <path
-            d="M6.8 12h2.4"
-            stroke="currentColor"
-            strokeWidth="1.1"
-            strokeLinecap="round"
-            opacity="0.6"
-          />
-        </svg>
-      );
-    }
-
-    return (
-      <svg className={`file-type-icon kind-${kind}`} viewBox="0 0 16 16" aria-hidden="true">
-        <path
-          d="M4 2.5h5l3 3V13c0 .6-.4 1-1 1H4c-.6 0-1-.4-1-1V3.5c0-.6.4-1 1-1Z"
-          fill="currentColor"
-          opacity="0.22"
-        />
-        <path
-          d="M9 2.6V6h3"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.1"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          opacity="0.9"
-        />
-      </svg>
-    );
-  };
-
   const openFilesContextMenu = (event: React.MouseEvent, entry: DeviceFileEntry) => {
     event.preventDefault();
     event.stopPropagation();
@@ -10485,44 +10271,7 @@ function App() {
     }
   };
 
-  const getAppDisplayName = (packageName: string) => {
-    const trimmed = packageName.trim();
-    if (!trimmed) {
-      return "(unknown)";
-    }
-    const last = trimmed.split(".").filter(Boolean).pop() ?? trimmed;
-    const normalized = last.replace(/[_-]+/g, " ").trim();
-    const words = normalized
-      .split(" ")
-      .filter(Boolean)
-      .slice(0, 3)
-      .map((word) => {
-        const lower = word.toLowerCase();
-        return lower.length ? lower[0].toUpperCase() + lower.slice(1) : lower;
-      });
-    const candidate = words.join(" ").trim();
-    return candidate || trimmed;
-  };
-
-  const getAppAvatarLetters = (packageName: string) => {
-    const label = getAppDisplayName(packageName);
-    const parts = label.split(" ").filter(Boolean);
-    const first = parts[0]?.[0] ?? label[0] ?? "A";
-    const second = parts.length > 1 ? parts[1]?.[0] : undefined;
-    const letters = `${first}${second ?? ""}`.toUpperCase();
-    return letters.slice(0, 2);
-  };
-
-  const getStableToneIndex = (value: string) => {
-    let sum = 0;
-    for (let i = 0; i < value.length; i += 1) {
-      sum = (sum + value.charCodeAt(i) * (i + 1)) % 1_000_000;
-    }
-    return sum % 6;
-  };
-
   const appsSerial = activeSerial;
-  const getAppIconKey = (serial: string, packageName: string) => `${serial}::${packageName}`;
 
   const pumpAppIconQueue = () => {
     const MAX_IN_FLIGHT = 2;
@@ -13712,9 +13461,6 @@ function App() {
   };
   const effectiveThemeStyle = normalizeThemeStyleSettings(config?.ui.theme_style);
   const themeCopy = resolveThemeCopy(effectiveThemeStyle);
-  const activeSettingsTabIndex = SETTINGS_TABS.findIndex((tab) => tab.id === activeSettingsTab);
-  const activeSettingsTabConfig =
-    SETTINGS_TABS[activeSettingsTabIndex >= 0 ? activeSettingsTabIndex : 0] ?? SETTINGS_TABS[0];
   const activeActionsShellTabIndex = ACTIONS_SHELL_TABS.findIndex((tab) => tab.id === activeActionsShellTab);
   const activeActionsShellTabConfig =
     ACTIONS_SHELL_TABS[activeActionsShellTabIndex >= 0 ? activeActionsShellTabIndex : 0] ??
@@ -13739,26 +13485,78 @@ function App() {
     setActiveActionsShellTab(nextTab.id);
     event.currentTarget.querySelector<HTMLButtonElement>(`[data-actions-shell-tab="${nextTab.id}"]`)?.focus();
   };
-  const handleSettingsTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
-      return;
+  const handleRestartAdbServer = useCallback(async () => {
+    setBusy(true);
+    try {
+      await adbServerControl("restart");
+      pushToast("ADB server restarted.", "info");
+      await refreshDevices();
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
     }
-
-    event.preventDefault();
-    const currentIndex = activeSettingsTabIndex >= 0 ? activeSettingsTabIndex : 0;
-    const nextIndex =
-      event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? SETTINGS_TABS.length - 1
-          : event.key === "ArrowLeft"
-            ? (currentIndex - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length
-            : (currentIndex + 1) % SETTINGS_TABS.length;
-    const nextTab = SETTINGS_TABS[nextIndex];
-
-    setActiveSettingsTab(nextTab.id);
-    event.currentTarget.querySelector<HTMLButtonElement>(`[data-settings-tab="${nextTab.id}"]`)?.focus();
-  };
+  }, [pushToast, refreshDevices]);
+  const handleKillAdbServer = useCallback(async () => {
+    setBusy(true);
+    try {
+      await adbServerControl("kill");
+      pushToast("ADB server stopped.", "info");
+    } catch (error) {
+      pushToast(formatError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [pushToast]);
+  const handleClearAdbInfo = useCallback(() => {
+    setAdbInfo(null);
+  }, []);
+  const handleOpenUpdateModal = useCallback(() => {
+    setUpdateModalOpen(true);
+  }, []);
+  const handleCopyTextWithToast = useCallback(
+    async (text: string, successMessage: string) => {
+      try {
+        await writeText(text);
+        pushToast(successMessage, "info");
+      } catch (error) {
+        pushToast(formatError(error), "error");
+      }
+    },
+    [pushToast],
+  );
+  const handleCopyAppPackage = useCallback(
+    async (packageName: string) => {
+      await handleCopyTextWithToast(packageName, "Package copied.");
+    },
+    [handleCopyTextWithToast],
+  );
+  const handleOpenRunShell = useCallback(() => {
+    setActiveActionsShellTab("adb-shell");
+    navigate("/actions");
+  }, [navigate]);
+  const handleAssignExistingGroup = useCallback(
+    (group: string) => {
+      setGroupName(group);
+      void handleAssignGroupWithName(group);
+    },
+    [handleAssignGroupWithName],
+  );
+  const handleCloseDeviceContextMenu = useCallback(() => {
+    setDeviceContextMenu(null);
+  }, []);
+  const handleCloseFilesContextMenu = useCallback(() => {
+    setFilesContextMenu(null);
+  }, []);
+  const handleCloseAppsContextMenu = useCallback(() => {
+    setAppsContextMenu(null);
+  }, []);
+  const handleOpenLogcatPresetUpdateModal = useCallback((name: string) => {
+    openPresetUpdateModal("logcat", name);
+  }, [openPresetUpdateModal]);
+  const handleOpenLogcatPresetDeleteModal = useCallback((name: string) => {
+    openPresetDeleteModal("logcat", name);
+  }, [openPresetDeleteModal]);
   const themeCssVariables = (config
     ? buildThemeCssVariables(config.ui, {
         isTauriRuntime: isTauriRuntime(),
@@ -14565,628 +14363,99 @@ function App() {
             <Route
               path="/devices"
               element={
-                <div className="page-section page-section-stretch devices-workspace">
-                  <div className="page-header">
-                    <div>
-                      <h1>Device Manager</h1>
-                      <p className="muted">Organize devices, groups, and connection status.</p>
-                    </div>
-                    <div className="page-actions">
-                      <button className="ghost" onClick={refreshDevices} disabled={busy}>
-                        Refresh Devices
-                      </button>
-                    </div>
-                  </div>
-                  <section
-                    className={`panel panel-stretch logcat-panel device-manager-panel${deviceContextMenu ? " is-context-menu-open" : ""}`}
-                  >
-                    <div className="panel-header">
-                      <div>
-                        <h2>Devices</h2>
-                        <span>
-                          {connectedDevicesCount} connected · {devices.length} total
-                        </span>
-                      </div>
-                      <div className="device-panel-meta">
-                        <span className="badge">{visibleDevices.length} visible</span>
-                        <span className="badge">{selectedCount} selected</span>
-                        {busy && <span className="status-pill busy">Refreshing…</span>}
-                      </div>
-                    </div>
-                    <div className="device-manager-content">
-                      <div className="device-manager-main">
-                        <div className="device-filter-bar">
-                          <div className="device-filter-main">
-                            <input
-                              ref={deviceSearchInputRef}
-                              value={searchText}
-                              onChange={(event) => setSearchText(event.target.value)}
-                              placeholder="Search by serial or model (/)"
-                              aria-label="Search devices"
-                            />
-                            <select
-                              value={groupFilter}
-                              onChange={(event) => setGroupFilter(event.target.value)}
-                              aria-label="Filter by group"
-                            >
-                              <option value="all">All groups</option>
-                              {groupOptions.map((group) => (
-                                <option key={group} value={group}>
-                                  {group}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="device-filter-actions">
-                            <div className="toggle-group device-selection-toggle" role="group" aria-label="Selection mode">
-                              <button
-                                type="button"
-                                className={`toggle${deviceSelectionMode === "single" ? " active" : ""}`}
-                                onClick={() => handleSetDeviceSelectionMode("single")}
-                                disabled={busy}
-                              >
-                                Single
-                              </button>
-                              <button
-                                type="button"
-                                className={`toggle${deviceSelectionMode === "multi" ? " active" : ""}`}
-                                onClick={() => handleSetDeviceSelectionMode("multi")}
-                                disabled={busy}
-                              >
-                                Multi
-                              </button>
-                            </div>
-                            <details className="device-field-picker">
-                              <summary aria-label="Customize device item info fields">
-                                Fields
-                                <span className="badge">{deviceItemInfoFieldIds.length}</span>
-                              </summary>
-                              <div className="device-field-picker-menu">
-                                <div className="device-field-picker-header">
-                                  <strong>Item Info</strong>
-                                  <button
-                                    type="button"
-                                    className="ghost"
-                                    onClick={handleResetDeviceItemInfoFields}
-                                    disabled={
-                                      deviceItemInfoFieldIds.length === DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS.length &&
-                                      DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS.every(
-                                        (fieldId, index) => fieldId === deviceItemInfoFieldIds[index],
-                                      )
-                                    }
-                                  >
-                                    Reset
-                                  </button>
-                                </div>
-                                <div className="device-field-options">
-                                  {DEVICE_ITEM_INFO_FIELD_OPTIONS.map((field) => {
-                                    const checked = selectedDeviceItemInfoFieldSet.has(field.id);
-                                    const isLastChecked = checked && deviceItemInfoFieldIds.length <= 1;
-                                    return (
-                                      <label key={field.id} className="device-field-option">
-                                        <input
-                                          type="checkbox"
-                                          checked={checked}
-                                          disabled={isLastChecked}
-                                          title={isLastChecked ? "At least one field must remain visible." : undefined}
-                                          onChange={(event) =>
-                                            handleToggleDeviceItemInfoField(field.id, event.target.checked)
-                                          }
-                                        />
-                                        <span>{field.label}</span>
-                                      </label>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            </details>
-                            <button onClick={selectAllVisible} disabled={busy}>
-                              Select Visible
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost"
-                              onClick={clearSelection}
-                              disabled={busy || devices.length === 0}
-                              title={devices.length === 0 ? "No devices detected." : "Keep one device selected."}
-                            >
-                              Keep One
-                            </button>
-                            <span className="device-selection-count muted">{selectedCount} selected</span>
-                          </div>
-                        </div>
-                        <DeviceQuickFilterBar
-                          activeFilters={deviceQuickFilters}
-                          onToggle={(id) =>
-                            setDeviceQuickFilters((prev) => toggleDeviceQuickFilter(prev, id))
-                          }
-                          onClearAll={clearDeviceFilters}
-                          hasAnyFilter={hasDeviceFilters}
-                        />
-                        <div ref={deviceListRef} className="device-list device-list-stretch">
-                          <div className="device-list-header">
-                            <span />
-                            <span>Identity</span>
-                            <span>Info</span>
-                            <span>Status & Actions</span>
-                          </div>
-                          {visibleDevices.length === 0 ? (
-                            <div className="device-list-empty" role="status" aria-live="polite">
-                              <strong>
-                                {busy
-                                  ? "Refreshing devices…"
-                                  : devices.length === 0
-                                    ? "No devices connected"
-                                    : "No devices match the current filters"}
-                              </strong>
-                              <p className="muted">
-                                {busy
-                                  ? "Please wait while the latest device status is loaded."
-                                  : devices.length === 0
-                                    ? "Connect a device or start an emulator, then refresh devices."
-                                    : "Adjust search text or group filter to broaden results."}
-                              </p>
-                              <div className="device-list-empty-actions">
-                                {hasDeviceFilters && !busy && (
-                                  <button type="button" className="ghost" onClick={clearDeviceFilters}>
-                                    Clear Filters
-                                  </button>
-                                )}
-                                {!busy && (
-                                  <button type="button" className="ghost" onClick={refreshDevices}>
-                                    Refresh Devices
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            visibleDevices.map((device, index) => {
-                              const serial = device.summary.serial;
-                              const detail = device.detail;
-                              const devicePlatform = getDevicePlatform(device);
-                              const modelLabel =
-                                detail?.device_name ?? detail?.model ?? device.summary.model ?? serial;
-                              const secondaryLabel =
-                                detail?.name && detail.name !== modelLabel ? detail.name : serial;
-                              const showSecondaryLabel = secondaryLabel !== modelLabel;
-                              const showSerialMeta = serial !== modelLabel && serial !== secondaryLabel;
-                              const itemInfoFields = buildDeviceItemInfoFields(device, deviceItemInfoFieldIds);
-                              const groupLabel = groupMap[serial] ?? null;
-                              const isSelected = selectedSerials.includes(serial);
-                              const isActive = serial === activeSerial;
-                              const displayStatus = resolveDeviceDisplayStatus(device, retentionMap[serial]);
-                              const isRetained = displayStatus.isRetained;
-                              const screenRecordDeviceStatus = buildScreenRecordDeviceStatus(
-                                serial,
-                                screenRecordStatusBySerial[serial],
-                                screenRecordPendingBySerial[serial],
-                                screenRecordStatusLoadingBySerial[serial] === true,
-                              );
-                              const deviceQuickActionStatus = buildDeviceQuickActionDeviceStatus(
-                                deviceQuickActionStatusBySerial[serial],
-                              );
-                              return (
-                                <div
-                                  key={serial}
-                                  className={`device-row${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}${isRetained ? " is-retained" : ""}`}
-                                  data-device-row-index={index}
-                                  data-device-state={device.summary.state}
-                                  onClick={(event) => handleDeviceRowSelect(event, serial, index)}
-                                  tabIndex={0}
-                                  onKeyDown={(event) => {
-                                    const target = event.target as HTMLElement | null;
-                                    if (target?.closest(".device-check") || target?.closest(".device-primary-action")) {
-                                      return;
-                                    }
-                                    const mod = event.ctrlKey || event.metaKey;
-                                    if (mod && event.key.toLowerCase() === "a") {
-                                      event.preventDefault();
-                                      if (event.shiftKey) {
-                                        clearSelection();
-                                      } else {
-                                        selectAllVisible();
-                                      }
-                                      return;
-                                    }
-                                    const nextIdx = getNextKeyboardDeviceIndex(
-                                      index,
-                                      event.key,
-                                      visibleDevices.length,
-                                    );
-                                    if (nextIdx !== null) {
-                                      event.preventDefault();
-                                      const nextRow = deviceListRef.current?.querySelector<HTMLElement>(
-                                        `[data-device-row-index="${nextIdx}"]`,
-                                      );
-                                      nextRow?.focus();
-                                      return;
-                                    }
-                                    if (event.key === " " || event.key === "Enter") {
-                                      event.preventDefault();
-                                      if (deviceSelectionMode === "multi") {
-                                        toggleDevice(serial);
-                                      } else {
-                                        setSelectedSerials([serial]);
-                                        handleSelectActiveSerial(serial);
-                                      }
-                                      lastSelectedIndexRef.current = index;
-                                      return;
-                                    }
-                                    openDeviceQuickContextMenuFromKeyboard(event, serial, {
-                                      source: "device_manager",
-                                      rowIndex: index,
-                                    });
-                                  }}
-                                  onContextMenu={(event) =>
-                                    openDeviceQuickContextMenuFromPointer(event, serial, {
-                                      source: "device_manager",
-                                      rowIndex: index,
-                                      showSelectionHint: true,
-                                    })
-                                  }
-                                >
-                                  <label className="device-check" onClick={(event) => event.stopPropagation()}>
-                                    <input
-                                      type="checkbox"
-                                      checked={isSelected}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        if (deviceSelectionMode === "multi") {
-                                          toggleDevice(serial);
-                                        } else {
-                                          setSelectedSerials((prev) =>
-                                            prev.length === 1 && prev[0] === serial ? prev : [serial],
-                                          );
-                                        }
-                                        lastSelectedIndexRef.current = index;
-                                      }}
-                                      onChange={() => {}}
-                                    />
-                                  </label>
-                                  <div className="device-cell device-identity">
-                                    <div className="device-identity-main">
-                                      <div className="device-identity-heading">
-                                        <strong>{modelLabel}</strong>
-                                        <span className="badge">{devicePlatform === "ios" ? "iOS" : "Android"}</span>
-                                        {isActive && <span className="device-active-badge">Primary</span>}
-                                        {groupLabel && <span className="group-tag">{groupLabel}</span>}
-                                      </div>
-                                      {showSecondaryLabel && (
-                                        <div className="device-identity-sub">
-                                          <span>{secondaryLabel}</span>
-                                        </div>
-                                      )}
-                                    </div>
-                                    {showSerialMeta && (
-                                      <div className="device-identity-meta">
-                                        <span className="device-serial">{serial}</span>
-                                      </div>
-                                    )}
-                                    {devicePlatform === "ios" && (
-                                      <div className="device-identity-meta">
-                                        <span className="muted">
-                                          {formatIosTrustLabel(device) ??
-                                            (config?.device.ios_auto_refresh_enabled
-                                              ? "iOS · auto-refresh on"
-                                              : "iOS · manual refresh")}
-                                        </span>
-                                      </div>
-                                    )}
-                                  </div>
-                                  <div className="device-cell device-capability">
-                                    <div className="device-info-fields" aria-label={`${modelLabel} device info`}>
-                                      {itemInfoFields.map((field) => (
-                                        <span key={field.id} className={`device-info-field device-info-field-${field.id}`}>
-                                          <span className="device-info-label">{field.label}</span>
-                                          <span className="device-info-value" title={field.value}>
-                                            {field.value}
-                                          </span>
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                  <div className="device-cell device-status-actions">
-                                    <div className="device-state">
-                                      <span
-                                        className={`status-pill ${displayStatus.tone}`}
-                                        title={displayStatus.title}
-                                      >
-                                        {displayStatus.kind === "rebooting" ? (
-                                          <span className="rebooting-indicator">
-                                            <span className="pulse-dot" />
-                                            {displayStatus.label}
-                                          </span>
-                                        ) : (
-                                          displayStatus.label
-                                        )}
-                                      </span>
-                                      {screenRecordDeviceStatus && (
-                                        <span
-                                          className={`status-pill screen-record-status ${screenRecordDeviceStatus.tone}`}
-                                          title={screenRecordDeviceStatus.title}
-                                        >
-                                          {screenRecordDeviceStatus.label}
-                                        </span>
-                                      )}
-                                      {deviceQuickActionStatus && (
-                                        <span
-                                          className={`status-pill device-quick-action-status ${deviceQuickActionStatus.tone}`}
-                                          title={deviceQuickActionStatus.title}
-                                        >
-                                          {deviceQuickActionStatus.label}
-                                        </span>
-                                      )}
-                                    </div>
-                                    <div className="device-actions">
-                                      {isRetained ? (
-                                        <button
-                                          type="button"
-                                          className="ghost danger-text"
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            handleDismissRetainedDevice(serial);
-                                          }}
-                                          title="Dismiss offline device from list"
-                                        >
-                                          Dismiss
-                                        </button>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          className={`ghost device-primary-action${isActive ? " is-primary" : ""}`}
-                                          onClick={(event) => {
-                                            event.stopPropagation();
-                                            if (!isActive) {
-                                              handleSelectActiveSerial(serial);
-                                            }
-                                          }}
-                                          disabled={busy || isActive}
-                                          aria-label={
-                                            isActive
-                                              ? `${modelLabel} is primary device`
-                                              : `Set ${modelLabel} as primary device`
-                                          }
-                                          title={isActive ? "Primary device" : "Set as primary device"}
-                                        >
-                                          {isActive ? "Primary" : "Set Primary"}
-                                        </button>
-                                      )}
-                                      <button
-                                        type="button"
-                                        className="ghost icon-only"
-                                        onClick={(e) => {
-                                          openDeviceQuickContextMenuFromPointer(e, serial, {
-                                            source: "device_manager",
-                                            rowIndex: index,
-                                          });
-                                        }}
-                                        disabled={busy}
-                                        title="Device actions"
-                                      >
-                                        ⋯
-                                      </button>
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })
-                          )}
-                        </div>
-                        {selectedCount > 0 && (
-                          <div className="device-command-bar" role="region" aria-label="Selected device actions">
-                            <div className="device-command-summary">
-                              <strong>{selectedCount} selected</strong>
-                              <span className="muted">
-                                {selectedOnlineCount}/{selectedCount} online
-                              </span>
-                              {deviceCommandStatusStack.length > 0 && (
-                                <div className="device-command-status-stack" aria-live="polite">
-                                  {deviceCommandStatusStack.map((status) => (
-                                    <span
-                                      key={status.id}
-                                      className={`device-command-status ${
-                                        status.id === "quick-action"
-                                          ? "device-quick-action-command-status"
-                                          : "screen-record-command-status"
-                                      } ${status.tone}`}
-                                    >
-                                      {status.text}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                            <div className="button-row device-command-actions">
-                              <button
-                                type="button"
-                                onClick={() => void handleQuickScreenshot()}
-                                disabled={busy || selectedCount === 0 || screenshotActionMeta.disabled}
-                              >
-                                {screenshotCommandLabel}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleQuickScreenRecord()}
-                                disabled={busy || selectedCount === 0 || screenRecordStatusLoading || screenRecordActionMeta.disabled}
-                              >
-                                {screenRecordCommandLabel}
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={(event) => openSelectedDeviceActionMenu(event, ["wifi_enable", "wifi_disable"])}
-                                disabled={busy || selectedCount === 0 || wifiActionMeta.eligibleSerials.length === 0}
-                              >
-                                WiFi…
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={(event) =>
-                                  openSelectedDeviceActionMenu(event, ["bluetooth_enable", "bluetooth_disable"])
-                                }
-                                disabled={busy || selectedCount === 0 || bluetoothActionMeta.eligibleSerials.length === 0}
-                              >
-                                Bluetooth…
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => void handleScrcpyLaunch()}
-                                disabled={busy || selectedCount === 0 || !hasSelectedAndroidActionTarget}
-                              >
-                                {mirrorCommandLabel}
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => {
-                                  setActiveActionsShellTab("adb-shell");
-                                  navigate("/actions");
-                                }}
-                                disabled={busy || selectedCount === 0 || !hasSelectedAndroidActionTarget}
-                              >
-                                Run Shell
-                              </button>
-                              <button type="button" className="danger" onClick={requestRebootConfirm} disabled={busy || selectedCount === 0 || rebootActionMeta.disabled}>
-                                {rebootDirectCommandLabel}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      <DeviceGroupPanel
-                        busy={busy}
-                        selectedDevices={selectedDevices}
-                        selectedCount={selectedCount}
-                        selectedOnlineCount={selectedOnlineCount}
-                        groupMap={groupMap}
-                        groupName={groupName}
-                        groupFilter={groupFilter}
-                        groups={groupPanelGroups}
-                        onGroupNameChange={setGroupName}
-                        onAssignGroup={() => void handleAssignGroup()}
-                        onAssignExistingGroup={(group) => {
-                          setGroupName(group);
-                          void handleAssignGroupWithName(group);
-                        }}
-                        onClearAssignment={() => void handleClearGroupAssignment()}
-                        onApplyFilter={applyDeviceGroupFilter}
-                        onClearFilter={clearDeviceGroupFilter}
-                      />
-                    </div>
-                    {deviceContextMenu && typeof document !== "undefined" && createPortal(
-                      <>
-                        <div
-                          className="context-menu-backdrop"
-                          onClick={() => setDeviceContextMenu(null)}
-                        />
-                        <div
-                          ref={deviceContextMenuRef}
-                          className="context-menu context-menu-scrollable"
-                          style={{
-                            top: deviceContextMenuPosition?.top ?? deviceContextMenu.y,
-                            left: deviceContextMenuPosition?.left ?? deviceContextMenu.x,
-                            maxHeight: deviceContextMenuPosition?.maxHeight,
-                            width: 230,
-                          }}
-                        >
-                          <div className="context-menu-header">
-                            <span className="context-menu-header-title">{deviceContextMenuHeaderTitle}</span>
-                            <span className="context-menu-header-sub">{deviceContextMenuHeaderSub}</span>
-                          </div>
-                          {deviceContextMenuSections.map((section, index) => (
-                            <div key={section.id}>
-                              {index > 0 && <div className="context-menu-sep" />}
-                              <div className="context-menu-section-label">{section.title}</div>
-                              {section.actions.map((action) => {
-                                const catalogAction = deviceActionCatalogMap.get(action.id);
-                                const disabled =
-                                  action.disabled ||
-                                  (action.id === "open_output" && !deviceContextMenu.outputPath) ||
-                                  (!catalogAction && action.id !== "open_output");
-                                const hasSubmenu = action.id === "copy_device_info";
-                                return (
-                                  <button
-                                    key={action.id}
-                                    type="button"
-                                    className={`context-menu-item${action.tone === "danger" ? " danger" : ""}${hasSubmenu ? " has-submenu" : ""}`}
-                                    onClick={(event) => {
-                                      if (hasSubmenu) {
-                                        event.stopPropagation();
-                                        openDeviceInfoCopySubmenu(event.currentTarget);
-                                        return;
-                                      }
-                                      if (action.id === "open_output") {
-                                        if (deviceContextMenu.outputPath) {
-                                          void openExternalPath(deviceContextMenu.outputPath);
-                                        }
-                                      } else {
-                                        catalogAction?.onSelect();
-                                      }
-                                      setDeviceContextMenu(null);
-                                    }}
-                                    disabled={disabled}
-                                  >
-                                    {hasSubmenu ? (
-                                      <>
-                                        <span className="context-menu-item-label">{action.label}</span>
-                                        <span className="context-menu-item-caret" aria-hidden="true">
-                                          ›
-                                        </span>
-                                      </>
-                                    ) : (
-                                      action.label
-                                    )}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          ))}
-                        </div>
-                        {deviceContextSubmenu && (
-                          <div
-                            ref={deviceContextSubmenuRef}
-                            className="context-menu context-menu-submenu"
-                            style={{
-                              top: deviceContextSubmenuPosition?.top ?? deviceContextSubmenu.y,
-                              left: deviceContextSubmenuPosition?.left ?? deviceContextSubmenu.x,
-                              maxHeight: deviceContextSubmenuPosition?.maxHeight,
-                              width: 250,
-                            }}
-                          >
-                            <div className="context-menu-header">
-                              <span className="context-menu-header-title">{deviceContextSubmenu.title}</span>
-                              <span className="context-menu-header-sub">
-                                {deviceContextMenuCopyItems.length
-                                  ? `${deviceContextMenuCopyItems.length} copy options`
-                                  : "Copy individual fields"}
-                              </span>
-                            </div>
-                            {deviceContextSubmenu.items.map((item) => (
-                              <button
-                                key={item.id}
-                                type="button"
-                                className="context-menu-item"
-                                onClick={() => {
-                                  void copyDeviceInfoValue(
-                                    item.value,
-                                    item.id === "all" ? "Device info copied." : `${item.label} copied.`,
-                                  );
-                                  setDeviceContextMenu(null);
-                                }}
-                              >
-                                {item.label}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </>,
-                      document.body,
-                    )}
-                  </section>
-                </div>
+                <Suspense fallback={null}>
+                  <LazyDevicesPage
+                  busy={busy}
+                  config={config}
+                  devices={devices}
+                  visibleDevices={visibleDevices}
+                  selectedDevices={selectedDevices}
+                  connectedDevicesCount={connectedDevicesCount}
+                  selectedCount={selectedCount}
+                  selectedOnlineCount={selectedOnlineCount}
+                  selectedSerials={selectedSerials}
+                  setSelectedSerials={setSelectedSerials}
+                  activeSerial={activeSerial}
+                  searchText={searchText}
+                  onSearchTextChange={setSearchText}
+                  deviceSearchInputRef={deviceSearchInputRef}
+                  groupFilter={groupFilter}
+                  onGroupFilterChange={setGroupFilter}
+                  groupOptions={groupOptions}
+                  groupMap={groupMap}
+                  groupName={groupName}
+                  onGroupNameChange={setGroupName}
+                  groupPanelGroups={groupPanelGroups}
+                  deviceSelectionMode={deviceSelectionMode}
+                  onSetDeviceSelectionMode={handleSetDeviceSelectionMode}
+                  deviceItemInfoFieldIds={deviceItemInfoFieldIds}
+                  selectedDeviceItemInfoFieldSet={selectedDeviceItemInfoFieldSet}
+                  onResetDeviceItemInfoFields={handleResetDeviceItemInfoFields}
+                  onToggleDeviceItemInfoField={handleToggleDeviceItemInfoField}
+                  onRefreshDevices={refreshDevices}
+                  onSelectAllVisible={selectAllVisible}
+                  onClearSelection={clearSelection}
+                  deviceQuickFilters={deviceQuickFilters}
+                  setDeviceQuickFilters={setDeviceQuickFilters}
+                  onClearDeviceFilters={clearDeviceFilters}
+                  hasDeviceFilters={hasDeviceFilters}
+                  deviceListRef={deviceListRef}
+                  lastSelectedIndexRef={lastSelectedIndexRef}
+                  retentionMap={retentionMap}
+                  screenRecordStatusBySerial={screenRecordStatusBySerial}
+                  screenRecordPendingBySerial={screenRecordPendingBySerial}
+                  screenRecordStatusLoadingBySerial={screenRecordStatusLoadingBySerial}
+                  deviceQuickActionStatusBySerial={deviceQuickActionStatusBySerial}
+                  onDeviceRowSelect={handleDeviceRowSelect}
+                  onToggleDevice={toggleDevice}
+                  onSelectActiveSerial={handleSelectActiveSerial}
+                  onDismissRetainedDevice={handleDismissRetainedDevice}
+                  onOpenDeviceQuickContextMenuFromKeyboard={openDeviceQuickContextMenuFromKeyboard}
+                  onOpenDeviceQuickContextMenuFromPointer={openDeviceQuickContextMenuFromPointer}
+                  deviceCommandStatusStack={deviceCommandStatusStack}
+                  onQuickScreenshot={handleQuickScreenshot}
+                  screenshotDisabled={busy || selectedCount === 0 || screenshotActionMeta.disabled}
+                  screenshotCommandLabel={screenshotCommandLabel}
+                  onQuickScreenRecord={handleQuickScreenRecord}
+                  screenRecordDisabled={
+                    busy ||
+                    selectedCount === 0 ||
+                    screenRecordStatusLoading ||
+                    screenRecordActionMeta.disabled
+                  }
+                  screenRecordCommandLabel={screenRecordCommandLabel}
+                  onOpenSelectedDeviceActionMenu={openSelectedDeviceActionMenu}
+                  wifiEligibleCount={wifiActionMeta.eligibleSerials.length}
+                  bluetoothEligibleCount={bluetoothActionMeta.eligibleSerials.length}
+                  onScrcpyLaunch={handleScrcpyLaunch}
+                  hasSelectedAndroidActionTarget={hasSelectedAndroidActionTarget}
+                  mirrorCommandLabel={mirrorCommandLabel}
+                  onOpenRunShell={handleOpenRunShell}
+                  onRequestRebootConfirm={requestRebootConfirm}
+                  rebootDisabled={busy || selectedCount === 0 || rebootActionMeta.disabled}
+                  rebootDirectCommandLabel={rebootDirectCommandLabel}
+                  onAssignGroup={handleAssignGroup}
+                  onAssignExistingGroup={handleAssignExistingGroup}
+                  onClearGroupAssignment={handleClearGroupAssignment}
+                  onApplyDeviceGroupFilter={applyDeviceGroupFilter}
+                  onClearDeviceGroupFilter={clearDeviceGroupFilter}
+                  deviceContextMenu={deviceContextMenu}
+                  deviceContextMenuPosition={deviceContextMenuPosition}
+                  deviceContextMenuRef={deviceContextMenuRef}
+                  onCloseDeviceContextMenu={handleCloseDeviceContextMenu}
+                  deviceContextMenuHeaderTitle={deviceContextMenuHeaderTitle}
+                  deviceContextMenuHeaderSub={deviceContextMenuHeaderSub}
+                  deviceContextMenuSections={deviceContextMenuSections}
+                  deviceActionCatalogMap={deviceActionCatalogMap}
+                  onOpenDeviceInfoCopySubmenu={openDeviceInfoCopySubmenu}
+                  onOpenExternalPath={openExternalPath}
+                  deviceContextSubmenu={deviceContextSubmenu}
+                  deviceContextSubmenuPosition={deviceContextSubmenuPosition}
+                  deviceContextSubmenuRef={deviceContextSubmenuRef}
+                  deviceContextMenuCopyItemsCount={deviceContextMenuCopyItems.length}
+                  onCopyDeviceInfoValue={copyDeviceInfoValue}
+                />
+                </Suspense>
               }
             />
             <Route
@@ -15788,952 +15057,143 @@ function App() {
                 </div>
               }
             />
-	            <Route
-	              path="/files"
-	              element={
-	                <div className="page-section files-page page-section-stretch files-workspace">
-	                  {filesDropActive && (
-	                    <div className="file-drop-overlay">
-	                      <div className="file-drop-overlay-inner">
-	                        <strong>Drop files to upload</strong>
-	                        <span className="muted">Target: {filesPath}</span>
-	                      </div>
-	                    </div>
-	                  )}
-                  <div className="page-header">
-                    <div>
-                      <h1>File Explorer</h1>
-                      <p className="muted">Browse device storage, download files, and upload files.</p>
-                    </div>
-                  </div>
-	                  <section className="panel panel-stretch files-panel">
-	                    <div className="panel-header">
-	                      <h2>Device Files</h2>
-	                      <span>{selectedSummaryLabel}</span>
-	                    </div>
-	                    {singleSelectionWarning && (
-	                      <div className="inline-alert info">
-	                        <strong>Primary device in use</strong>
-	                        <span>{singleSelectionWarningMessage}</span>
-	                      </div>
-	                    )}
-	                    <div className="form-row files-nav-row">
-	                      <label>Device path</label>
-                        <div className="files-nav-controls">
-	                      <button
-                          className="ghost files-up-button"
-                          onClick={handleFilesGoUp}
-                          disabled={busy || !activeSerial}
-                          title="Go to parent directory"
-                          aria-label="Go to parent directory"
-                        >
-                          Up
-                        </button>
-	                      <input
-                          className="files-path-input"
-	                        value={filesPath}
-	                        onChange={(event) => setFilesPath(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key !== "Enter") {
-                              return;
-                            }
-                            event.preventDefault();
-                            if (busy || !activeSerial) {
-                              return;
-                            }
-                            void handleFilesRefresh();
-                          }}
-                          placeholder="/sdcard"
-                        />
-                        <button
-                          className="files-go-button"
-                          onClick={() => void handleFilesRefresh()}
-                          disabled={busy || !activeSerial}
-                        >
-                          Go
-                        </button>
-                        </div>
-                      </div>
-                      <div className="form-row files-action-row">
-                        <label>Actions</label>
-                        <div className="files-action-controls">
-                          <button
-                            className="ghost"
-                            onClick={openFilesMkdirModal}
-                            disabled={busy || !activeSerial}
-                          >
-                            New folder
-                          </button>
-                          <button onClick={handleFileUpload} disabled={busy || !activeSerial}>
-                            Upload
-                          </button>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={filesOverwriteEnabled}
-                              onChange={(event) => setFilesOverwriteEnabled(event.target.checked)}
-                            />
-                            Overwrite existing
-                          </label>
-                        </div>
-                      </div>
-                    <div className="file-breadcrumbs">
-                      <span className="file-breadcrumbs-label">Breadcrumbs</span>
-                      <div className="file-breadcrumbs-trail">
-                        {fileBreadcrumbs.map((crumb, index) => (
-                          <span key={crumb.path} className="file-breadcrumbs-item">
-                            <button
-                              className="ghost file-breadcrumb"
-                              onClick={() => void handleFilesRefresh(crumb.path)}
-                              disabled={busy || !activeSerial}
-                              aria-label={`Go to ${crumb.path}`}
-                            >
-                              {crumb.label}
-                            </button>
-                            {index < fileBreadcrumbs.length - 1 && (
-                              <span className="file-breadcrumbs-sep">/</span>
-                            )}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="form-row file-search-row">
-                      <label>Quick filter</label>
-                      <input
-                        value={filesSearchQuery}
-                        onChange={(event) => setFilesSearchQuery(event.target.value)}
-                        placeholder="Type to filter by name or path"
-                      />
-                      <button
-                        className="ghost"
-                        onClick={() => setFilesSearchQuery("")}
-                        disabled={busy || !filesSearchQuery.trim()}
-                      >
-                        Clear filter
-                      </button>
-                      <div className="toggle-group files-view-toggle" role="group" aria-label="File view mode">
-                        <button
-                          type="button"
-                          className={`toggle${filesViewMode === "list" ? " active" : ""}`}
-                          onClick={() => setFilesViewMode("list")}
-                          title="List view"
-                        >
-                          List
-                        </button>
-                        <button
-                          type="button"
-                          className={`toggle${filesViewMode === "grid" ? " active" : ""}`}
-                          onClick={() => setFilesViewMode("grid")}
-                          title="Grid view"
-                        >
-                          Icons
-                        </button>
-                      </div>
-                      <span className="muted file-filter-meta">{fileFilterSummary}</span>
-                    </div>
-	                    <div className="split files-split split-stretch">
-                      <div
-                        className={filesViewMode === "grid" ? "file-grid" : "file-list"}
-                        ref={filesListRef}
-                      >
-                        {files.length === 0 ? (
-                          <p className="muted">No files loaded. Press Enter in Device path or click Go.</p>
-                        ) : filteredFiles.length === 0 ? (
-                          <p className="muted">No matches. Clear the filter to see all items.</p>
-                        ) : (
-                          visibleFiles.map((entry) => {
-                            const kind = getFileKind(entry);
-                            const kindLabel = getFileKindLabel(kind);
-                            const sizeLabel = entry.size_bytes == null ? "—" : formatBytes(entry.size_bytes);
-                            const isSelected = isFileSelected(entry.path);
-
-                            if (filesViewMode === "grid") {
-                              return (
-                                <div
-                                  key={entry.path}
-                                  className={`file-card${isSelected ? " is-selected" : ""}`}
-                                  onContextMenu={(event) => openFilesContextMenu(event, entry)}
-                                  onDoubleClick={() => {
-                                    if (busy || !activeSerial) {
-                                      return;
-                                    }
-                                    if (entry.is_dir) {
-                                      void handleFilesRefresh(entry.path);
-                                    } else {
-                                      void handleFilePull(entry);
-                                    }
-                                  }}
-                                   onClick={(event) => {
-                                     if (event.ctrlKey || event.metaKey) {
-                                       toggleFileSelected(entry.path, !isSelected);
-                                       return;
-                                     }
-                                     setFilesSelectedPaths((prev) =>
-                                       prev.length === 1 && prev[0] === entry.path ? prev : [entry.path],
-                                     );
-                                   }}
-                                >
-                                  <div className="file-card-check">
-                                    <input
-                                      type="checkbox"
-                                      checked={isSelected}
-                                      onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
-                                      disabled={busy}
-                                      onClick={(e) => e.stopPropagation()}
-                                    />
-                                  </div>
-                                  <div className={`file-card-icon kind-${kind}`} title={kindLabel}>
-                                    <FileTypeIcon kind={kind} />
-                                  </div>
-                                  <div className="file-card-name" title={entry.name}>
-                                    {entry.name}
-                                  </div>
-                                  <button
-                                    className="ghost icon-only file-card-menu"
-                                    onClick={(event) => openFilesContextMenu(event, entry)}
-                                    title="Actions"
-                                  >
-                                    ⋯
-                                  </button>
-                                </div>
-                              );
-                            }
-
-                            return (
-                              <div
-                                key={entry.path}
-                                className={`file-row${isSelected ? " is-selected" : ""}`}
-                                onContextMenu={(event) => openFilesContextMenu(event, entry)}
-                                onDoubleClick={() => {
-                                  if (busy || !activeSerial) {
-                                    return;
-                                  }
-                                  if (entry.is_dir) {
-                                    void handleFilesRefresh(entry.path);
-                                  } else {
-                                    void handleFilePull(entry);
-                                  }
-                                }}
-                                onClick={(event) => {
-                                  if (event.ctrlKey || event.metaKey) {
-                                    toggleFileSelected(entry.path, !isSelected);
-                                    return;
-                                  }
-                                  setFilesSelectedPaths((prev) =>
-                                    prev.length === 1 && prev[0] === entry.path ? prev : [entry.path],
-                                  );
-                                }}
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={isSelected}
-                                  onChange={(event) => toggleFileSelected(entry.path, event.target.checked)}
-                                  disabled={busy}
-                                  aria-label={`Select ${entry.name}`}
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                                <div className={`file-row-icon kind-${kind}`} title={kindLabel} aria-hidden="true">
-                                  <FileTypeIcon kind={kind} />
-                                </div>
-                                <div className="file-row-main">
-                                  <strong title={entry.path}>{entry.name}</strong>
-                                  <p className="muted">{kindLabel}</p>
-                                </div>
-                                <div className="file-row-meta">
-                                  {entry.is_dir ? <span className="muted">—</span> : <span className="file-row-size">{sizeLabel}</span>}
-                                </div>
-                                <div className="file-row-actions">
-                                  <button
-                                    type="button"
-                                    className="ghost icon-only"
-                                    onClick={(event) => openFilesContextMenu(event, entry)}
-                                    disabled={busy}
-                                    title="File actions"
-                                    aria-label={`Actions for ${entry.name}`}
-                                  >
-                                    ⋯
-                                  </button>
-                                </div>
-                              </div>
-                            );
-                          })
-                        )}
-                        {files.length > 0 && filteredFiles.length > 0 && (
-                          <div className="file-list-footer">
-                            <span className="muted">
-                              Showing {visibleFiles.length}/{filteredFiles.length}
-                            </span>
-                            {canLoadMoreFiles ? (
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={loadMoreFiles}
-                                disabled={busy}
-                              >
-                                Load more
-                              </button>
-                            ) : (
-                              <span className="muted">All loaded</span>
-                            )}
-                          </div>
-                        )}
-							<div className="file-load-more-sentinel" ref={filesLoadMoreSentinelRef} />
-                      </div>
-                      <div className="preview-panel">
-                        <h3>Preview</h3>
-
-                        {(() => {
-                          if (!activeSerial) {
-                            return <p className="muted">Select a device to preview files.</p>;
-                          }
-                          if (filesSelectedPaths.length !== 1) {
-                            return <p className="muted">Select one file to preview.</p>;
-                          }
-                          const selectedPath = filesSelectedPaths[0];
-                          const entry = files.find((item) => item.path === selectedPath);
-                          if (!entry) {
-                            return <p className="muted">Select a file to preview.</p>;
-                          }
-                          if (entry.is_dir) {
-                            return <p className="muted">Folder selected. Double click to open.</p>;
-                          }
-
-                          const kind = getFileKind(entry);
-                          const canPreview = kind === "image" || kind === "text";
-                          const previewMatches = filePreview && filePreviewDevicePath === entry.path;
-                          const isImage = previewMatches && filePreview.mime_type.startsWith("image/");
-                          const imageSrc = isImage
-                            ? filePreview.preview_data_url ?? (isTauriRuntime() ? convertFileSrc(filePreview.local_path) : null)
-                            : null;
-
-                          if (!previewMatches) {
-                            return (
-                              <div className="preview-empty">
-                                <p className="muted">
-                                  {canPreview
-                                    ? "Preview is available for this file."
-                                    : "Preview is available for image and text files."}
-                                </p>
-                                <div className="button-row compact">
-                                  <button
-                                    onClick={() => void handleFilePreview(entry)}
-                                    disabled={busy || !canPreview}
-                                  >
-                                    Preview
-                                  </button>
-                                  <button
-                                    className="ghost"
-                                    onClick={() => void handleFilePull(entry)}
-                                    disabled={busy}
-                                  >
-                                    Download
-                                  </button>
-                                </div>
-                              </div>
-                            );
-                          }
-
-                          return (
-                            <>
-                              {isImage ? (
-                                imageSrc ? (
-                                  <div className="stack" style={{ gap: 8 }}>
-                                    <div className="button-row compact">
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => setFilePreviewZoom((prev) => stepImageZoom(prev, "out"))}
-                                      >
-                                        Zoom -
-                                      </button>
-                                      <span className="badge">{formatImageZoomLabel(filePreviewZoom)}</span>
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => setFilePreviewZoom((prev) => stepImageZoom(prev, "in"))}
-                                      >
-                                        Zoom +
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => setFilePreviewZoom({ mode: "custom", scale: 1 })}
-                                      >
-                                        100%
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => setFilePreviewZoom(DEFAULT_IMAGE_PREVIEW_ZOOM)}
-                                      >
-                                        Fit
-                                      </button>
-                                    </div>
-                                    <div
-                                      style={{
-                                        overflow: "auto",
-                                        maxHeight: 420,
-                                        borderRadius: 8,
-                                      }}
-                                    >
-                                      <img
-                                        className="preview-image"
-                                        src={imageSrc}
-                                        alt={entry.name}
-                                        style={
-                                          filePreviewZoom.mode === "custom"
-                                            ? {
-                                                maxWidth: "none",
-                                                maxHeight: "none",
-                                                width: `${Math.round(filePreviewZoom.scale * 100)}%`,
-                                              }
-                                            : undefined
-                                        }
-                                      />
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <p className="muted">Image preview requires the desktop app runtime.</p>
-                                )
-                              ) : filePreview.is_text && filePreview.preview_text ? (
-                                <pre>{filePreview.preview_text}</pre>
-                              ) : (
-                                <p className="muted">Preview not available ({filePreview.mime_type}).</p>
-                              )}
-
-                              <div className="button-row compact">
-                                <button onClick={() => void openExternalPath(filePreview.local_path)} disabled={busy}>
-                                  Open Externally
-                                </button>
-                                <button className="ghost" onClick={() => void handleFilePull(entry)} disabled={busy}>
-                                  Download
-                                </button>
-                              </div>
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </div>
-                    <div className="file-bulk-bar">
-                      <span className="muted">{fileSelectionLabel}</span>
-                      <div className="file-bulk-actions">
-                        <button
-                          className="ghost"
-                          onClick={() => setFilesSelectedPaths([])}
-                          disabled={busy || !activeSerial || !hasFileSelection}
-                        >
-                          Clear selection
-                        </button>
-                        <button
-                          onClick={handleFilesPullSelected}
-                          disabled={busy || !activeSerial || !hasFileSelection}
-                        >
-                          Download selected
-                        </button>
-                        <button
-                          className="danger"
-                          onClick={openFilesDeleteSelectedModal}
-                          disabled={busy || !activeSerial || !hasFileSelection}
-                        >
-                          Delete selected
-                        </button>
-                      </div>
-                    </div>
-
-                    {filesContextMenu && (
-                      <>
-                        <div className="context-menu-backdrop" onClick={() => setFilesContextMenu(null)} />
-                        <div
-                          ref={filesContextMenuRef}
-                          className="context-menu context-menu-scrollable"
-                          style={{
-                            top: filesContextMenuPosition?.top ?? filesContextMenu.y,
-                            left: filesContextMenuPosition?.left ?? Math.max(10, filesContextMenu.x - 160),
-                            maxHeight: filesContextMenuPosition?.maxHeight,
-                            width: 280,
-                          }}
-                        >
-                          {(() => {
-                            const entry = filesContextMenu.entry;
-                            const kind = getFileKind(entry);
-                            const kindLabel = getFileKindLabel(kind);
-                            const sizeLabel = entry.is_dir
-                              ? "—"
-                              : entry.size_bytes == null
-                                ? "—"
-                                : formatBytes(entry.size_bytes);
-                            const modifiedLabel = entry.modified_at ? entry.modified_at : "";
-                            const previewable = !entry.is_dir && (kind === "image" || kind === "text");
-
-                            return (
-                              <>
-                                <div className="context-menu-header">
-                                  <div className="context-menu-header-title">{entry.name}</div>
-                                  <div className="context-menu-header-sub">
-                                    {kindLabel} · {sizeLabel}
-                                    {modifiedLabel ? ` · ${modifiedLabel}` : ""}
-                                  </div>
-                                  <div className="context-menu-header-sub">{entry.path}</div>
-                                </div>
-                                <div className="context-menu-sep" />
-
-                                {entry.is_dir ? (
-                                  <button
-                                    type="button"
-                                    className="context-menu-item"
-                                    onClick={() => {
-                                      setFilesContextMenu(null);
-                                      void handleFilesRefresh(entry.path);
-                                    }}
-                                    disabled={busy || !activeSerial}
-                                  >
-                                    Open folder
-                                  </button>
-                                ) : (
-                                  <>
-                                    <button
-                                      type="button"
-                                      className="context-menu-item"
-                                      onClick={() => {
-                                        setFilesContextMenu(null);
-                                        void handleFilePull(entry);
-                                      }}
-                                      disabled={busy || !activeSerial}
-                                    >
-                                      Download
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="context-menu-item"
-                                      onClick={() => {
-                                        setFilesContextMenu(null);
-                                        void handleFilePreview(entry);
-                                      }}
-                                      disabled={busy || !activeSerial || !previewable}
-                                      title={previewable ? "" : "Preview is supported for image and text files."}
-                                    >
-                                      Preview
-                                    </button>
-                                  </>
-                                )}
-
-                                <button
-                                  type="button"
-                                  className="context-menu-item"
-                                  onClick={() => {
-                                    openFilesRenameModal(entry);
-                                    setFilesContextMenu(null);
-                                  }}
-                                  disabled={busy || !activeSerial}
-                                >
-                                  Rename
-                                </button>
-                                <button
-                                  type="button"
-                                  className="context-menu-item danger"
-                                  onClick={() => {
-                                    openFilesDeleteModal(entry);
-                                    setFilesContextMenu(null);
-                                  }}
-                                  disabled={busy || !activeSerial}
-                                >
-                                  Delete
-                                </button>
-
-                                <div className="context-menu-sep" />
-
-                                <button
-                                  type="button"
-                                  className="context-menu-item"
-                                  onClick={() => {
-                                    const path = entry.path;
-                                    void (async () => {
-                                      try {
-                                        await writeText(path);
-                                        pushToast("Path copied.", "info");
-                                      } catch (error) {
-                                        pushToast(formatError(error), "error");
-                                      }
-                                    })();
-                                    setFilesContextMenu(null);
-                                  }}
-                                >
-                                  Copy path
-                                </button>
-                                <button
-                                  type="button"
-                                  className="context-menu-item"
-                                  onClick={() => {
-                                    const name = entry.name;
-                                    void (async () => {
-                                      try {
-                                        await writeText(name);
-                                        pushToast("Name copied.", "info");
-                                      } catch (error) {
-                                        pushToast(formatError(error), "error");
-                                      }
-                                    })();
-                                    setFilesContextMenu(null);
-                                  }}
-                                >
-                                  Copy name
-                                </button>
-
-                                <div className="context-menu-sep" />
-
-                                <button
-                                  type="button"
-                                  className="context-menu-item"
-                                  onClick={() => {
-                                    pushToast(
-                                      `${kindLabel}: ${entry.name} · ${sizeLabel}${modifiedLabel ? ` · ${modifiedLabel}` : ""}`,
-                                      "info",
-                                    );
-                                    setFilesContextMenu(null);
-                                  }}
-                                >
-                                  Get info
-                                </button>
-                              </>
-                            );
-                          })()}
-                        </div>
-                      </>
-                    )}
-                  </section>
-                </div>
+            <Route
+              path="/files"
+              element={
+                <FilesPage
+                  activeSerial={activeSerial}
+                  selectedSummaryLabel={selectedSummaryLabel}
+                  singleSelectionWarning={singleSelectionWarning}
+                  singleSelectionWarningMessage={singleSelectionWarningMessage}
+                  busy={busy}
+                  filesDropActive={filesDropActive}
+                  filesPath={filesPath}
+                  onFilesPathChange={setFilesPath}
+                  onFilesGoUp={handleFilesGoUp}
+                  onFilesRefresh={handleFilesRefresh}
+                  onOpenFilesMkdirModal={openFilesMkdirModal}
+                  onFileUpload={handleFileUpload}
+                  filesOverwriteEnabled={filesOverwriteEnabled}
+                  onFilesOverwriteEnabledChange={setFilesOverwriteEnabled}
+                  fileBreadcrumbs={fileBreadcrumbs}
+                  filesSearchQuery={filesSearchQuery}
+                  onFilesSearchQueryChange={setFilesSearchQuery}
+                  filesViewMode={filesViewMode}
+                  onFilesViewModeChange={setFilesViewMode}
+                  fileFilterSummary={fileFilterSummary}
+                  files={files}
+                  filteredFiles={filteredFiles}
+                  visibleFiles={visibleFiles}
+                  canLoadMoreFiles={canLoadMoreFiles}
+                  onLoadMoreFiles={loadMoreFiles}
+                  filesListRef={filesListRef}
+                  filesLoadMoreSentinelRef={filesLoadMoreSentinelRef}
+                  filesSelectedPaths={filesSelectedPaths}
+                  setFilesSelectedPaths={setFilesSelectedPaths}
+                  isFileSelected={isFileSelected}
+                  toggleFileSelected={toggleFileSelected}
+                  onOpenFilesContextMenu={openFilesContextMenu}
+                  onFilePull={handleFilePull}
+                  onFilePreview={handleFilePreview}
+                  filePreview={filePreview}
+                  filePreviewDevicePath={filePreviewDevicePath}
+                  onOpenExternalPath={openExternalPath}
+                  fileSelectionLabel={fileSelectionLabel}
+                  hasFileSelection={hasFileSelection}
+                  onFilesPullSelected={handleFilesPullSelected}
+                  onOpenFilesDeleteSelectedModal={openFilesDeleteSelectedModal}
+                  filesContextMenu={filesContextMenu}
+                  filesContextMenuPosition={filesContextMenuPosition}
+                  filesContextMenuRef={filesContextMenuRef}
+                  onCloseFilesContextMenu={handleCloseFilesContextMenu}
+                  onOpenFilesRenameModal={openFilesRenameModal}
+                  onOpenFilesDeleteModal={openFilesDeleteModal}
+                  onCopyText={handleCopyTextWithToast}
+                  onNotifyInfo={handleNotifyInfo}
+                />
               }
             />
             <Route
               path="/logcat"
               element={
-                <div className="page-section page-section-stretch logcat-workspace">
-                  <div className="page-header">
-                    <div>
-                      <h1>Logs</h1>
-                      <p className="muted">Filters, presets, and search for streaming logs.</p>
-                    </div>
-                  </div>
-	                  <section className="panel panel-stretch logcat-panel">
-	                    <div className="panel-header">
-                        <div className="logcat-header-main">
-	                      <div>
-	                        <h2>{activeDeviceIsIos ? "iOS Syslog Stream" : "Logcat Stream"}</h2>
-	                        <span>{selectedSummaryLabel}</span>
-	                      </div>
-                          {!isLogcatPopupWindow && (
-                            <button
-                              type="button"
-                              className="ghost"
-                              onClick={openLogcatPopupSelectorModal}
-                              disabled={busy || !hasLogcatPopupSelectableCandidate}
-                            >
-                              Open selected popup
-                            </button>
-                          )}
-                        </div>
-                        <span className={`status-pill ${logcatStatusTone}`}>{logcatStatusLabel}</span>
-	                    </div>
-	                    {singleSelectionWarning && (
-	                      <div className="inline-alert info">
-	                        <strong>Primary device in use</strong>
-	                        <span>{singleSelectionWarningMessage}</span>
-	                      </div>
-	                    )}
-                      {isLogcatPopupWindow && logcatPopupSerial && !popupTargetConnected && (
-                        <div className="inline-alert error">
-                          <strong>Device disconnected</strong>
-                          <span className="muted">
-                            Target device <code>{logcatPopupSerial}</code> is not connected.
-                          </span>
-                        </div>
-                      )}
-	                    <div className="logcat-toolbar">
-	                      <div className="logcat-toolbar-row">
-	                        <div className="logcat-toolbar-cluster">
-	                          <div className="logcat-button-group">
-                            <button onClick={handleLogcatStart} disabled={!canStartLogcat}>
-                              Start
-                            </button>
-                            <button onClick={handleLogcatStop} disabled={!canStopLogcat}>
-                              Stop
-                            </button>
-                          </div>
-                          <div className="logcat-button-group">
-                            <button onClick={handleLogcatClearBuffer} disabled={busy || !activeSerial}>
-                              {activeDeviceIsIos ? "Clear View" : "Clear Buffer"}
-                            </button>
-                            <button
-                              className="ghost"
-                              onClick={handleLogcatExport}
-                              disabled={busy || !activeSerial}
-                            >
-                              Export
-                            </button>
-                          </div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={logcatAutoScroll}
-                              onChange={(event) => setLogcatAutoScroll(event.target.checked)}
-                            />
-                            Follow newest
-                          </label>
-                          {!activeDeviceIsIos && activeSerial && (
-                            <div className="logcat-button-group">
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => void handleLogcatMirrorLaunch()}
-                                disabled={busy}
-                                title="Launch scrcpy mirror alongside Logcat"
-                              >
-                                Mirror (scrcpy)
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => void handleLogcatToggleSyncedRecording()}
-                                disabled={busy}
-                                title="Record screen while marking start/end window in Logcat"
-                              >
-                                {screenRecordStatusBySerial[activeSerial]?.running
-                                  ? "Stop Sync Record"
-                                  : "Record + Sync"}
-                              </button>
-                              {logcatSyncSessionBySerial[activeSerial]?.endedAtMs != null && (
-                                <button
-                                  type="button"
-                                  className="ghost"
-                                  onClick={() => void handleExportSyncedLogcatSlice()}
-                                  disabled={busy}
-                                >
-                                  Export Slice (
-                                  {sliceLogcatLinesForRecording(
-                                    rawLogcatLines,
-                                    logcatSyncSessionBySerial[activeSerial],
-                                  ).length}
-                                  )
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="logcat-toolbar-row">
-                        <div className="logcat-toolbar-group logcat-source-group">
-                          <div className="logcat-label-row">
-                            <span>Source</span>
-                            <span className="muted">
-                              Active: {logcatActiveFilterSummary || "All"}
-                            </span>
-                          </div>
-                          {activeDeviceIsIos && (
-                            <div className="inline-alert info">
-                              <strong>iOS syslog</strong>
-                              <span>Source filters are Android-only and will be ignored for iOS devices.</span>
-                            </div>
-                          )}
-                          <div className="inline-row">
-                            <select
-                              className="logcat-select"
-                              value={logcatSourceMode}
-                              disabled={activeDeviceIsIos}
-                              onChange={(event) =>
-                                setLogcatSourceMode(event.target.value as LogcatSourceMode)
-                              }
-                            >
-                              <option value="tag">Tag</option>
-                              <option value="package">Package</option>
-                              <option value="raw">Raw</option>
-                            </select>
-                            <input
-                              value={logcatSourceValue}
-                              disabled={activeDeviceIsIos}
-                              onChange={(event) => setLogcatSourceValue(event.target.value)}
-                              placeholder={
-                                logcatSourceMode === "raw"
-                                  ? "ActivityManager:D *:S"
-                                  : logcatSourceMode === "package"
-                                    ? "com.example.app"
-                                    : "ActivityManager"
-                              }
-                            />
-                          </div>
-                        </div>
-	                      </div>
-	                    </div>
-                      <LogLiveFilterBar
-                        kind={logcatTextKind}
-                        onKindChange={setLogcatTextKind}
-                        value={logcatLiveFilter}
-                        onValueChange={setLogcatLiveFilter}
-                        onAdd={addLogcatLiveFilter}
-                        chips={sharedLogTextChips}
-                        onRemoveChip={(chipId) =>
-                          setSharedLogTextChips((prev) => removeLogTextChip(prev, chipId))
-                        }
-                        onEditChip={editSharedLogFilterChip}
-                        onClearChips={clearSharedLogFilters}
-                        presets={logcatPresets}
-                        presetSelected={logcatPresetSelected}
-                        onPresetSelectedChange={(next) => {
-                          setLogcatPresetSelected(next);
-                          if (next) {
-                            setLogcatPresetName(next);
-                          }
-                        }}
-                        presetName={logcatPresetName}
-                        onPresetNameChange={setLogcatPresetName}
-                        hasSelectedPreset={Boolean(selectedLogcatPreset)}
-                        onApplyPreset={applyLogcatPreset}
-                        onUpdatePreset={(name) => openPresetUpdateModal("logcat", name)}
-                        onDeletePreset={(name) => openPresetDeleteModal("logcat", name)}
-                        onSavePreset={() => {
-                          saveLogcatPreset(logcatPresetName);
-                        }}
-                        showPresetRow
-                        disabled={busy}
-                        filtersCount={sharedLogTextChips.length}
-                        activePresetLabel={selectedLogcatPreset?.name}
-                        levelsSummary={logLevelsSummary}
-                        isPresetDirty={logcatPresetDirty}
-                        selectClassName="logcat-select"
-                        compact
-                        expanded={logcatLiveFilterExpanded}
-                        onToggleExpanded={() => setLogcatLiveFilterExpanded((prev) => !prev)}
-                        advancedOptions={
-                          <div className="logcat-advanced-options">
-                            <div className="panel-sub">
-                              <h3>Levels</h3>
-                              <div className="toggle-group">
-                                {LOG_LEVELS.map((level) => (
-                                  <label key={level} className="toggle">
-                                    <input
-                                      type="checkbox"
-                                      checked={logLevels[level]}
-                                      onChange={(event) =>
-                                        setLogLevels((prev) => ({
-                                          ...prev,
-                                          [level]: event.target.checked,
-                                        }))
-                                      }
-                                    />
-                                    {level}
-                                  </label>
-                                ))}
-                              </div>
-                            </div>
-                            <div className="panel-sub">
-                              <h3>Search Options</h3>
-                              <div className="toggle-group">
-                                <label className="toggle">
-                                  <input
-                                    type="checkbox"
-                                    checked={logcatSearchRegex}
-                                    onChange={(event) => setLogcatSearchRegex(event.target.checked)}
-                                  />
-                                  Regex
-                                </label>
-                                <label className="toggle">
-                                  <input
-                                    type="checkbox"
-                                    checked={logcatSearchCaseSensitive}
-                                    onChange={(event) => setLogcatSearchCaseSensitive(event.target.checked)}
-                                  />
-                                  Case sensitive
-                                </label>
-                                <label className="toggle">
-                                  <input
-                                    type="checkbox"
-                                    checked={logcatSearchOnly}
-                                    onChange={(event) => setLogcatSearchOnly(event.target.checked)}
-                                  />
-                                  Matches only
-                                </label>
-                              </div>
-                            </div>
-                          </div>
-                        }
-                      />
-                    {logcatLastExport && (
-                      <div className="inline-alert info">
-                        <strong>Exported</strong>
-                        <span>{logcatLastExport}</span>
-                      </div>
-                    )}
-                    {activeSerial &&
-                      activeLogcatRunning &&
-                      !activeLogcatStatusLoading &&
-                      logcatFiltered.lines.length === 0 && (
-                        <div className="inline-alert info">
-                          <strong>Waiting for logs</strong>
-                          <span className="muted">
-                            Logcat is running. Generate activity on device or adjust the active filters.
-                          </span>
-                        </div>
-                      )}
-                    <div className="logcat-output-wrapper logcat-output-wrapper-stretch">
-                      <div className="logcat-output-actions">
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={handleLogcatClearView}
-                          disabled={busy || !activeSerial}
-                        >
-                          Clear View
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={() => setLogcatSearchOpen((prev) => !prev)}
-                          disabled={busy}
-                        >
-                          {logcatSearchOpen ? "Close Search" : "Search"}
-                        </button>
-                      </div>
-                      {logcatSearchOpen ? (
-                        <div className="logcat-search-overlay">
-                          <div className="logcat-search-header">
-                            <span>Search</span>
-                            <button
-                              type="button"
-                              className="ghost"
-                              onClick={() => setLogcatSearchOpen(false)}
-                            >
-                              Close
-                            </button>
-                          </div>
-                          <div className="inline-row">
-                            <input
-                              value={logcatSearchTerm}
-                              onChange={(event) => setLogcatSearchTerm(event.target.value)}
-                              placeholder="Find in logs..."
-                            />
-                            <div className="button-row compact">
-                              <button type="button" onClick={handleLogcatPrevMatch} disabled={busy}>
-                                Prev
-                              </button>
-                              <button type="button" onClick={handleLogcatNextMatch} disabled={busy}>
-                                Next
-                              </button>
-                            </div>
-                          </div>
-                          <span className="muted">
-                            Match {logcatFiltered.matchIds.length ? logcatMatchIndex + 1 : 0} /{" "}
-                            {logcatFiltered.matchIds.length}
-                          </span>
-                        </div>
-                      ) : null}
-                      <LogcatOutput
-                        entries={logcatFiltered.lines}
-                        searchPattern={logcatSearchPattern}
-                        autoScroll={logcatAutoScroll}
-                        outputRef={logcatOutputRef}
-                      />
-                    </div>
-	                  </section>
-	                </div>
+                <Suspense fallback={null}>
+                  <LazyLogcatPage
+                  activeSerial={activeSerial}
+                  activeDeviceIsIos={activeDeviceIsIos}
+                  selectedSummaryLabel={selectedSummaryLabel}
+                  isLogcatPopupWindow={isLogcatPopupWindow}
+                  logcatPopupSerial={logcatPopupSerial}
+                  popupTargetConnected={popupTargetConnected}
+                  busy={busy}
+                  hasLogcatPopupSelectableCandidate={hasLogcatPopupSelectableCandidate}
+                  onOpenLogcatPopupSelectorModal={openLogcatPopupSelectorModal}
+                  logcatStatusTone={logcatStatusTone}
+                  logcatStatusLabel={logcatStatusLabel}
+                  singleSelectionWarning={singleSelectionWarning}
+                  singleSelectionWarningMessage={singleSelectionWarningMessage}
+                  canStartLogcat={canStartLogcat}
+                  canStopLogcat={canStopLogcat}
+                  onLogcatStart={handleLogcatStart}
+                  onLogcatStop={handleLogcatStop}
+                  onLogcatClearBuffer={handleLogcatClearBuffer}
+                  onLogcatExport={handleLogcatExport}
+                  logcatAutoScroll={logcatAutoScroll}
+                  onLogcatAutoScrollChange={setLogcatAutoScroll}
+                  onLogcatMirrorLaunch={handleLogcatMirrorLaunch}
+                  onLogcatToggleSyncedRecording={handleLogcatToggleSyncedRecording}
+                  screenRecordStatusBySerial={screenRecordStatusBySerial}
+                  logcatSyncSessionBySerial={logcatSyncSessionBySerial}
+                  rawLogcatLines={rawLogcatLines}
+                  onExportSyncedLogcatSlice={handleExportSyncedLogcatSlice}
+                  logcatActiveFilterSummary={logcatActiveFilterSummary}
+                  logcatSourceMode={logcatSourceMode}
+                  onLogcatSourceModeChange={setLogcatSourceMode}
+                  logcatSourceValue={logcatSourceValue}
+                  onLogcatSourceValueChange={setLogcatSourceValue}
+                  logcatTextKind={logcatTextKind}
+                  onLogcatTextKindChange={setLogcatTextKind}
+                  logcatLiveFilter={logcatLiveFilter}
+                  onLogcatLiveFilterChange={setLogcatLiveFilter}
+                  onAddLogcatLiveFilter={addLogcatLiveFilter}
+                  sharedLogTextChips={sharedLogTextChips}
+                  setSharedLogTextChips={setSharedLogTextChips}
+                  onEditSharedLogFilterChip={editSharedLogFilterChip}
+                  onClearSharedLogFilters={clearSharedLogFilters}
+                  logcatPresets={logcatPresets}
+                  logcatPresetSelected={logcatPresetSelected}
+                  onLogcatPresetSelectedChange={setLogcatPresetSelected}
+                  logcatPresetName={logcatPresetName}
+                  onLogcatPresetNameChange={setLogcatPresetName}
+                  selectedLogcatPresetName={selectedLogcatPreset?.name}
+                  onApplyLogcatPreset={applyLogcatPreset}
+                  onOpenPresetUpdateModal={handleOpenLogcatPresetUpdateModal}
+                  onOpenPresetDeleteModal={handleOpenLogcatPresetDeleteModal}
+                  onSaveLogcatPreset={saveLogcatPreset}
+                  logLevels={logLevels}
+                  setLogLevels={setLogLevels}
+                  logLevelsSummary={logLevelsSummary}
+                  logcatPresetDirty={logcatPresetDirty}
+                  logcatSearchRegex={logcatSearchRegex}
+                  onLogcatSearchRegexChange={setLogcatSearchRegex}
+                  logcatSearchCaseSensitive={logcatSearchCaseSensitive}
+                  onLogcatSearchCaseSensitiveChange={setLogcatSearchCaseSensitive}
+                  logcatSearchOnly={logcatSearchOnly}
+                  onLogcatSearchOnlyChange={setLogcatSearchOnly}
+                  logcatLastExport={logcatLastExport}
+                  activeLogcatRunning={activeLogcatRunning}
+                  activeLogcatStatusLoading={activeLogcatStatusLoading}
+                  logcatFilteredLines={logcatFiltered.lines}
+                  logcatMatchCount={logcatFiltered.matchIds.length}
+                  logcatMatchIndex={logcatMatchIndex}
+                  logcatSearchTerm={logcatSearchTerm}
+                  onLogcatSearchTermChange={setLogcatSearchTerm}
+                  onLogcatClearView={handleLogcatClearView}
+                  onLogcatPrevMatch={handleLogcatPrevMatch}
+                  onLogcatNextMatch={handleLogcatNextMatch}
+                  logcatSearchPattern={logcatSearchPattern}
+                  logcatOutputRef={logcatOutputRef}
+                />
+                </Suspense>
               }
             />
             <Route
@@ -16810,398 +15270,43 @@ function App() {
             <Route
               path="/apps"
               element={
-                <div className="page-section page-section-stretch apps-workspace">
-                  <div className="page-header">
-                    <div>
-                      <h1>App Manager</h1>
-                      <p className="muted">Search packages and execute common actions.</p>
-                    </div>
-                  </div>
-	                  <section className="panel panel-stretch">
-	                    <div className="panel-header">
-	                      <h2>App Management</h2>
-	                      <span>{selectedSummaryLabel}</span>
-	                    </div>
-	                    {singleSelectionWarning && (
-	                      <div className="inline-alert info">
-	                        <strong>Primary device in use</strong>
-	                        <span>{singleSelectionWarningMessage}</span>
-	                      </div>
-	                    )}
-	                    <div className="toolbar">
-	                      <input
-	                        value={appsFilter}
-	                        onChange={(event) => setAppsFilter(event.target.value)}
-                        placeholder="Search package"
-                      />
-                      <label className="toggle">
-                        <input
-                          type="checkbox"
-                          checked={appsThirdPartyOnly}
-                          onChange={(event) => setAppsThirdPartyOnly(event.target.checked)}
-                        />
-                        Third-party only
-                      </label>
-                      <label className="toggle">
-                        <input
-                          type="checkbox"
-                          checked={appsIncludeVersions}
-                          onChange={(event) => setAppsIncludeVersions(event.target.checked)}
-                        />
-                        Include versions
-                      </label>
-                      <button onClick={handleLoadApps} disabled={busy || !activeSerial}>
-                        {appsLoading ? "Loading…" : "Load Apps"}
-                      </button>
-	                      {(() => {
-	                        if (!appsSerial || apps.length === 0) {
-	                          return null;
-	                        }
-	                        const prefix = `${appsSerial}::`;
-	                        const entries = Object.entries(appIconsByKey).filter(([key]) => key.startsWith(prefix));
-	                        const readyCount = entries.filter(([, item]) => item.status === "ready").length;
-	                        const queuedCount = entries.filter(([, item]) => item.status === "queued").length;
-	                        const loadingCount = entries.filter(([, item]) => item.status === "loading").length;
-	                        const errorCount = entries.filter(([, item]) => item.status === "error").length;
-	                        return (
-	                          <span className="muted app-icons-progress" title="App icon loading">
-	                            Icons {readyCount}/{apps.length}
-	                            {loadingCount || queuedCount ? " · loading" : ""}
-	                            {errorCount ? ` · ${errorCount} failed` : ""}
-	                          </span>
-	                        );
-	                      })()}
-                    </div>
-	                    <div className="split split-stretch apps-split">
-	                      <div className="app-list" ref={appsListRef} role="list" aria-label="Apps">
-	                        {apps.length === 0 ? (
-	                          <p className="muted">No apps loaded. Click Load Apps.</p>
-	                        ) : filteredApps.length === 0 ? (
-	                          <p className="muted">No matches.</p>
-	                        ) : (
-	                          <>
-	                            {visibleApps.map((app) => {
-	                            const isActive = selectedApp?.package_name === app.package_name;
-	                            const tone = getStableToneIndex(app.package_name);
-	                            const displayName = getAppDisplayName(app.package_name);
-	                            const letters = getAppAvatarLetters(app.package_name);
-	                            const versionLabel = appsIncludeVersions ? app.version_name ?? "" : "";
-	                            const iconKey = appsSerial ? getAppIconKey(appsSerial, app.package_name) : null;
-	                            const iconUrl = iconKey ? appIconsByKey[iconKey]?.dataUrl : undefined;
-	                            return (
-	                              <button
-	                                key={app.package_name}
-	                                className={`app-row${isActive ? " active" : ""}`}
-	                                type="button"
-	                                onClick={() => handleSelectAppRow(app)}
-	                                onDoubleClick={() => void handleAppDoubleClick(app)}
-	                                onContextMenu={(event) => handleAppContextMenu(event, app)}
-	                                role="listitem"
-	                                aria-current={isActive ? "true" : undefined}
-	                                data-app-pkg={app.package_name}
-	                              >
-	                                <div
-	                                  className={`app-avatar tone-${tone}`}
-	                                  aria-hidden="true"
-	                                  title={
-	                                    iconKey && appIconsByKey[iconKey]?.status === "error"
-	                                      ? appIconsByKey[iconKey]?.error
-	                                      : undefined
-	                                  }
-	                                >
-	                                  {iconUrl ? <img className="app-icon-img" src={iconUrl} alt="" /> : letters}
-	                                  {iconKey && appIconsByKey[iconKey]?.status === "loading" ? (
-	                                    <span className="app-icon-spinner" aria-hidden="true" />
-	                                  ) : iconKey && appIconsByKey[iconKey]?.status === "queued" ? (
-	                                    <span className="app-icon-dot" aria-hidden="true" />
-	                                  ) : iconKey && appIconsByKey[iconKey]?.status === "error" ? (
-	                                    <span className="app-icon-error" aria-hidden="true">
-	                                      !
-	                                    </span>
-	                                  ) : null}
-	                                </div>
-	                                <div className="app-row-main">
-	                                  <div className="app-row-title">
-	                                    <strong>{displayName}</strong>
-	                                    {app.is_system && <span className="badge">System</span>}
-	                                  </div>
-	                                  <div className="app-row-sub">
-	                                    <span className="app-row-package">{app.package_name}</span>
-	                                    {versionLabel ? <span className="app-row-version">{versionLabel}</span> : null}
-	                                  </div>
-	                                </div>
-	                                <div className="app-row-tail" aria-hidden="true">
-	                                  <span className="chevron">›</span>
-	                                </div>
-	                              </button>
-	                            );
-	                          })}
-	                            <div className="app-list-footer">
-	                              <span className="muted">
-	                                Showing {visibleApps.length}/{filteredApps.length}
-	                              </span>
-	                              {canLoadMoreApps ? (
-	                                <button
-	                                  type="button"
-	                                  className="ghost"
-	                                  onClick={loadMoreApps}
-	                                >
-	                                  Load more
-	                                </button>
-	                              ) : (
-	                                <span className="muted">All loaded</span>
-	                              )}
-	                            </div>
-	                            <div className="app-load-more-sentinel" ref={appsLoadMoreSentinelRef} />
-	                          </>
-	                        )}
-	                      </div>
-	                      <div className="preview-panel app-details">
-	                        <h3>Selected App</h3>
-	                        {selectedApp ? (
-	                          <div className="stack">
-	                            {(() => {
-	                              const tone = getStableToneIndex(selectedApp.package_name);
-	                              const displayName = getAppDisplayName(selectedApp.package_name);
-	                              const letters = getAppAvatarLetters(selectedApp.package_name);
-	                              const iconKey = appsSerial ? getAppIconKey(appsSerial, selectedApp.package_name) : null;
-	                              const iconUrl = iconKey ? appIconsByKey[iconKey]?.dataUrl : undefined;
-	                              return (
-	                                <div className="app-details-header">
-	                                  <div className={`app-avatar large tone-${tone}`} aria-hidden="true">
-	                                    {iconUrl ? <img className="app-icon-img" src={iconUrl} alt="" /> : letters}
-	                                  </div>
-	                                  <div className="app-details-title">
-	                                    <div className="app-details-name">{displayName}</div>
-	                                    <div className="app-details-package">{selectedApp.package_name}</div>
-	                                  </div>
-	                                </div>
-	                              );
-	                            })()}
-	                            {appsDetailsBusy && <p className="muted">Loading details...</p>}
-	                            <div className="stack">
-	                              <p className="muted">
-	                                Version: {selectedAppDetails?.version_name ?? selectedApp.version_name ?? "--"}
-	                              </p>
-	                              <details>
-	                                <summary className="muted">Install source</summary>
-	                                <div className="stack">
-	                                  <p className="muted">
-	                                    Installer: {selectedAppDetails?.installer_package_name ?? "--"}
-	                                  </p>
-	                                  <p className="muted">
-	                                    Installing: {selectedAppDetails?.installing_package_name ?? "--"}
-	                                  </p>
-	                                  <p className="muted">
-	                                    Originating: {selectedAppDetails?.originating_package_name ?? "--"}
-	                                  </p>
-	                                  <p className="muted">
-	                                    Initiating: {selectedAppDetails?.initiating_package_name ?? "--"}
-	                                  </p>
-	                                </div>
-	                              </details>
-	                              <p className="muted">UID: {selectedAppDetails?.uid ?? "--"}</p>
-	                              <p className="muted">
-	                                Data dir: {selectedAppDetails?.data_dir ?? "--"}
-	                              </p>
-	                              <p className="muted">
-	                                Target SDK: {selectedAppDetails?.target_sdk ?? "--"}
-	                              </p>
-	                              <details>
-	                                <summary className="muted">
-	                                  Permissions (granted {selectedAppDetails?.granted_permissions?.length ?? 0} / requested {selectedAppDetails?.requested_permissions?.length ?? 0})
-	                                </summary>
-	                                <div className="stack">
-	                                  <p className="muted">Granted</p>
-	                                  <pre>{(selectedAppDetails?.granted_permissions ?? []).join("\n")}</pre>
-	                                  <p className="muted">Requested</p>
-	                                  <pre>{(selectedAppDetails?.requested_permissions ?? []).join("\n")}</pre>
-	                                </div>
-	                              </details>
-	                              <details>
-	                                <summary className="muted">Components</summary>
-	                                <div className="stack">
-	                                  <p className="muted">Activities: {selectedAppDetails?.components_summary?.activities ?? 0}</p>
-	                                  <p className="muted">Services: {selectedAppDetails?.components_summary?.services ?? 0}</p>
-	                                  <p className="muted">Receivers: {selectedAppDetails?.components_summary?.receivers ?? 0}</p>
-	                                  <p className="muted">Providers: {selectedAppDetails?.components_summary?.providers ?? 0}</p>
-	                                </div>
-	                              </details>
-	                              <p className="muted">First install: {selectedAppDetails?.first_install_time ?? "--"}</p>
-	                              <p className="muted">Last update: {selectedAppDetails?.last_update_time ?? "--"}</p>
-	                              <p className="muted">
-	                                APK size:{" "}
-	                                {selectedAppDetails?.apk_size_bytes_total != null
-	                                  ? formatBytes(selectedAppDetails.apk_size_bytes_total)
-	                                  : "--"}
-	                              </p>
-	                            </div>
-	                            <div className="button-row compact">
-	                              <button
-	                                onClick={() => void handleAppDoubleClick(selectedApp)}
-	                                disabled={busy || !activeSerial}
-	                              >
-	                                Launch
-	                              </button>
-	                              <button
-	                                onClick={() => handleAppAction("info")}
-	                                disabled={busy || !activeSerial}
-	                              >
-	                                Open Info
-	                              </button>
-	                            </div>
-	                            <div className="button-row compact">
-	                              <button
-	                                onClick={() => handleAppAction("forceStop")}
-	                                disabled={busy || !activeSerial}
-	                              >
-	                                Force Stop
-	                              </button>
-	                              <button onClick={() => handleAppAction("clear")} disabled={busy || !activeSerial}>
-	                                Clear Data
-	                              </button>
-	                              <button
-	                                className="ghost"
-	                                onClick={() => handleAppAction("enable")}
-	                                disabled={busy || !activeSerial}
-	                              >
-	                                Enable
-	                              </button>
-	                              <button
-	                                className="ghost"
-	                                onClick={() => handleAppAction("disable")}
-	                                disabled={busy || !activeSerial}
-	                              >
-	                                Disable
-	                              </button>
-	                              <button
-	                                className="danger"
-	                                onClick={() => handleAppAction("uninstall")}
-	                                disabled={busy || !activeSerial}
-	                              >
-	                                Uninstall
-	                              </button>
-	                            </div>
-	                          </div>
-	                        ) : (
-	                          <p className="muted">Select an app to manage.</p>
-	                        )}
-	                      </div>
-	                    </div>
-	                    {appsContextMenu && (
-	                      <>
-	                        <div
-	                          className="context-menu-backdrop"
-	                          onMouseDown={() => setAppsContextMenu(null)}
-	                        />
-	                        <div
-	                          ref={appsContextMenuRef}
-	                          className="context-menu context-menu-scrollable"
-	                          style={{
-	                            left: appsContextMenuPosition?.left ?? appsContextMenu.x,
-	                            top: appsContextMenuPosition?.top ?? appsContextMenu.y,
-	                            maxHeight: appsContextMenuPosition?.maxHeight,
-	                            width: 240,
-	                          }}
-	                          onMouseDown={(event) => event.stopPropagation()}
-	                        >
-	                          {(() => {
-	                            const app = appsContextMenu.app;
-	                            const displayName = getAppDisplayName(app.package_name);
-	                            return (
-	                              <>
-	                                <div className="context-menu-header">
-	                                  <div className="context-menu-header-title">{displayName}</div>
-	                                  <div className="context-menu-header-sub">{app.package_name}</div>
-	                                  <div className="context-menu-header-sub">
-	                                    {app.is_system ? "System" : "Third-party"}
-	                                    {appsIncludeVersions && app.version_name ? ` · ${app.version_name}` : ""}
-	                                  </div>
-	                                </div>
-	                                <div className="context-menu-sep" />
-	                              </>
-	                            );
-	                          })()}
-	                          <button
-	                            type="button"
-	                            className="context-menu-item"
-	                            onClick={() => void handleAppDoubleClick(appsContextMenu.app)}
-	                            disabled={busy || !activeSerial}
-	                          >
-	                            Launch
-	                          </button>
-	                          <button
-	                            type="button"
-	                            className="context-menu-item"
-	                            onClick={() => void handleContextForceStop(appsContextMenu.app)}
-	                            disabled={busy || !activeSerial}
-	                          >
-	                            Force Stop
-	                          </button>
-	                          <button
-	                            type="button"
-	                            className="context-menu-item"
-	                            onClick={() => void handleAppAction("clear")}
-	                            disabled={busy || !activeSerial}
-	                          >
-	                            Clear Data
-	                          </button>
-	                          <button
-	                            type="button"
-	                            className="context-menu-item"
-	                            onClick={() => void handleAppAction("info")}
-	                            disabled={busy || !activeSerial}
-	                          >
-	                            Open Info
-	                          </button>
-	                          <div className="context-menu-sep" />
-	                          <button
-	                            type="button"
-	                            className="context-menu-item"
-	                            onClick={() => void handleAppAction("enable")}
-	                            disabled={busy || !activeSerial}
-	                          >
-	                            Enable
-	                          </button>
-	                          <button
-	                            type="button"
-	                            className="context-menu-item"
-	                            onClick={() => void handleAppAction("disable")}
-	                            disabled={busy || !activeSerial}
-	                          >
-	                            Disable
-	                          </button>
-	                          <div className="context-menu-sep" />
-	                          <button
-	                            type="button"
-	                            className="context-menu-item"
-	                            onClick={() => {
-	                              void (async () => {
-	                                try {
-	                                  await writeText(appsContextMenu.app.package_name);
-	                                  pushToast("Package copied.", "info");
-	                                } catch (error) {
-	                                  pushToast(formatError(error), "error");
-	                                }
-	                              })();
-	                              setAppsContextMenu(null);
-	                            }}
-	                          >
-	                            Copy package
-	                          </button>
-	                          <button
-	                            type="button"
-	                            className="context-menu-item danger"
-	                            onClick={() => void handleAppAction("uninstall")}
-	                            disabled={busy || !activeSerial}
-	                          >
-	                            Uninstall
-	                          </button>
-	                        </div>
-	                      </>
-	                    )}
-                  </section>
-                </div>
+                <AppsPage
+                  activeSerial={activeSerial}
+                  appsSerial={appsSerial}
+                  selectedSummaryLabel={selectedSummaryLabel}
+                  singleSelectionWarning={singleSelectionWarning}
+                  singleSelectionWarningMessage={singleSelectionWarningMessage}
+                  busy={busy}
+                  appsFilter={appsFilter}
+                  onAppsFilterChange={setAppsFilter}
+                  appsThirdPartyOnly={appsThirdPartyOnly}
+                  onAppsThirdPartyOnlyChange={setAppsThirdPartyOnly}
+                  appsIncludeVersions={appsIncludeVersions}
+                  onAppsIncludeVersionsChange={setAppsIncludeVersions}
+                  appsLoading={appsLoading}
+                  onLoadApps={handleLoadApps}
+                  apps={apps}
+                  filteredApps={filteredApps}
+                  visibleApps={visibleApps}
+                  canLoadMoreApps={canLoadMoreApps}
+                  onLoadMoreApps={loadMoreApps}
+                  appIconsByKey={appIconsByKey}
+                  appsListRef={appsListRef}
+                  appsLoadMoreSentinelRef={appsLoadMoreSentinelRef}
+                  selectedApp={selectedApp}
+                  selectedAppDetails={selectedAppDetails}
+                  appsDetailsBusy={appsDetailsBusy}
+                  onSelectAppRow={handleSelectAppRow}
+                  onAppDoubleClick={handleAppDoubleClick}
+                  onAppContextMenu={handleAppContextMenu}
+                  onAppAction={handleAppAction}
+                  onContextForceStop={handleContextForceStop}
+                  onCopyPackageName={handleCopyAppPackage}
+                  appsContextMenu={appsContextMenu}
+                  appsContextMenuPosition={appsContextMenuPosition}
+                  appsContextMenuRef={appsContextMenuRef}
+                  onCloseAppsContextMenu={handleCloseAppsContextMenu}
+                />
               }
             />
             <Route
@@ -18015,1410 +16120,46 @@ function App() {
             <Route
               path="/settings"
               element={
-                config ? (
-                  <div className="page-section">
-                    <div className="page-header">
-                      <div>
-                        <h1>Settings</h1>
-                        <p className="muted">Persisted locally. Update defaults for actions.</p>
-                      </div>
-                    </div>
-                    <section className="panel settings-panel">
-                      <div className="panel-header">
-                        <h2>Settings</h2>
-                        <span>Saved locally</span>
-                      </div>
-                      <div
-                        className="settings-tabs"
-                        role="tablist"
-                        aria-label="Settings sections"
-                        onKeyDown={handleSettingsTabKeyDown}
-                      >
-                        {SETTINGS_TABS.map((tab) => (
-                          <button
-                            key={tab.id}
-                            type="button"
-                            role="tab"
-                            id={`settings-tab-${tab.id}`}
-                            className="settings-tab"
-                            aria-selected={activeSettingsTab === tab.id}
-                            aria-controls={`settings-panel-${tab.id}`}
-                            tabIndex={activeSettingsTab === tab.id ? 0 : -1}
-                            data-settings-tab={tab.id}
-                            onClick={() => setActiveSettingsTab(tab.id)}
-                          >
-                            {tab.label}
-                          </button>
-                        ))}
-                      </div>
-                      <div
-                        id={`settings-panel-${activeSettingsTabConfig.id}`}
-                        className={`settings-tab-panel settings-tab-panel-${activeSettingsTabConfig.id}`}
-                        role="tabpanel"
-                        aria-labelledby={`settings-tab-${activeSettingsTabConfig.id}`}
-                      >
-                        <div className="settings-grid">
-                          <div className="settings-group settings-span-2 settings-section-connectivity">
-                          <h3>ADB</h3>
-                          <label>
-                            ADB executable path
-                            <input
-                              placeholder="/path/to/platform-tools/adb or C:\\Android\\platform-tools\\adb.exe"
-                              value={config.adb.command_path}
-                              onChange={(event) => {
-                                const commandPath = event.target.value;
-                                setConfig((prev) =>
-                                  prev ? { ...prev, adb: { ...prev.adb, command_path: commandPath } } : prev,
-                                );
-                                setAdbInfo(null);
-                              }}
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Leave blank to use <code>adb</code> from your PATH. Otherwise select the{" "}
-                            <code>adb</code> executable from Android platform-tools.
-                          </div>
-                          <div className="button-row">
-                            <button type="button" className="ghost" onClick={handleBrowseAdbPath} disabled={busy}>
-                              Browse
-                            </button>
-                            <button type="button" className="ghost" onClick={handleCheckAdb} disabled={busy}>
-                              Test
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost"
-                              disabled={busy}
-                              onClick={async () => {
-                                setBusy(true);
-                                try {
-                                  await adbServerControl("restart");
-                                  pushToast("ADB server restarted.", "info");
-                                  await refreshDevices();
-                                } catch (error) {
-                                  pushToast(formatError(error), "error");
-                                } finally {
-                                  setBusy(false);
-                                }
-                              }}
-                            >
-                              Restart ADB Server
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost"
-                              disabled={busy}
-                              onClick={async () => {
-                                setBusy(true);
-                                try {
-                                  await adbServerControl("kill");
-                                  pushToast("ADB server stopped.", "info");
-                                } catch (error) {
-                                  pushToast(formatError(error), "error");
-                                } finally {
-                                  setBusy(false);
-                                }
-                              }}
-                            >
-                              Kill ADB Server
-                            </button>
-                          </div>
-                          {adbInfo && (
-                            <div className={`inline-alert ${adbInfo.available ? "info" : "error"}`}>
-                              <strong>{adbInfo.available ? "ADB available" : "ADB not available"}</strong>
-                              <span>
-                                Command: <code>{adbInfo.command_path}</code>
-                              </span>
-                              {adbInfo.version_output && (
-                                <span className="muted">
-                                  <code>{adbInfo.version_output}</code>
-                                </span>
-                              )}
-                              {adbInfo.error && <span className="muted">Error: {adbInfo.error}</span>}
-                              {getAdbIssueRecoveryMessages(adbInfo).map((message) => (
-                                <span key={message} className="muted">
-                                  {message}
-                                </span>
-                              ))}
-                              <span className="muted">Save Settings to apply this path globally.</span>
-                            </div>
-                          )}
-                        </div>
-                          <div className="settings-group settings-span-2 settings-section-connectivity">
-                          <h3>iOS Tools</h3>
-                          <div className="muted settings-hint">
-                            iOS device inventory uses Xcode <code>devicectl</code> on macOS or
-                            libimobiledevice with <code>usbmuxd</code> on Linux. These tools are not bundled with the app.
-                          </div>
-                          <div className="inline-alert info">
-                            <strong>Host setup</strong>
-                            <span>
-                              Detected host: <code>{HOST_OS_LABELS[hostOs]}</code>
-                            </span>
-                            {hostOs === "linux" ? (
-                              <>
-                                <span>Ubuntu/Debian setup commands:</span>
-                                <code>sudo apt install usbmuxd libimobiledevice-utils</code>
-                                <code>sudo systemctl enable --now usbmuxd</code>
-                                <code>idevice_id -l</code>
-                                <code>ideviceinfo -u "&lt;UDID&gt;"</code>
-                              </>
-                            ) : (
-                              <>
-                                <span>macOS setup commands:</span>
-                                <code>xcode-select --install</code>
-                                <code>cfgutil help</code>
-                                <span className="muted">
-                                  Install Apple Configurator from the App Store, then install its command-line tool to
-                                  enable <code>cfgutil</code>.
-                                </span>
-                              </>
-                            )}
-                            <span className="muted">
-                              Unlock the iPhone and accept the trust prompt before refreshing devices.
-                            </span>
-                          </div>
-                          <div className="button-row">
-                            <button type="button" className="ghost" onClick={handleCheckIosTools} disabled={busy}>
-                              Test iOS Tools
-                            </button>
-                          </div>
-                          <div className="inline-alert info">
-                            <strong>iOS tool status</strong>
-                            {iosToolGuidanceRows.map((row) => (
-                              <span key={row.id}>
-                                {row.label}: <code>{row.status}</code> <span className="muted">({row.role})</span>
-                                <span className="muted"> · {row.detail}</span>
-                                {row.error ? <span className="muted"> · {row.error}</span> : null}
-                              </span>
-                            ))}
-                            <span className="muted">
-                              Linux does not use Xcode <code>devicectl</code>; missing devicectl is expected there.
-                            </span>
-                          </div>
-                        </div>
-                          <div className="settings-group settings-span-2 appearance-settings-group settings-section-appearance">
-                          <h3>Appearance</h3>
-                          <div className="appearance-layout">
-                            <div className="appearance-controls">
-                              <label>
-                                Theme preset
-                                <select
-                                  value={effectiveThemeStyle.preset_id}
-                                  onChange={(event) =>
-                                    updateThemeStyle((current) => ({
-                                      ...current,
-                                      preset_id: event.target.value,
-                                    }))
-                                  }
-                                >
-                                  {THEME_PRESETS.map((preset) => (
-                                    <option key={preset.id} value={preset.id}>
-                                      {preset.label}
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                              <label>
-                                Background source
-                                <select
-                                  value={effectiveThemeStyle.background_source.kind}
-                                  onChange={(event) =>
-                                    updateThemeStyle((current) => ({
-                                      ...current,
-                                      background_source: {
-                                        kind: event.target.value as ThemeBackgroundKind,
-                                        path:
-                                          event.target.value === "local_path" ||
-                                          event.target.value === "managed_path"
-                                            ? current.background_source.path
-                                            : "",
-                                      },
-                                    }))
-                                  }
-                                >
-                                  <option value="preset">Preset background</option>
-                                  <option value="none">No background image</option>
-                                  <option value="local_path">Use local path</option>
-                                  <option value="managed_path">Imported image</option>
-                                </select>
-                              </label>
-                              {(effectiveThemeStyle.background_source.kind === "local_path" ||
-                                effectiveThemeStyle.background_source.kind === "managed_path") && (
-                                <label>
-                                  Image path
-                                  <input
-                                    value={effectiveThemeStyle.background_source.path}
-                                    placeholder="/Users/me/Pictures/background.png"
-                                    onChange={(event) =>
-                                      updateThemeStyle((current) => ({
-                                        ...current,
-                                        background_source: {
-                                          ...current.background_source,
-                                          path: event.target.value,
-                                        },
-                                      }))
-                                    }
-                                  />
-                                </label>
-                              )}
-                              <div className="button-row">
-                                <button
-                                  type="button"
-                                  className="ghost"
-                                  onClick={handleBrowseThemeBackgroundPath}
-                                  disabled={busy || !isTauriRuntime()}
-                                >
-                                  Use Local Image
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ghost"
-                                  onClick={handleImportThemeBackgroundPath}
-                                  disabled={busy || !isTauriRuntime()}
-                                >
-                                  Import Image
-                                </button>
-                              </div>
-                              {!isTauriRuntime() && (
-                                <div className="inline-alert info">
-                                  Image picking and importing are available in the desktop app build.
-                                </div>
-                              )}
-                              <label>
-                                Background fit
-                                <select
-                                  value={effectiveThemeStyle.background_fit}
-                                  onChange={(event) =>
-                                    updateThemeStyle((current) => ({
-                                      ...current,
-                                      background_fit: event.target.value as ThemeBackgroundFit,
-                                    }))
-                                  }
-                                >
-                                  <option value="cover">Cover</option>
-                                  <option value="contain">Contain</option>
-                                  <option value="repeat">Repeat</option>
-                                </select>
-                              </label>
-                              <label>
-                                Background opacity
-                                <input
-                                  type="range"
-                                  min={0}
-                                  max={1}
-                                  step={0.05}
-                                  value={effectiveThemeStyle.background_opacity}
-                                  onChange={(event) =>
-                                    updateThemeStyle((current) => ({
-                                      ...current,
-                                      background_opacity: Number(event.target.value),
-                                    }))
-                                  }
-                                />
-                              </label>
-                              <label>
-                                Panel opacity
-                                <input
-                                  type="range"
-                                  min={0.72}
-                                  max={1}
-                                  step={0.02}
-                                  value={effectiveThemeStyle.panel_opacity}
-                                  onChange={(event) =>
-                                    updateThemeStyle((current) => ({
-                                      ...current,
-                                      panel_opacity: Number(event.target.value),
-                                    }))
-                                  }
-                                />
-                              </label>
-                              <label>
-                                Font size
-                                <input
-                                  type="number"
-                                  min={10}
-                                  max={18}
-                                  value={config.ui.font_size}
-                                  onChange={(event) =>
-                                    setConfig((prev) =>
-                                      prev
-                                        ? {
-                                            ...prev,
-                                            ui: {
-                                              ...prev.ui,
-                                              font_size: normalizeThemeFontSize(event.target.value),
-                                            },
-                                          }
-                                        : prev,
-                                    )
-                                  }
-                                />
-                              </label>
-                              <label>
-                                UI density
-                                <select
-                                  value={normalizeUiDensity(config.ui.density)}
-                                  onChange={(event) =>
-                                    setConfig((prev) =>
-                                      prev
-                                        ? {
-                                            ...prev,
-                                            ui: {
-                                              ...prev.ui,
-                                              density: normalizeUiDensity(event.target.value) as UiDensity,
-                                            },
-                                          }
-                                        : prev,
-                                    )
-                                  }
-                                >
-                                  <option value="compact">Compact</option>
-                                  <option value="cozy">Cozy</option>
-                                  <option value="comfortable">Comfortable</option>
-                                </select>
-                              </label>
-                              <div className="theme-color-grid">
-                                <label>
-                                  Primary
-                                  <input
-                                    type="color"
-                                    value={effectiveThemeStyle.colors.primary || "#2563eb"}
-                                    onChange={(event) => updateThemeColor("primary", event.target.value)}
-                                  />
-                                </label>
-                                <label>
-                                  Accent
-                                  <input
-                                    type="color"
-                                    value={effectiveThemeStyle.colors.accent || "#0f766e"}
-                                    onChange={(event) => updateThemeColor("accent", event.target.value)}
-                                  />
-                                </label>
-                                <label>
-                                  Text
-                                  <input
-                                    type="color"
-                                    value={effectiveThemeStyle.colors.text || "#0f172a"}
-                                    onChange={(event) => updateThemeColor("text", event.target.value)}
-                                  />
-                                </label>
-                                <label>
-                                  Panel
-                                  <input
-                                    type="color"
-                                    value={effectiveThemeStyle.colors.panel || "#ffffff"}
-                                    onChange={(event) => updateThemeColor("panel", event.target.value)}
-                                  />
-                                </label>
-                              </div>
-                              <div className="button-row">
-                                <button
-                                  type="button"
-                                  className="ghost"
-                                  onClick={() =>
-                                    setConfig((prev) =>
-                                      prev
-                                        ? {
-                                            ...prev,
-                                            ui: {
-                                              ...prev.ui,
-                                              density: "cozy",
-                                              font_size: 13,
-                                              theme_style: buildDefaultThemeStyleSettings(),
-                                            },
-                                          }
-                                        : prev,
-                                    )
-                                  }
-                                  disabled={busy}
-                                >
-                                  Reset Appearance
-                                </button>
-                              </div>
-                            </div>
-                            <div className="appearance-preview" aria-label="Appearance preview">
-                              <div className="appearance-preview-window">
-                                <div className="appearance-preview-sidebar">
-                                  <strong>{themeCopy.app_title}</strong>
-                                  <span>{themeCopy.app_subtitle}</span>
-                                </div>
-                                <div className="appearance-preview-main">
-                                  <div className="appearance-preview-card">
-                                    <strong>Dashboard</strong>
-                                    <span>Primary actions and device status.</span>
-                                    <button type="button">Primary Action</button>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                          <div className="appearance-copy-grid">
-                            <label>
-                              App title
-                              <input
-                                value={effectiveThemeStyle.copy_overrides.app_title}
-                                placeholder="Lazy Blacktea"
-                                maxLength={80}
-                                onChange={(event) => updateThemeCopy("app_title", event.target.value)}
-                              />
-                            </label>
-                            <label>
-                              App subtitle
-                              <input
-                                value={effectiveThemeStyle.copy_overrides.app_subtitle}
-                                placeholder="Device Automation"
-                                maxLength={120}
-                                onChange={(event) => updateThemeCopy("app_subtitle", event.target.value)}
-                              />
-                            </label>
-                            <label>
-                              Sidebar status label
-                              <input
-                                value={effectiveThemeStyle.copy_overrides.sidebar_status_label}
-                                placeholder="Device Status"
-                                maxLength={40}
-                                onChange={(event) => updateThemeCopy("sidebar_status_label", event.target.value)}
-                              />
-                            </label>
-                          </div>
-                          <div className="muted settings-hint">
-                            Appearance settings are saved locally. Imported images are copied into the app-managed theme
-                            folder; local image paths continue to reference the original file.
-                          </div>
-                        </div>
-	                        <div className="settings-group settings-section-system">
-	                          <h3>Output Paths</h3>
-	                          <label>
-	                            Default Output
-	                            <input
-                              placeholder="e.g. /Users/me/Downloads or C:\\Users\\me\\Downloads"
-                              value={config.output_path}
-                              onChange={(event) =>
-                                setConfig((prev) => (prev ? { ...prev, output_path: event.target.value } : prev))
-                              }
-                            />
-                          </label>
-                          <div className="button-row">
-                            <button type="button" className="ghost" onClick={handleBrowseOutputPath} disabled={busy}>
-                              Browse
-                            </button>
-                          </div>
-                          <div className="muted settings-hint">
-                            Default folder for screenshots, bugreports, and recordings. Use an absolute local folder
-                            path.
-                          </div>
-                          <label>
-                            File Export
-                            <input
-                              placeholder="Leave blank to use Default Output"
-                              value={config.file_gen_output_path}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev ? { ...prev, file_gen_output_path: event.target.value } : prev,
-                                )
-                              }
-                            />
-	                          </label>
-                          <div className="button-row">
-                            <button
-                              type="button"
-                              className="ghost"
-                              onClick={handleBrowseFileExportPath}
-                              disabled={busy}
-                            >
-                              Browse
-                            </button>
-                          </div>
-                          <div className="muted settings-hint">
-                            Folder for generated exports (logcat, UI inspector). Leave blank to reuse Default Output.
-                          </div>
-	                        </div>
-                          <div className="settings-group settings-section-system">
-                            <h3>Updates</h3>
-                            <div className="muted settings-hint">
-                              Check for new versions from GitHub Releases. Installing updates will restart the app.
-                            </div>
-                            <div className="stack">
-                              <div className="inline-row">
-                                <span className="muted">Current version</span>
-                                <code>{appVersionLabel}</code>
-                              </div>
-                              <div className="inline-row">
-                                <span className="muted">Last checked</span>
-                                <span>{updateLastCheckedMs ? new Date(updateLastCheckedMs).toLocaleString() : "--"}</span>
-                              </div>
-                            </div>
-
-                            {!isTauriRuntime() && (
-                              <div className="inline-alert info">
-                                Updates are available in the desktop app build.
-                              </div>
-                            )}
-
-                            <div className="button-row">
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={handleManualUpdateCheck}
-                                disabled={
-                                  !isTauriRuntime() ||
-                                  busy ||
-                                  updateStatus === "checking" ||
-                                  updateStatus === "installing"
-                                }
-                              >
-                                {updateStatus === "checking" && updateLastCheckSource === "manual"
-                                  ? "Checking..."
-                                  : "Check for updates"}
-                              </button>
-                              {updateAvailable &&
-                                updateStatus !== "installed" &&
-                                updateStatus !== "installed_needs_restart" && (
-                                <button
-                                  type="button"
-                                  onClick={() => setUpdateModalOpen(true)}
-                                  disabled={busy || updateStatus === "installing"}
-                                >
-                                  Install and restart
-                                </button>
-                              )}
-                            </div>
-
-                            {updateStatus === "update_available" && updateAvailable && (
-                              <div className="inline-alert info">
-                                <strong>Update available</strong>
-                                <span className="muted">Latest: {updateAvailable.version}</span>
-                              </div>
-                            )}
-                            {updateStatus === "publishing_pending" && (
-                              <div className="inline-alert info">{updatePublishingMessage}</div>
-                            )}
-                            {updateStatus === "installed_needs_restart" && (
-                              <div className="inline-alert info">
-                                <strong>Update installed</strong>
-                                <span className="muted">Please restart the app manually.</span>
-                              </div>
-                            )}
-                            {updateStatus === "up_to_date" && updateLastCheckSource === "manual" && (
-                              <div className="inline-alert info">You are up to date.</div>
-                            )}
-                            {updateStatus === "error" && updateError && (
-                              <div className="inline-alert error">{updateError}</div>
-                            )}
-                          </div>
-
-                          <div className="settings-group settings-section-system">
-                            <h3>Notifications</h3>
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.notifications.enabled}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          notifications: { ...prev.notifications, enabled: event.target.checked },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Enable notifications
-                            </label>
-                            <div className="muted settings-hint">
-                              Controls task completion alerts.
-                            </div>
-
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.notifications.in_app_modal_enabled}
-                                disabled={!config.notifications.enabled}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          notifications: {
-                                            ...prev.notifications,
-                                            in_app_modal_enabled: event.target.checked,
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              In-app completion modal
-                            </label>
-                            <div className="muted settings-hint">
-                              Show an in-app modal when tracked tasks complete.
-                            </div>
-
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.notifications.desktop_enabled}
-                                disabled={!config.notifications.enabled}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          notifications: {
-                                            ...prev.notifications,
-                                            desktop_enabled: event.target.checked,
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Desktop notifications
-                            </label>
-                            <div className="muted settings-hint">Show OS notifications when tasks complete.</div>
-
-                            {!isTauriRuntime() && (
-                              <div className="inline-alert info">
-                                Desktop notifications are available in the desktop app build.
-                              </div>
-                            )}
-
-                            <div className="stack">
-                              <div className="inline-row">
-                                <span className="muted">Permission</span>
-                                <code>{isTauriRuntime() ? desktopNotificationPermission : "browser"}</code>
-                              </div>
-                            </div>
-
-                            <div className="button-row">
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => void refreshDesktopNotificationsPermission()}
-                                disabled={!isTauriRuntime() || busy}
-                              >
-                                Refresh
-                              </button>
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() => void handleRequestDesktopNotificationsPermission()}
-                                disabled={!isTauriRuntime() || busy}
-                              >
-                                Request permission
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleSendTestDesktopNotification()}
-                                disabled={!isTauriRuntime() || busy}
-                              >
-                                Send test
-                              </button>
-                            </div>
-
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.notifications.desktop_only_when_unfocused}
-                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          notifications: {
-                                            ...prev.notifications,
-                                            desktop_only_when_unfocused: event.target.checked,
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Only when unfocused
-                            </label>
-                            <div className="muted settings-hint">
-                              When enabled, notifications are sent only when the app window is not focused.
-                            </div>
-
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.notifications.desktop_on_error}
-                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          notifications: { ...prev.notifications, desktop_on_error: event.target.checked },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Notify on errors
-                            </label>
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.notifications.desktop_on_success}
-                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          notifications: {
-                                            ...prev.notifications,
-                                            desktop_on_success: event.target.checked,
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Notify on success
-                            </label>
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.notifications.desktop_on_cancelled}
-                                disabled={!config.notifications.enabled || !config.notifications.desktop_enabled}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          notifications: {
-                                            ...prev.notifications,
-                                            desktop_on_cancelled: event.target.checked,
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Notify on cancelled
-                            </label>
-                          </div>
-	                        <div className="settings-group settings-section-connectivity">
-	                          <h3>Devices</h3>
-	                          <label className="toggle">
-	                            <input
-	                              type="checkbox"
-	                              checked={config.device.auto_refresh_enabled}
-	                              onChange={(event) =>
-	                                setConfig((prev) =>
-	                                  prev
-	                                    ? {
-	                                        ...prev,
-	                                        device: { ...prev.device, auto_refresh_enabled: event.target.checked },
-	                                      }
-	                                    : prev,
-	                                )
-	                              }
-	                            />
-	                            Auto-refresh device details
-	                          </label>
-                            <div className="muted settings-hint">
-                              When enabled, background detail refresh keeps battery and connectivity fields up to date (no toast errors).
-                            </div>
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.device.ios_auto_refresh_enabled === true}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          device: {
-                                            ...prev.device,
-                                            ios_auto_refresh_enabled: event.target.checked,
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Auto-refresh iOS inventory
-                            </label>
-                            <div className="muted settings-hint">
-                              {formatIosRefreshHint(config.device.ios_auto_refresh_enabled === true)} Android still uses
-                              ADB tracking for hot-plug.
-                            </div>
-                            <label>
-                              iOS refresh interval (sec)
-                              <input
-                                type="number"
-                                min={5}
-                                max={300}
-                                value={config.device.ios_refresh_interval ?? 15}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          device: {
-                                            ...prev.device,
-                                            ios_refresh_interval: clampIosRefreshIntervalSec(
-                                              parseIntegerSettingInput(event.target.value, prev.device.ios_refresh_interval ?? 15),
-                                            ),
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                            </label>
-	                          <label>
-	                            Refresh interval (sec)
-		                            <input
-		                              type="number"
-		                              min={1}
-		                              value={config.device.refresh_interval}
-		                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        device: {
-                                          ...prev.device,
-                                          refresh_interval: parseIntegerSettingInput(
-                                            event.target.value,
-                                            prev.device.refresh_interval,
-                                            { min: 1 },
-                                          ),
-                                        },
-                                      }
-                                    : prev,
-                                )
-		                              }
-		                            />
-                          </label>
-                          <div className="muted settings-hint">
-                              Refresh interval for tracker recovery checks. Also used for detail sync when auto-refresh is enabled. Minimum 1 second.
-                            </div>
-                            <div className="muted settings-hint">
-                              Device connection state always follows <code>adb track-devices</code> events. <code>adb devices</code> is only used
-                              for startup or recovery sync, not fixed polling.
-                            </div>
-                            <label className="toggle">
-                              <input
-                                type="checkbox"
-                                checked={config.device.device_retention_enabled !== false}
-                                onChange={(event) =>
-                                  setConfig((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          device: {
-                                            ...prev.device,
-                                            device_retention_enabled: event.target.checked,
-                                          },
-                                        }
-                                      : prev,
-                                  )
-                                }
-                              />
-                              Retain rebooting and disconnected devices
-                            </label>
-                            <div className="muted settings-hint">
-                              Temporarily keeps rebooting and disconnected devices in the list with clear status to avoid losing selections.
-                            </div>
-                            {config.device.device_retention_enabled !== false && (
-                              <>
-                                <label>
-                                  Reboot retention timeout (sec)
-                                  <input
-                                    type="number"
-                                    min={10}
-                                    max={600}
-                                    value={config.device.device_reboot_retention_timeout_sec ?? 90}
-                                    onChange={(event) =>
-                                      setConfig((prev) =>
-                                        prev
-                                          ? {
-                                              ...prev,
-                                              device: {
-                                                ...prev.device,
-                                                device_reboot_retention_timeout_sec: clampRetentionTimeoutSec(
-                                                  parseIntegerSettingInput(
-                                                    event.target.value,
-                                                    prev.device.device_reboot_retention_timeout_sec ?? 90,
-                                                  ),
-                                                  90,
-                                                ),
-                                              },
-                                            }
-                                          : prev,
-                                      )
-                                    }
-                                  />
-                                </label>
-                                <label>
-                                  Disconnect retention timeout (sec)
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    max={300}
-                                    value={config.device.device_disconnect_retention_timeout_sec ?? 45}
-                                    onChange={(event) =>
-                                      setConfig((prev) =>
-                                        prev
-                                          ? {
-                                              ...prev,
-                                              device: {
-                                                ...prev.device,
-                                                device_disconnect_retention_timeout_sec: clampRetentionTimeoutSec(
-                                                  parseIntegerSettingInput(
-                                                    event.target.value,
-                                                    prev.device.device_disconnect_retention_timeout_sec ?? 45,
-                                                  ),
-                                                  45,
-                                                ),
-                                              },
-                                            }
-                                          : prev,
-                                      )
-                                    }
-                                  />
-                                </label>
-                              </>
-                            )}
-		                        </div>
-	                        <div className="settings-group settings-section-operations">
-	                          <h3>Commands</h3>
-	                          <label>
-	                            Timeout (sec)
-	                            <input
-	                              type="number"
-	                              value={config.command.command_timeout}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        command: {
-                                          ...prev.command,
-                                          command_timeout: parseIntegerSettingInput(
-                                            event.target.value,
-                                            prev.command.command_timeout,
-                                            { min: 1 },
-                                          ),
-                                        },
-                                      }
-                                    : prev,
-                                )
-                              }
-	                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Shell Commands timeout in seconds. Increase if your <code>adb shell</code> commands are cut
-                            off.
-                          </div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.command.parallel_execution}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        command: { ...prev.command, parallel_execution: event.target.checked },
-                                      }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Parallel execution
-                          </label>
-                          <div className="muted settings-hint">
-                            Run multi-device operations in parallel (Shell Commands, APK batch installs). Disable if you
-                            see flaky ADB/USB behavior.
-                          </div>
-                        </div>
-                        <div className="settings-group settings-section-operations">
-                          <h3>Screenshot</h3>
-                          <label>
-                            Display ID
-	                            <input
-	                              type="number"
-	                              min={-1}
-	                              value={config.screenshot.display_id}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        screenshot: {
-                                          ...prev.screenshot,
-                                          display_id: parseIntegerSettingInput(
-                                            event.target.value,
-                                            prev.screenshot.display_id,
-                                            { min: -1 },
-                                          ),
-                                        },
-                                      }
-                                    : prev,
-                                )
-                              }
-	                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Use <code>-1</code> for the default display. Use <code>0+</code> to target a specific
-                            display.
-                          </div>
-                          <label>
-                            Extra args
-                            <input
-                              value={config.screenshot.extra_args}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        screenshot: { ...prev.screenshot, extra_args: event.target.value },
-                                      }
-                                    : prev,
-                                )
-                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Extra <code>screencap</code> flags, space-separated. Leave blank for defaults.
-                          </div>
-                        </div>
-                        <div className="settings-group settings-section-operations">
-                          <h3>Screenrecord</h3>
-                          <label>
-                            Bit rate
-                            <input
-                              value={config.screen_record.bit_rate}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        screen_record: { ...prev.screen_record, bit_rate: event.target.value },
-                                      }
-                                    : prev,
-                                )
-                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Video bit rate (bits per second). Example: <code>4000000</code>.
-                          </div>
-                          <label>
-                            Time limit (sec)
-                            <input
-                              type="number"
-                              min={0}
-                              value={config.screen_record.time_limit_sec}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-	                                  prev
-	                                    ? {
-	                                        ...prev,
-	                                        screen_record: {
-                                          ...prev.screen_record,
-                                          time_limit_sec: parseIntegerSettingInput(
-                                            event.target.value,
-                                            prev.screen_record.time_limit_sec,
-                                            { min: 0 },
-                                          ),
-                                        },
-                                      }
-                                    : prev,
-	                                )
-	                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Use <code>0</code> to record until stopped. Values above <code>180</code> use the long
-                            recording strategy automatically.
-                          </div>
-                          <label>
-                            Display ID
-                            <input
-                              type="number"
-                              min={-1}
-                              value={config.screen_record.display_id}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-	                                  prev
-	                                    ? {
-	                                        ...prev,
-                                        screen_record: {
-                                          ...prev.screen_record,
-                                          display_id: parseIntegerSettingInput(
-                                            event.target.value,
-                                            prev.screen_record.display_id,
-                                            { min: -1 },
-                                          ),
-                                        },
-                                      }
-                                    : prev,
-	                                )
-	                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Use <code>-1</code> for the default display. Use <code>0+</code> to target a specific
-                            display.
-                          </div>
-                          <label>
-                            Size
-                            <input
-                              placeholder="e.g. 1280x720"
-                              value={config.screen_record.size}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? { ...prev, screen_record: { ...prev.screen_record, size: event.target.value } }
-                                    : prev,
-                                )
-                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Optional size as <code>WIDTHxHEIGHT</code>. Leave blank to keep device native resolution.
-                          </div>
-                          <label>
-                            Extra args
-                            <input
-                              value={config.screen_record.extra_args}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        screen_record: { ...prev.screen_record, extra_args: event.target.value },
-                                      }
-                                    : prev,
-                                )
-                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Extra <code>screenrecord</code> flags, space-separated. Leave blank for defaults.
-                          </div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.screen_record.use_hevc}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        screen_record: { ...prev.screen_record, use_hevc: event.target.checked },
-                                      }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Use HEVC
-                          </label>
-                          <div className="muted settings-hint">
-                            Use HEVC/H.265 codec (smaller files, may not be supported on older devices).
-                          </div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.screen_record.bugreport}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        screen_record: { ...prev.screen_record, bugreport: event.target.checked },
-                                      }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Bugreport overlay
-                          </label>
-                          <div className="muted settings-hint">
-                            Overlay bugreport info in the recording (Android feature).
-                          </div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.screen_record.verbose}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? { ...prev, screen_record: { ...prev.screen_record, verbose: event.target.checked } }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Verbose output
-                          </label>
-                          <div className="muted settings-hint">
-                            Enable verbose <code>screenrecord</code> output for troubleshooting.
-                          </div>
-                        </div>
-                        <div className="settings-group settings-section-operations">
-                          <h3>scrcpy</h3>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.scrcpy.stay_awake}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? { ...prev, scrcpy: { ...prev.scrcpy, stay_awake: event.target.checked } }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Stay awake
-                          </label>
-                          <div className="muted settings-hint">Keep the device awake while mirroring.</div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.scrcpy.turn_screen_off}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? { ...prev, scrcpy: { ...prev.scrcpy, turn_screen_off: event.target.checked } }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Turn screen off
-                          </label>
-                          <div className="muted settings-hint">
-                            Turn off the device display while mirroring (stream stays on).
-                          </div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.scrcpy.disable_screensaver}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? { ...prev, scrcpy: { ...prev.scrcpy, disable_screensaver: event.target.checked } }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Disable screensaver
-                          </label>
-                          <div className="muted settings-hint">Disable screensaver while mirroring.</div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={config.scrcpy.enable_audio_playback}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        scrcpy: { ...prev.scrcpy, enable_audio_playback: event.target.checked },
-                                      }
-                                    : prev,
-                                )
-                              }
-                            />
-                            Enable audio
-                          </label>
-                          <div className="muted settings-hint">Enable audio playback (depends on scrcpy version).</div>
-                          <label>
-                            Bit rate
-                            <input
-                              placeholder="e.g. 8M"
-                              value={config.scrcpy.bitrate}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev ? { ...prev, scrcpy: { ...prev.scrcpy, bitrate: event.target.value } } : prev,
-                                )
-                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Video bit rate. scrcpy format, e.g. <code>8M</code> or <code>16M</code>.
-                          </div>
-                          <label>
-                            Max size
-	                            <input
-	                              type="number"
-	                              min={0}
-	                              value={config.scrcpy.max_size}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? {
-                                          ...prev,
-                                          scrcpy: {
-                                            ...prev.scrcpy,
-                                            max_size: parseIntegerSettingInput(
-                                              event.target.value,
-                                              prev.scrcpy.max_size,
-                                              { min: 0 },
-                                            ),
-                                          },
-                                        }
-                                    : prev,
-                                )
-                              }
-	                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Limit the max video dimension in pixels (<code>0</code> = no limit).
-                          </div>
-                          <label>
-                            Extra args
-                            <input
-                              value={config.scrcpy.extra_args}
-                              onChange={(event) =>
-                                setConfig((prev) =>
-                                  prev
-                                    ? { ...prev, scrcpy: { ...prev.scrcpy, extra_args: event.target.value } }
-                                    : prev,
-                                )
-                              }
-                            />
-                          </label>
-                          <div className="muted settings-hint">
-                            Additional scrcpy CLI args, space-separated. Leave blank for defaults.
-                          </div>
-                        </div>
-                      </div>
-                      </div>
-                      <div className="button-row settings-actions">
-                        <button onClick={handleSaveConfig} disabled={busy}>
-                          Save Settings
-                        </button>
-                        <button onClick={handleResetConfig} disabled={busy}>
-                          Reset Defaults
-                        </button>
-                      </div>
-                    </section>
-                  </div>
-                ) : (
-                  <div className="page-section">
-                    <div className="page-header">
-                      <div>
-                        <h1>Settings</h1>
-                        <p className="muted">Loading settings...</p>
-                      </div>
-                    </div>
-                    <section className="panel">
-                      <h2>Settings</h2>
-                      <p className="muted">Loading settings...</p>
-                    </section>
-                  </div>
-                )
+                <Suspense fallback={null}>
+                  <LazySettingsPage
+                  config={config}
+                  setConfig={setConfig}
+                  busy={busy}
+                  adbInfo={adbInfo}
+                  clearAdbInfo={handleClearAdbInfo}
+                  hostOs={hostOs}
+                  iosToolGuidanceRows={iosToolGuidanceRows}
+                  effectiveThemeStyle={effectiveThemeStyle}
+                  themeCopy={themeCopy}
+                  updateThemeStyle={updateThemeStyle}
+                  updateThemeColor={updateThemeColor}
+                  updateThemeCopy={updateThemeCopy}
+                  onBrowseAdbPath={handleBrowseAdbPath}
+                  onCheckAdb={handleCheckAdb}
+                  onRestartAdbServer={handleRestartAdbServer}
+                  onKillAdbServer={handleKillAdbServer}
+                  onCheckIosTools={handleCheckIosTools}
+                  onBrowseThemeBackgroundPath={handleBrowseThemeBackgroundPath}
+                  onImportThemeBackgroundPath={handleImportThemeBackgroundPath}
+                  onBrowseOutputPath={handleBrowseOutputPath}
+                  onBrowseFileExportPath={handleBrowseFileExportPath}
+                  appVersionLabel={appVersionLabel}
+                  updateLastCheckedMs={updateLastCheckedMs}
+                  updateStatus={updateStatus}
+                  updateLastCheckSource={updateLastCheckSource}
+                  updateAvailable={updateAvailable}
+                  updatePublishingMessage={updatePublishingMessage}
+                  updateError={updateError}
+                  onManualUpdateCheck={handleManualUpdateCheck}
+                  onOpenUpdateModal={handleOpenUpdateModal}
+                  desktopNotificationPermission={desktopNotificationPermission}
+                  onRefreshDesktopNotificationsPermission={refreshDesktopNotificationsPermission}
+                  onRequestDesktopNotificationsPermission={handleRequestDesktopNotificationsPermission}
+                  onSendTestDesktopNotification={handleSendTestDesktopNotification}
+                  onSaveConfig={handleSaveConfig}
+                  onResetConfig={handleResetConfig}
+                />
+                </Suspense>
               }
             />
             <Route path="*" element={<Navigate to="/" replace />} />
