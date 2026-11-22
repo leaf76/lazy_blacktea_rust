@@ -46,3 +46,8 @@ rusqlite = { version = "0.31", features = ["bundled", "functions"] }
 # macOS-only: Gatekeeper quarantine check for custom ADB paths (see adb/locator.rs)
 [target.'cfg(target_os = "macos")'.dependencies]
 xattr = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

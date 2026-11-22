@@ -1,5 +1,8 @@
 use super::*;
-use crate::app::models::BugreportExtractTemplateKind;
+use crate::app::models::{
+    BugreportExtractQuery, BugreportExtractTemplateKind, BugreportLogFilters,
+};
+use crate::app::state::{LogcatHandle, NetProfilerHandle, PerfMonitorHandle};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -1339,25 +1342,61 @@ fn install_apk_batch_inner_returns_invalid_apk_result_without_running_adb() {
 }
 
 #[test]
+fn build_device_detail_script_runs_getprop_first_with_early_exit() {
+    let script = build_device_detail_script();
+    assert!(
+        script.starts_with(&format!(
+            "echo __LBT_DETAIL__getprop__; getprop || exit {DETAIL_GETPROP_FAIL_EXIT_CODE}; echo __LBT_DETAIL__battery__;"
+        )),
+        "unexpected script prefix: {script}"
+    );
+}
+
+#[test]
 fn load_device_detail_bails_early_when_getprop_fails() {
     let trace_id = "trace-load-device-detail-1";
     let serial = "SERIAL-1";
-    let mut called_steps: Vec<&'static str> = Vec::new();
 
-    let run = |_args: &[String],
-               _timeout: Duration,
-               step: &'static str|
+    // Case 1: adb shell transport/timeout error returns None in a single invocation.
+    let mut called_steps: Vec<&'static str> = Vec::new();
+    let run_err = |_args: &[String],
+                   _timeout: Duration,
+                   step: &'static str|
      -> Result<crate::app::adb::runner::CommandOutput, AppError> {
         called_steps.push(step);
-        if step == "getprop" {
-            return Err(AppError::system("Command timed out".to_string(), trace_id));
-        }
-        panic!("expected load_device_detail to bail after getprop failure");
+        Err(AppError::system("Command timed out".to_string(), trace_id))
     };
+    assert!(load_device_detail(serial, trace_id, false, 0, run_err).is_none());
+    assert_eq!(called_steps, vec!["device_detail_batch"]);
 
-    let detail = load_device_detail(serial, trace_id, false, 0, run);
-    assert!(detail.is_none());
-    assert_eq!(called_steps, vec!["getprop"]);
+    // Case 2: device shell exits early with DETAIL_GETPROP_FAIL_EXIT_CODE when getprop fails.
+    let mut called_steps_exit = Vec::new();
+    let run_getprop_fail = |_args: &[String],
+                            _timeout: Duration,
+                            step: &'static str|
+     -> Result<crate::app::adb::runner::CommandOutput, AppError> {
+        called_steps_exit.push(step);
+        Ok(crate::app::adb::runner::CommandOutput {
+            stdout: "__LBT_DETAIL__getprop__\n".to_string(),
+            stderr: "getprop: not found".to_string(),
+            exit_code: Some(DETAIL_GETPROP_FAIL_EXIT_CODE),
+        })
+    };
+    assert!(load_device_detail(serial, trace_id, false, 0, run_getprop_fail).is_none());
+    assert_eq!(called_steps_exit, vec!["device_detail_batch"]);
+
+    // Case 3: missing getprop marker (e.g. shell aborted before emitting markers) returns None.
+    let run_missing_marker = |_args: &[String],
+                              _timeout: Duration,
+                              _step: &'static str|
+     -> Result<crate::app::adb::runner::CommandOutput, AppError> {
+        Ok(crate::app::adb::runner::CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        })
+    };
+    assert!(load_device_detail(serial, trace_id, false, 0, run_missing_marker).is_none());
 }
 
 #[test]
@@ -1366,10 +1405,13 @@ fn load_device_detail_continues_when_batched_probes_partially_fail() {
     let serial = "SERIAL-2";
     let mut called_steps: Vec<&'static str> = Vec::new();
 
-    // After getprop, every remaining probe runs in a single batched `adb shell` call whose stdout
+    // Every probe including getprop runs in a single batched `adb shell` call whose stdout
     // is split by `__LBT_DETAIL__<key>__` marker lines. The `gms` section is intentionally empty
     // to exercise graceful degradation of an individual probe within the batch.
     let batched_stdout = concat!(
+        "__LBT_DETAIL__getprop__\n",
+        "[ro.product.model]: [Pixel 9]\n",
+        "[ro.build.version.release]: [15]\n",
         "__LBT_DETAIL__battery__\n",
         "level: 50\n",
         "__LBT_DETAIL__wifi__\n",
@@ -1395,21 +1437,17 @@ fn load_device_detail_continues_when_batched_probes_partially_fail() {
                step: &'static str|
      -> Result<crate::app::adb::runner::CommandOutput, AppError> {
         called_steps.push(step);
-
-        let ok = |stdout: &str| crate::app::adb::runner::CommandOutput {
-            stdout: stdout.to_string(),
+        assert_eq!(step, "device_detail_batch");
+        Ok(crate::app::adb::runner::CommandOutput {
+            stdout: batched_stdout.to_string(),
             stderr: String::new(),
             exit_code: Some(0),
-        };
-
-        match step {
-            "getprop" => Ok(ok("")),
-            "device_detail_batch" => Ok(ok(batched_stdout)),
-            other => panic!("unexpected step {other}"),
-        }
+        })
     };
 
     let detail = load_device_detail(serial, trace_id, false, 0, run).expect("detail");
+    assert_eq!(detail.model.as_deref(), Some("Pixel 9"));
+    assert_eq!(detail.android_version.as_deref(), Some("15"));
     // Probes parsed out of the batched sections.
     assert_eq!(detail.battery_level, Some(50));
     assert_eq!(detail.wifi_is_on, Some(true));
@@ -1420,7 +1458,7 @@ fn load_device_detail_continues_when_batched_probes_partially_fail() {
     // The empty `gms` section degrades gracefully to no version.
     assert_eq!(detail.gms_version, None);
 
-    assert_eq!(called_steps, vec!["getprop", "device_detail_batch"]);
+    assert_eq!(called_steps, vec!["device_detail_batch"]);
 }
 
 #[test]
