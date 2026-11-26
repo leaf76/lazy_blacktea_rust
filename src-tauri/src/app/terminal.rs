@@ -1,6 +1,7 @@
+use crate::app::adb::runner::new_background_command;
 use crate::app::models::TerminalEvent;
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,7 +28,7 @@ impl TerminalSession {
         trace_id: String,
         emitter: Arc<dyn Fn(TerminalEvent) + Send + Sync>,
     ) -> Result<Self, std::io::Error> {
-        let mut cmd = Command::new(program);
+        let mut cmd = new_background_command(program);
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -1,9 +1,10 @@
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
 use tracing::{info, warn};
 
+use crate::app::adb::runner::new_background_command;
 use crate::app::error::AppError;
 use crate::app::ios;
 use crate::app::models::{
@@ -73,7 +74,7 @@ pub fn start_ios_syslog(
         emitter,
         &trace_id,
         |program, serial, _filter, trace_id| {
-            Command::new(program)
+            new_background_command(program)
                 .args(["-u", serial])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

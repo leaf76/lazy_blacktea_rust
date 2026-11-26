@@ -441,6 +441,7 @@ const UiInspectorPage = ({
               <iframe
                 ref={uiHierarchyFrameRef}
                 title="UI Inspector"
+                sandbox="allow-same-origin"
                 srcDoc={uiHtml}
                 className="ui-frame"
                 onLoad={() => setUiHierarchyFrameToken((value) => value + 1)}

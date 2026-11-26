@@ -1,4 +1,4 @@
-pub fn validate_device_path(path: &str) -> Result<(), String> {
+fn validate_device_path_impl(path: &str, allow_root: bool) -> Result<(), String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("device_path is required".to_string());
@@ -6,10 +6,10 @@ pub fn validate_device_path(path: &str) -> Result<(), String> {
     if !trimmed.starts_with('/') {
         return Err("device_path must be an absolute device path starting with '/'".to_string());
     }
-    if trimmed.contains('\0') {
+    if trimmed.contains(['\0', '\n', '\r']) {
         return Err("device_path contains invalid characters".to_string());
     }
-    if trimmed == "/" {
+    if !allow_root && trimmed == "/" {
         return Err("device_path must not be root".to_string());
     }
     for segment in trimmed.split('/') {
@@ -18,6 +18,27 @@ pub fn validate_device_path(path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub fn validate_device_path(path: &str) -> Result<(), String> {
+    validate_device_path_impl(path, false)
+}
+
+pub fn validate_device_browse_path(path: &str) -> Result<(), String> {
+    validate_device_path_impl(path, true)
+}
+
+pub fn quote_adb_shell_arg(arg: &str) -> String {
+    let escaped = arg.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+pub fn floor_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 pub fn device_parent_dir(device_path: &str) -> String {
@@ -107,5 +128,37 @@ mod tests {
     fn sanitize_filename_component_handles_empty() {
         assert_eq!(sanitize_filename_component(""), "device");
         assert_eq!(sanitize_filename_component("   "), "device");
+    }
+
+    #[test]
+    fn validate_device_path_rejects_newlines() {
+        assert!(validate_device_path("/sdcard/a\nb").is_err());
+        assert!(validate_device_path("/sdcard/a\rb").is_err());
+        assert!(validate_device_browse_path("/").is_ok());
+        assert!(validate_device_browse_path("/sdcard/My Files").is_ok());
+        assert!(validate_device_browse_path("/sdcard/../etc").is_err());
+    }
+
+    #[test]
+    fn quote_adb_shell_arg_escapes_special_characters() {
+        assert_eq!(
+            quote_adb_shell_arg("/sdcard/My Files/test (1).txt"),
+            "'/sdcard/My Files/test (1).txt'"
+        );
+        assert_eq!(
+            quote_adb_shell_arg("/sdcard/it's; rm -rf / $(id)"),
+            "'/sdcard/it'\\''s; rm -rf / $(id)'"
+        );
+    }
+
+    #[test]
+    fn floor_char_boundary_handles_multibyte_utf8() {
+        let text = "ab中文字";
+        assert_eq!(floor_char_boundary(text, 0), 0);
+        assert_eq!(floor_char_boundary(text, 2), 2);
+        assert_eq!(floor_char_boundary(text, 3), 2);
+        assert_eq!(floor_char_boundary(text, 4), 2);
+        assert_eq!(floor_char_boundary(text, 5), 5);
+        assert_eq!(floor_char_boundary(text, 99), text.len());
     }
 }

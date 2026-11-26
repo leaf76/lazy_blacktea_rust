@@ -1,6 +1,7 @@
 use std::path::Path;
-use std::process::Command;
+use std::time::Duration;
 
+use crate::app::adb::runner::run_command_with_timeout;
 use crate::app::config::{ScrcpySettings, ScreenRecordSettings};
 
 pub struct ScrcpyAvailability {
@@ -155,9 +156,11 @@ enum AudioFlagMode {
 }
 
 fn try_version(command: &str) -> Option<String> {
-    let output = Command::new(command).arg("--version").output().ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let args = vec!["--version".to_string()];
+    let output =
+        run_command_with_timeout(command, &args, Duration::from_secs(5), "scrcpy-version").ok()?;
+    if output.exit_code == Some(0) {
+        Some(output.stdout.trim().to_string())
     } else {
         None
     }

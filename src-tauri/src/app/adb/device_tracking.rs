@@ -1,5 +1,5 @@
 use std::io::{BufRead, Read};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tracing::warn;
 
+use crate::app::adb::runner::new_background_command;
 use crate::app::adb::track_devices::TrackDevicesStreamParser;
 use crate::app::models::{DeviceCapabilities, DeviceInfo};
 
@@ -44,7 +45,7 @@ pub fn start_device_tracker(
 
     let join = thread::spawn(move || {
         let try_spawn = |args: &[&str]| -> Option<Child> {
-            match Command::new(&adb_program)
+            match new_background_command(&adb_program)
                 .args(args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

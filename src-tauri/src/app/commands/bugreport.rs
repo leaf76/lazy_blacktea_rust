@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use tracing::warn;
 
 use crate::app::adb::bugreport::{parse_bugreportz_line, BugreportzPayload};
 use crate::app::adb::paths::sanitize_filename_component;
-use crate::app::adb::runner::{run_adb, run_command_with_timeout};
+use crate::app::adb::runner::{new_background_command, run_adb, run_command_with_timeout};
 use crate::app::bugreport_extract;
 use crate::app::bugreport_logcat;
 use crate::app::error::AppError;
@@ -500,7 +500,7 @@ fn run_bugreport_streaming(
     cancel_flag: &Arc<AtomicBool>,
     child_holder: &Arc<std::sync::Mutex<Option<std::process::Child>>>,
 ) -> Result<Option<String>, String> {
-    let child = Command::new(adb_program)
+    let child = new_background_command(adb_program)
         .args(["-s", serial, "shell", "bugreportz", "-p"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

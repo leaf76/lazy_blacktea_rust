@@ -7,7 +7,10 @@ use mime_guess::MimeGuess;
 use tauri::AppHandle;
 
 use crate::app::adb::parse::parse_ls_la;
-use crate::app::adb::paths::{device_parent_dir, validate_device_path};
+use crate::app::adb::paths::{
+    device_parent_dir, floor_char_boundary, quote_adb_shell_arg, validate_device_browse_path,
+    validate_device_path,
+};
 use crate::app::adb::runner::run_command_with_timeout;
 use crate::app::error::AppError;
 use crate::app::models::{CommandResponse, DeviceFileEntry, FilePreview};
@@ -24,6 +27,10 @@ pub fn list_device_files(
     ensure_non_empty(&serial, "serial", &trace_id)?;
     ensure_non_empty(&path, "path", &trace_id)?;
 
+    if let Err(message) = validate_device_browse_path(&path) {
+        return Err(AppError::validation(message, &trace_id));
+    }
+
     let adb_program = get_adb_program(&trace_id)?;
     let normalized = path.trim().to_string();
     let dir_hint = if normalized == "/" {
@@ -37,7 +44,7 @@ pub fn list_device_files(
         "shell".to_string(),
         "ls".to_string(),
         "-la".to_string(),
-        dir_hint,
+        quote_adb_shell_arg(&dir_hint),
     ];
     let mut output =
         run_command_with_timeout(&adb_program, &dir_args, Duration::from_secs(300), &trace_id)?;
@@ -48,7 +55,7 @@ pub fn list_device_files(
             "shell".to_string(),
             "ls".to_string(),
             "-la".to_string(),
-            normalized.clone(),
+            quote_adb_shell_arg(&normalized),
         ];
         output = run_command_with_timeout(
             &adb_program,
@@ -177,7 +184,7 @@ pub fn push_device_file(
             "shell".to_string(),
             "mkdir".to_string(),
             "-p".to_string(),
-            device_dir,
+            quote_adb_shell_arg(&device_dir),
         ];
         let mkdir_output = run_command_with_timeout(
             &adb_program,
@@ -264,7 +271,7 @@ pub fn mkdir_device_dir(
         "shell".to_string(),
         "mkdir".to_string(),
         "-p".to_string(),
-        device_path.clone(),
+        quote_adb_shell_arg(&device_path),
     ];
     let output = run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
     if output.exit_code.unwrap_or_default() != 0 {
@@ -311,8 +318,8 @@ pub fn rename_device_path(
         serial.clone(),
         "shell".to_string(),
         "mv".to_string(),
-        from_path,
-        to_path.clone(),
+        quote_adb_shell_arg(&from_path),
+        quote_adb_shell_arg(&to_path),
     ];
     let output = run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
     if output.exit_code.unwrap_or_default() != 0 {
@@ -355,7 +362,7 @@ pub fn delete_device_path(
     } else {
         args.push("-f".to_string());
     }
-    args.push(device_path.clone());
+    args.push(quote_adb_shell_arg(&device_path));
 
     let output = run_command_with_timeout(&adb_program, &args, Duration::from_secs(10), &trace_id)?;
     if output.exit_code.unwrap_or_default() != 0 {
@@ -420,7 +427,8 @@ pub fn preview_local_file(
             is_text = true;
             let mut content = text.to_string();
             if buffer.len() > MAX_TEXT_PREVIEW_BYTES {
-                content.truncate(MAX_TEXT_PREVIEW_BYTES);
+                let boundary = floor_char_boundary(&content, MAX_TEXT_PREVIEW_BYTES);
+                content.truncate(boundary);
                 content.push_str("\n… (truncated)");
             }
             preview_text = Some(content);

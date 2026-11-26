@@ -34,13 +34,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["clock"] }
 regex = "1"
 tempfile = "3"
-zip = "9"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 mime_guess = "2"
 base64 = "0.22"
 png = "0.18"
 quick-xml = "0.42"
 plist = "1"
-dirs = "5"
+dirs = "6"
 rusqlite = { version = "0.31", features = ["bundled", "functions"] }
 
 # macOS-only: Gatekeeper quarantine check for custom ADB paths (see adb/locator.rs)

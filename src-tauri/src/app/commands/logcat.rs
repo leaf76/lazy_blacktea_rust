@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use chrono::Utc;
 use tauri::{AppHandle, Emitter, State};
 use tracing::warn;
 
-use crate::app::adb::runner::run_adb;
+use crate::app::adb::runner::{new_background_command, run_adb};
 use crate::app::config::load_config;
 use crate::app::error::AppError;
 use crate::app::models::{CommandResponse, LegacyLogcatPreset, LogcatExportResult, LogcatStatus};
@@ -250,7 +250,7 @@ pub fn smoke_start_logcat_stream(
         emitter,
         trace_id,
         |program, serial, filter, trace_id| {
-            let mut cmd = Command::new(program);
+            let mut cmd = new_background_command(program);
             cmd.args(["-s", serial, "logcat"]);
             if let Some(filter) = filter {
                 cmd.args(filter.split_whitespace());
@@ -483,7 +483,7 @@ pub fn start_logcat(
         emitter,
         &trace_id,
         |program, serial, filter, trace_id| {
-            let mut cmd = Command::new(program);
+            let mut cmd = new_background_command(program);
             cmd.args(["-s", serial, "logcat"]);
             if let Some(filter) = filter {
                 cmd.args(filter.split_whitespace());

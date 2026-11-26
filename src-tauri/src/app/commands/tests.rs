@@ -1868,3 +1868,14 @@ fn validates_adb_server_action_and_logcat_buffer_size() {
     assert!(validate_logcat_buffer_size("999G").is_err());
     assert!(validate_logcat_buffer_size("1M; rm -rf /").is_err());
 }
+
+#[test]
+fn append_limited_does_not_split_multibyte_utf8_characters() {
+    let mut buffer = String::from("ab");
+    append_limited(&mut buffer, "中文字", 4);
+    assert_eq!(buffer, "ab");
+
+    let mut buffer2 = String::from("ab");
+    append_limited(&mut buffer2, "中文字", 5);
+    assert_eq!(buffer2, "ab中");
+}

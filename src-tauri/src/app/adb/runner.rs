@@ -4,10 +4,33 @@ use std::time::{Duration, Instant};
 
 use crate::app::error::AppError;
 
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Creates a `Command` configured not to flash a console window on Windows.
+pub fn new_background_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawCommandOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
 }
 
@@ -25,7 +48,56 @@ pub fn run_command_with_timeout(
     timeout: Duration,
     trace_id: &str,
 ) -> Result<CommandOutput, AppError> {
-    let mut child = Command::new(program)
+    let raw = run_command_bytes_with_timeout(
+        program,
+        args,
+        timeout,
+        Some(DEFAULT_MAX_OUTPUT_BYTES),
+        trace_id,
+    )?;
+
+    Ok(CommandOutput {
+        stdout: String::from_utf8_lossy(&raw.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&raw.stderr).to_string(),
+        exit_code: raw.exit_code,
+    })
+}
+
+fn spawn_pipe_drainer<R: Read + Send + 'static>(
+    mut reader: R,
+    max_bytes: Option<usize>,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::<u8>::new();
+        let mut temp = [0u8; 4096];
+        loop {
+            match reader.read(&mut temp) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if let Some(limit) = max_bytes {
+                        if buffer.len() < limit {
+                            let take = (limit - buffer.len()).min(count);
+                            buffer.extend_from_slice(&temp[..take]);
+                        }
+                    } else {
+                        buffer.extend_from_slice(&temp[..count]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        buffer
+    })
+}
+
+pub fn run_command_bytes_with_timeout(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+    max_output_bytes: Option<usize>,
+    trace_id: &str,
+) -> Result<RawCommandOutput, AppError> {
+    let mut child = new_background_command(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -43,33 +115,8 @@ pub fn run_command_with_timeout(
         .take()
         .ok_or_else(|| AppError::system("Failed to capture stderr", trace_id))?;
 
-    let stdout_handle = std::thread::spawn(move || {
-        let mut reader = stdout;
-        let mut buffer = Vec::<u8>::new();
-        let mut temp = [0u8; 4096];
-        loop {
-            match reader.read(&mut temp) {
-                Ok(0) => break,
-                Ok(count) => buffer.extend_from_slice(&temp[..count]),
-                Err(_) => break,
-            }
-        }
-        buffer
-    });
-
-    let stderr_handle = std::thread::spawn(move || {
-        let mut reader = stderr;
-        let mut buffer = Vec::<u8>::new();
-        let mut temp = [0u8; 4096];
-        loop {
-            match reader.read(&mut temp) {
-                Ok(0) => break,
-                Ok(count) => buffer.extend_from_slice(&temp[..count]),
-                Err(_) => break,
-            }
-        }
-        buffer
-    });
+    let stdout_handle = spawn_pipe_drainer(stdout, max_output_bytes);
+    let stderr_handle = spawn_pipe_drainer(stderr, max_output_bytes);
 
     let start = Instant::now();
     // Adaptive backoff: a flat 50ms poll added up to ~50ms latency to *every* command (the first
@@ -105,9 +152,9 @@ pub fn run_command_with_timeout(
     let stdout_bytes = stdout_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
-    Ok(CommandOutput {
-        stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
-        stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
+    Ok(RawCommandOutput {
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
         exit_code,
     })
 }
@@ -158,5 +205,37 @@ mod tests {
             "expected stdout >= {min_stdout_len}, got {}",
             output.stdout.len()
         );
+    }
+
+    #[test]
+    fn run_command_bytes_with_timeout_caps_output_without_deadlock() {
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec![
+                    "/C".to_string(),
+                    "for /L %i in (1,1,2000) do @echo 1234567890".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec![
+                    "-c".to_string(),
+                    "i=0; while [ $i -lt 2000 ]; do echo 1234567890; i=$((i+1)); done".to_string(),
+                ],
+            )
+        };
+
+        let output = run_command_bytes_with_timeout(
+            &program,
+            &args,
+            Duration::from_secs(10),
+            Some(512),
+            "test-trace-cap",
+        )
+        .expect("bounded output command should complete");
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(output.stdout.len(), 512);
     }
 }

@@ -1,5 +1,5 @@
 use std::io::BufRead;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tracing::warn;
 
-use crate::app::adb::runner::run_command_with_timeout;
+use crate::app::adb::runner::{new_background_command, run_command_with_timeout};
 
 use super::models::{ParsedEvent, ParsedSnapshot, StateSummary};
 use super::parser::BluetoothParser;
@@ -131,7 +131,7 @@ pub fn start_bluetooth_monitor(
             "-b".to_string(),
             "all".to_string(),
         ];
-        let child = match Command::new(&adb_program_logcat)
+        let child = match new_background_command(&adb_program_logcat)
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

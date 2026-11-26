@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -24,8 +24,10 @@ use crate::app::adb::parse::{
     parse_dumpsys_version_name as parse_gms_version_name, parse_getprop_map, parse_settings_bool,
     parse_wm_size,
 };
-use crate::app::adb::paths::sanitize_filename_component;
-use crate::app::adb::runner::{run_adb, run_command_with_timeout};
+use crate::app::adb::paths::{floor_char_boundary, sanitize_filename_component};
+use crate::app::adb::runner::{
+    new_background_command, run_adb, run_command_bytes_with_timeout, run_command_with_timeout,
+};
 use crate::app::adb::scrcpy::{
     build_scrcpy_command, build_scrcpy_record_command, check_scrcpy_availability,
 };
@@ -272,17 +274,15 @@ fn resolve_unique_ui_export_bundle_dir(parent: &Path, base_name: &str) -> PathBu
 }
 
 fn append_limited(buffer: &mut String, chunk: &str, max_len: usize) {
-    if max_len == 0 {
-        return;
-    }
-    if buffer.len() >= max_len {
+    if max_len == 0 || buffer.len() >= max_len {
         return;
     }
     let remaining = max_len - buffer.len();
     if chunk.len() <= remaining {
         buffer.push_str(chunk);
     } else {
-        buffer.push_str(&chunk[..remaining]);
+        let end = floor_char_boundary(chunk, remaining);
+        buffer.push_str(&chunk[..end]);
     }
 }
 
@@ -306,7 +306,7 @@ fn run_adb_transfer_with_progress(
     use std::sync::Mutex;
     use std::time::Instant;
 
-    let mut child = Command::new(program)
+    let mut child = new_background_command(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -846,12 +846,16 @@ fn capture_screenshot_via_exec_out(
     trace_id: &str,
 ) -> Result<Vec<u8>, AppError> {
     let args = build_exec_out_screenshot_args(serial, config);
-    let output = Command::new(adb_program)
-        .args(&args)
-        .output()
-        .map_err(|err| AppError::dependency(format!("Failed to run adb: {err}"), trace_id))?;
+    let output = run_command_bytes_with_timeout(
+        adb_program,
+        &args,
+        Duration::from_secs(15),
+        Some(64 * 1024 * 1024),
+        trace_id,
+    )
+    .map_err(|err| AppError::dependency(format!("Failed to run adb: {}", err.error), trace_id))?;
 
-    if !output.status.success() {
+    if output.exit_code != Some(0) {
         return Err(AppError::dependency(
             format!(
                 "Exec-out screenshot failed: {}",
@@ -1032,14 +1036,21 @@ fn capture_ui_dump_via_exec_out(
     trace_id: &str,
 ) -> Result<String, AppError> {
     let args = build_exec_out_ui_dump_args(serial);
-    let output = Command::new(adb_program)
-        .args(&args)
-        .output()
-        .map_err(|err| {
-            AppError::dependency(format!("Failed to run uiautomator: {err}"), trace_id)
-        })?;
+    let output = run_command_bytes_with_timeout(
+        adb_program,
+        &args,
+        Duration::from_secs(15),
+        Some(32 * 1024 * 1024),
+        trace_id,
+    )
+    .map_err(|err| {
+        AppError::dependency(
+            format!("Failed to run uiautomator: {}", err.error),
+            trace_id,
+        )
+    })?;
 
-    if !output.status.success() {
+    if output.exit_code != Some(0) {
         return Err(AppError::dependency(
             format!(
                 "Exec-out UI dump failed: {}",
@@ -2553,7 +2564,7 @@ where
         return Ok(CancellableCommandOutcome::Cancelled);
     }
 
-    let mut child = Command::new(program)
+    let mut child = new_background_command(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3340,7 +3351,7 @@ pub fn inspect_apk(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_apk_install(
     trace_id: String,
     state: State<'_, AppState>,
@@ -3517,14 +3528,25 @@ fn wait_for_child_exit(
 }
 
 fn send_remote_screenrecord_sigint(adb_program: &str, serial: &str) {
-    let _ = Command::new(adb_program)
-        .args(["-s", serial, "shell", "pkill", "-SIGINT", "screenrecord"])
-        .output();
+    let args = vec![
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "pkill".to_string(),
+        "-SIGINT".to_string(),
+        "screenrecord".to_string(),
+    ];
+    let _ = run_command_with_timeout(
+        adb_program,
+        &args,
+        Duration::from_secs(5),
+        "screenrecord-stop",
+    );
 }
 
 #[cfg(unix)]
 fn interrupt_local_child(child: &mut std::process::Child) {
-    let _ = Command::new("kill")
+    let _ = new_background_command("kill")
         .args(["-INT", &child.id().to_string()])
         .status();
 }
@@ -3635,7 +3657,7 @@ fn start_recording_logcat_capture(
         )
     })?;
     let args = build_recording_logcat_args(serial);
-    let child = Command::new(adb_program)
+    let child = new_background_command(adb_program)
         .args(&args)
         .stdout(Stdio::from(output_file))
         .stderr(Stdio::null())
@@ -4139,7 +4161,7 @@ fn spawn_segmented_recording_thread(
                 &remote_path,
                 Some(time_limit_sec),
             );
-            let mut child = match Command::new(&adb_program)
+            let mut child = match new_background_command(&adb_program)
                 .args(&args)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -4252,7 +4274,7 @@ pub fn start_screen_record(
             let remote_path = build_remote_recording_path(&serial, &timestamp, None);
             let args =
                 build_adb_screen_record_args(&serial, &config.screen_record, &remote_path, None);
-            match Command::new(&adb_program)
+            match new_background_command(&adb_program)
                 .args(&args)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -4296,7 +4318,7 @@ pub fn start_screen_record(
                 }
                 let mut iter = args.into_iter();
                 let command_path = iter.next().unwrap_or_else(|| "scrcpy".to_string());
-                match Command::new(command_path)
+                match new_background_command(&command_path)
                     .args(iter)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -4522,7 +4544,7 @@ pub fn launch_scrcpy(
         }
         let mut iter = args.into_iter();
         let command_path = iter.next().unwrap_or_else(|| "scrcpy".to_string());
-        let mut command = Command::new(command_path);
+        let mut command = new_background_command(&command_path);
         command
             .args(iter)
             .stdout(Stdio::piped())
