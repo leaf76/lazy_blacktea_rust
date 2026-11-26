@@ -2,6 +2,23 @@
 
 All notable changes to **Lazy Blacktea (Tauri / Rust)** are documented in this file.
 
+## 0.0.97 - 2026-11-26
+
+### Security
+- **ADB Shell Path Validation & Quoting**: Added `validate_device_browse_path`, newline (`\n`/`\r`) rejection in `validate_device_path`, and `quote_adb_shell_arg` across file explorer commands (`paths.rs`, `files.rs`).
+- **UI Inspector Sandboxing**: Restricted `<iframe srcDoc={uiHtml}>` with `sandbox="allow-same-origin"` in `UiInspectorPage.tsx`.
+
+### Performance
+- **Bugreport SQLite & Cache Management**: Switched logcat regexes to `OnceLock`, enabled bulk-insert PRAGMAs (`MEMORY`/`OFF`/`cache_size=-65536`), deferred secondary indexes and external-content FTS5 rebuild, enabled `mmap_size = 67108864` on read queries, and added `prune_bugreport_caches` (`8` reports / `512 MiB` cap) across `bugreport_logcat.rs` and `bugreport_extract.rs`.
+- **On-Device Apps Filtering & Bounded Icon Cache**: Filtered `dumpsys package` on-device for `list_apps(include_versions=true)` with full-output fallback, and added global scheduler throttling + `500`-file / `64 MiB` cache pruning in `get_app_icon`.
+- **Faster Device Tracking, iOS Probing & Parallel Batch ADB**: Removed the 50ms pre-read polling loop in `device_tracking.rs`, skipped non-applicable iOS tool/socket probes by OS and parallelized discovery via `std::thread::scope`, cached `resolve_adb_program` for 30s, parallelized Android/iOS listing and multi-device batch commands via `run_for_serials_parallel`, and skipped unchanged Bluetooth snapshot parsing/emissions.
+- **Frontend Stream Isolation & Lazy Route Splitting**: Moved high-frequency `logcatLines`, `logcatRetainedBySerial`, `perfBySerial`, `netBySerial`, and `terminalBySerial` updates into an external `useSyncExternalStore` store (`streamStore.ts`) with dedicated route connectors (`StreamRouteConnectors.tsx`); lazy-split `AppsPage`, `FilesPage`, `PerformancePage`, `NetworkBreakdownPanel`, `DeviceTerminalPanel`, and `LogcatPage`, reducing the main `index` bundle from `446.36 kB` (`121.59 kB` gzip) to `402.02 kB` (`111.18 kB` gzip).
+- **Bluetooth & Wallpaper Rendering**: Shared a 1s external clock store and batched incoming events on a 150ms timer in `BluetoothMonitorPage.tsx`; disabled expensive `backdrop-filter` blur when no wallpaper is configured (`data-has-wallpaper="false"`) or under `prefers-reduced-transparency`.
+
+### Fixed
+- **Safe UTF-8 Truncation & Unified Process Runner**: Replaced byte-index string slicing with `floor_char_boundary`, standardized background process spawning via `new_background_command` (Windows `CREATE_NO_WINDOW`, non-Windows `#[cfg(not(windows))]` without `unused_mut`) and 64 MiB bounded `run_command_bytes_with_timeout`, added timeouts to `exec_out` screenshot/UI capture and `scrcpy::try_version`, and made `cancel_apk_install` async.
+- **Cargo Dependencies**: Slimmed `zip` crate features to `deflate` only and upgraded `dirs` to `6`.
+
 ## 0.0.96 - 2026-11-22
 
 ### Performance
