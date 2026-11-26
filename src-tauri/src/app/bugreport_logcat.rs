@@ -5,13 +5,14 @@ use crate::app::models::{
 use dirs::home_dir;
 use regex::{Regex, RegexBuilder};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
 use zip::read::ZipArchive;
@@ -24,8 +25,10 @@ const DEFAULT_QUERY_LIMIT: usize = 200;
 const MAX_QUERY_LIMIT: usize = 500;
 const MAX_REGEX_FILTERS: usize = 20;
 const MAX_REGEX_PATTERN_LEN: usize = 512;
-const CACHE_SCHEMA_VERSION: u32 = 2;
+const CACHE_SCHEMA_VERSION: u32 = 3;
 const MAX_INDEX_LINE_BYTES: usize = 1_000_000;
+const MAX_CACHED_BUGREPORT_DIRS: usize = 8;
+const MAX_CACHED_BUGREPORT_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LogcatCacheMeta {
@@ -133,7 +136,29 @@ pub fn prepare_bugreport_logcat(
         .map_err(|err| format!("Failed to serialize cache meta: {err}"))?;
     fs::write(&meta_path, payload).map_err(|err| format!("Failed to write cache meta: {err}"))?;
 
+    if let Some(cache_root) = cache_dir.parent() {
+        prune_bugreport_caches(
+            cache_root,
+            &report_id,
+            MAX_CACHED_BUGREPORT_DIRS,
+            MAX_CACHED_BUGREPORT_BYTES,
+        );
+    }
+
     Ok(meta_to_summary(meta, db_path))
+}
+
+pub fn open_readonly_sqlite(db_path: &Path) -> Result<Connection, rusqlite::Error> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let _ = conn.execute_batch(
+        "PRAGMA query_only=ON;
+         PRAGMA mmap_size=67108864;
+         PRAGMA cache_size=-16384;",
+    );
+    Ok(conn)
 }
 
 pub fn query_bugreport_logcat(
@@ -148,8 +173,8 @@ pub fn query_bugreport_logcat(
         return Err("Bugreport log index not found. Load a bugreport first.".to_string());
     }
 
-    let connection =
-        Connection::open(db_path).map_err(|err| format!("Failed to open logcat index: {err}"))?;
+    let connection = open_readonly_sqlite(&db_path)
+        .map_err(|err| format!("Failed to open logcat index: {err}"))?;
 
     let (has_regex_include, has_regex_exclude) = attach_regex_filters(&connection, &filters)?;
     let (sql, params) =
@@ -210,8 +235,8 @@ pub fn search_bugreport_logcat(
         return Err("Bugreport log index not found. Load a bugreport first.".to_string());
     }
 
-    let connection =
-        Connection::open(db_path).map_err(|err| format!("Failed to open logcat index: {err}"))?;
+    let connection = open_readonly_sqlite(&db_path)
+        .map_err(|err| format!("Failed to open logcat index: {err}"))?;
 
     search_bugreport_logcat_connection(&connection, query, filters, limit)
 }
@@ -238,8 +263,8 @@ pub fn query_bugreport_logcat_around(
         return Err("Bugreport log index not found. Load a bugreport first.".to_string());
     }
 
-    let connection =
-        Connection::open(db_path).map_err(|err| format!("Failed to open logcat index: {err}"))?;
+    let connection = open_readonly_sqlite(&db_path)
+        .map_err(|err| format!("Failed to open logcat index: {err}"))?;
 
     query_bugreport_logcat_around_connection(&connection, anchor_id, before, after, filters)
 }
@@ -816,10 +841,12 @@ fn build_logcat_index(
         Connection::open(db_path).map_err(|err| format!("Failed to create logcat index: {err}"))?;
     connection
         .execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             DROP TABLE IF EXISTS logcat;
+            "PRAGMA journal_mode=MEMORY;
+             PRAGMA synchronous=OFF;
+             PRAGMA temp_store=MEMORY;
+             PRAGMA cache_size=-65536;
              DROP TABLE IF EXISTS logcat_fts;
+             DROP TABLE IF EXISTS logcat;
              CREATE TABLE logcat (
                id INTEGER PRIMARY KEY,
                ts_key INTEGER NOT NULL,
@@ -832,12 +859,6 @@ fn build_logcat_index(
                msg TEXT NOT NULL,
                raw_line TEXT NOT NULL
              );
-             CREATE INDEX idx_logcat_ts ON logcat(ts_key);
-             CREATE INDEX idx_logcat_level ON logcat(level);
-             CREATE INDEX idx_logcat_tag ON logcat(tag);
-             CREATE INDEX idx_logcat_buffer ON logcat(buffer);
-             CREATE INDEX idx_logcat_pid ON logcat(pid);
-             CREATE VIRTUAL TABLE logcat_fts USING fts5(tag, msg, raw_line);
             ",
         )
         .map_err(|err| format!("Failed to initialize logcat index: {err}"))?;
@@ -863,7 +884,7 @@ fn build_logcat_index(
         stream_logcat_lines(
             zip_file,
             &mut connection,
-            &logcat_regex,
+            logcat_regex,
             &mut total_rows,
             &mut min_ts_key,
             &mut max_ts_key,
@@ -878,7 +899,7 @@ fn build_logcat_index(
         stream_logcat_lines(
             file,
             &mut connection,
-            &logcat_regex,
+            logcat_regex,
             &mut total_rows,
             &mut min_ts_key,
             &mut max_ts_key,
@@ -888,6 +909,21 @@ fn build_logcat_index(
             &mut buffers,
         )?;
     }
+
+    connection
+        .execute_batch(
+            "CREATE INDEX idx_logcat_ts_id ON logcat(ts_key, id);
+             CREATE INDEX idx_logcat_level ON logcat(level);
+             CREATE INDEX idx_logcat_tag ON logcat(tag);
+             CREATE INDEX idx_logcat_buffer ON logcat(buffer);
+             CREATE INDEX idx_logcat_pid ON logcat(pid);
+             CREATE VIRTUAL TABLE logcat_fts USING fts5(tag, msg, raw_line, content='logcat', content_rowid='id');
+             INSERT INTO logcat_fts(logcat_fts) VALUES('rebuild');
+             PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+            ",
+        )
+        .map_err(|err| format!("Failed to build logcat search indexes: {err}"))?;
 
     Ok(LogcatCacheMeta {
         schema_version: CACHE_SCHEMA_VERSION,
@@ -925,7 +961,6 @@ fn stream_logcat_lines<R: Read>(
         .transaction()
         .map_err(|err| format!("Failed to start logcat transaction: {err}"))?;
     let mut insert_stmt = prepare_insert(&tx)?;
-    let mut fts_stmt = prepare_fts_insert(&tx)?;
 
     loop {
         buffer.clear();
@@ -961,8 +996,8 @@ fn stream_logcat_lines<R: Read>(
                 msg,
                 raw_line,
             } = parsed;
-            let row_id = insert_stmt
-                .insert(params![
+            insert_stmt
+                .execute(params![
                     ts_key as i64,
                     &ts_raw,
                     &level,
@@ -974,9 +1009,6 @@ fn stream_logcat_lines<R: Read>(
                     &raw_line,
                 ])
                 .map_err(|err| format!("Failed to insert logcat row: {err}"))?;
-            fts_stmt
-                .execute(params![row_id, &tag, &msg, &raw_line,])
-                .map_err(|err| format!("Failed to insert logcat search row: {err}"))?;
 
             *total_rows += 1;
             batch_count += 1;
@@ -988,14 +1020,12 @@ fn stream_logcat_lines<R: Read>(
 
             if batch_count >= BATCH_COMMIT_SIZE {
                 drop(insert_stmt);
-                drop(fts_stmt);
                 tx.commit()
                     .map_err(|err| format!("Failed to commit logcat batch: {err}"))?;
                 tx = connection
                     .transaction()
                     .map_err(|err| format!("Failed to start logcat transaction: {err}"))?;
                 insert_stmt = prepare_insert(&tx)?;
-                fts_stmt = prepare_fts_insert(&tx)?;
                 batch_count = 0;
             }
         }
@@ -1003,7 +1033,6 @@ fn stream_logcat_lines<R: Read>(
 
     if batch_count > 0 {
         drop(insert_stmt);
-        drop(fts_stmt);
         tx.commit()
             .map_err(|err| format!("Failed to commit logcat batch: {err}"))?;
     }
@@ -1018,13 +1047,6 @@ fn prepare_insert<'a>(
         "INSERT INTO logcat (ts_key, ts_raw, level, tag, buffer, pid, tid, msg, raw_line) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )
     .map_err(|err| format!("Failed to prepare logcat insert: {err}"))
-}
-
-fn prepare_fts_insert<'a>(
-    tx: &'a rusqlite::Transaction<'a>,
-) -> Result<rusqlite::Statement<'a>, String> {
-    tx.prepare("INSERT INTO logcat_fts (rowid, tag, msg, raw_line) VALUES (?1, ?2, ?3, ?4)")
-        .map_err(|err| format!("Failed to prepare logcat search insert: {err}"))
 }
 
 fn update_time_range(
@@ -1110,11 +1132,14 @@ fn parse_three_digits(bytes: &[u8]) -> Option<u64> {
     Some(value)
 }
 
-fn logcat_regex() -> Regex {
-    Regex::new(
-        r"^(?P<date>\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2}\.\d{3})\s+(?:\S+\s+)?(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<level>[VDIWEF])\s+(?P<tag>[^:]+):\s(?P<msg>.*)$",
-    )
-    .expect("logcat regex should compile")
+fn logcat_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"^(?P<date>\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2}\.\d{3})\s+(?:\S+\s+)?(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<level>[VDIWEF])\s+(?P<tag>[^:]+):\s(?P<msg>.*)$",
+        )
+        .expect("logcat regex should compile")
+    })
 }
 
 fn is_zip(path: &Path) -> bool {
@@ -1175,6 +1200,68 @@ fn cache_dir_for_report(report_id: &str) -> Result<PathBuf, String> {
         .join(".lazy_blacktea_cache")
         .join("bugreport")
         .join(report_id))
+}
+
+fn dir_usage_and_mtime(dir: &Path) -> (u64, SystemTime) {
+    let mut total_bytes = 0u64;
+    let mut latest = fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .unwrap_or(UNIX_EPOCH);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (0, latest);
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_file() {
+            total_bytes = total_bytes.saturating_add(meta.len());
+            if let Ok(mtime) = meta.modified() {
+                if mtime > latest {
+                    latest = mtime;
+                }
+            }
+        }
+    }
+    (total_bytes, latest)
+}
+
+pub(crate) fn prune_bugreport_caches(
+    cache_root: &Path,
+    keep_report_id: &str,
+    max_reports: usize,
+    max_total_bytes: u64,
+) {
+    let Ok(entries) = fs::read_dir(cache_root) else {
+        return;
+    };
+    let mut dirs: Vec<(String, PathBuf, u64, SystemTime)> = Vec::new();
+    let mut total_bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let (bytes, mtime) = dir_usage_and_mtime(&path);
+        total_bytes = total_bytes.saturating_add(bytes);
+        dirs.push((name, path, bytes, mtime));
+    }
+
+    dirs.sort_by_key(|item| item.3);
+    let mut remaining_count = dirs.len();
+    for (name, path, bytes, _) in dirs {
+        if remaining_count <= max_reports && total_bytes <= max_total_bytes {
+            break;
+        }
+        if name == keep_report_id {
+            continue;
+        }
+        if fs::remove_dir_all(&path).is_ok() {
+            remaining_count = remaining_count.saturating_sub(1);
+            total_bytes = total_bytes.saturating_sub(bytes);
+        }
+    }
 }
 
 fn stable_path_hash(input: &str) -> String {
@@ -1301,7 +1388,7 @@ mod tests {
     fn parse_logcat_line_extracts_fields() {
         let regex = logcat_regex();
         let line = "08-24 14:22:33.123  1234  5678 E ActivityManager: ANR in com.foo";
-        let parsed = parse_logcat_line(line, &regex).unwrap();
+        let parsed = parse_logcat_line(line, regex).unwrap();
         assert_eq!(parsed.ts_raw, "08-24 14:22:33.123");
         assert_eq!(parsed.level, "E");
         assert_eq!(parsed.tag, "ActivityManager");
@@ -1577,5 +1664,23 @@ mod tests {
         );
         assert!(!page.has_before);
         assert!(!page.has_after);
+    }
+
+    #[test]
+    fn prune_bugreport_caches_evicts_oldest_excluding_active() {
+        let dir = TempDir::new().expect("tmp");
+        for (idx, name) in ["old1", "old2", "keep"].iter().enumerate() {
+            let sub = dir.path().join(name);
+            fs::create_dir_all(&sub).expect("mkdir");
+            fs::write(sub.join("logcat.db"), vec![b'x'; 100]).expect("write");
+            if idx < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        prune_bugreport_caches(dir.path(), "keep", 2, 1024);
+        assert!(dir.path().join("keep").exists());
+        let remaining = fs::read_dir(dir.path()).expect("read_dir").count();
+        assert_eq!(remaining, 2);
     }
 }

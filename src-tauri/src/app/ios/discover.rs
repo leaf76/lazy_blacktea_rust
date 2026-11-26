@@ -368,66 +368,85 @@ fn discover_libimobiledevice_devices(tools: &IosToolsInfo, trace_id: &str) -> Ve
         }
     };
 
-    parse_idevice_id_output(&output.stdout)
-        .into_iter()
-        .map(|udid| {
-            if tools.ideviceinfo.available {
-                match run_ios_command("ideviceinfo", &["-u", &udid], trace_id) {
-                    Ok(info) if info.exit_code.unwrap_or_default() == 0 => {
-                        return device_from_ideviceinfo(&udid, &info.stdout, tools);
+    let udids = parse_idevice_id_output(&output.stdout);
+    if udids.is_empty() {
+        return Vec::new();
+    }
+    if !tools.ideviceinfo.available {
+        return udids
+            .into_iter()
+            .map(|udid| {
+                basic_ios_device(
+                    udid,
+                    None,
+                    None,
+                    None,
+                    Some("device".to_string()),
+                    None,
+                    tools,
+                )
+            })
+            .collect();
+    }
+
+    std::thread::scope(|scope| {
+        let handles = udids
+            .into_iter()
+            .map(|udid| {
+                scope.spawn(move || {
+                    match run_ios_command("ideviceinfo", &["-u", &udid], trace_id) {
+                        Ok(info) if info.exit_code.unwrap_or_default() == 0 => {
+                            device_from_ideviceinfo(&udid, &info.stdout, tools)
+                        }
+                        Ok(info) => {
+                            let trust = classify_trust_status(&info.stderr)
+                                .or_else(|| classify_trust_status(&info.stdout))
+                                .map(str::to_string);
+                            warn!(
+                                trace_id = %trace_id,
+                                udid = %udid,
+                                stderr = %info.stderr.trim(),
+                                trust_status = ?trust,
+                                "ideviceinfo failed during iOS discovery"
+                            );
+                            basic_ios_device(
+                                udid,
+                                None,
+                                None,
+                                None,
+                                Some("device".to_string()),
+                                trust,
+                                tools,
+                            )
+                        }
+                        Err(err) => {
+                            let trust = classify_trust_status(&err.error).map(str::to_string);
+                            warn!(
+                                trace_id = %trace_id,
+                                udid = %udid,
+                                error = %err,
+                                "ideviceinfo failed during iOS discovery"
+                            );
+                            basic_ios_device(
+                                udid,
+                                None,
+                                None,
+                                None,
+                                Some("device".to_string()),
+                                trust,
+                                tools,
+                            )
+                        }
                     }
-                    Ok(info) => {
-                        let trust = classify_trust_status(&info.stderr)
-                            .or_else(|| classify_trust_status(&info.stdout))
-                            .map(str::to_string);
-                        warn!(
-                            trace_id = %trace_id,
-                            udid = %udid,
-                            stderr = %info.stderr.trim(),
-                            trust_status = ?trust,
-                            "ideviceinfo failed during iOS discovery"
-                        );
-                        return basic_ios_device(
-                            udid,
-                            None,
-                            None,
-                            None,
-                            Some("device".to_string()),
-                            trust,
-                            tools,
-                        );
-                    }
-                    Err(err) => {
-                        let trust = classify_trust_status(&err.error).map(str::to_string);
-                        warn!(
-                            trace_id = %trace_id,
-                            udid = %udid,
-                            error = %err,
-                            "ideviceinfo failed during iOS discovery"
-                        );
-                        return basic_ios_device(
-                            udid,
-                            None,
-                            None,
-                            None,
-                            Some("device".to_string()),
-                            trust,
-                            tools,
-                        );
-                    }
-                }
-            }
-            basic_ios_device(
-                udid,
-                None,
-                None,
-                None,
-                Some("device".to_string()),
-                None,
-                tools,
-            )
-        })
-        .collect()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .collect()
+    })
 }
 
 fn discover_devicectl_devices(tools: &IosToolsInfo, trace_id: &str) -> Vec<DeviceInfo> {
@@ -463,9 +482,13 @@ fn discover_devicectl_devices(tools: &IosToolsInfo, trace_id: &str) -> Vec<Devic
 pub fn discover_ios_devices(trace_id: &str) -> Vec<DeviceInfo> {
     let started = Instant::now();
     let tools = check_ios_tools(trace_id);
-    let mut devices = discover_libimobiledevice_devices(&tools, trace_id);
-    devices.extend(discover_devicectl_devices(&tools, trace_id));
-    let devices = merge_ios_devices(devices);
+    let (mut libimobiledevice, devicectl) = std::thread::scope(|scope| {
+        let h1 = scope.spawn(|| discover_libimobiledevice_devices(&tools, trace_id));
+        let h2 = scope.spawn(|| discover_devicectl_devices(&tools, trace_id));
+        (h1.join().unwrap_or_default(), h2.join().unwrap_or_default())
+    });
+    libimobiledevice.extend(devicectl);
+    let devices = merge_ios_devices(libimobiledevice);
     info!(
         trace_id = %trace_id,
         elapsed_ms = started.elapsed().as_millis() as u64,

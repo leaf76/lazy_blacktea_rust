@@ -34,7 +34,37 @@ fn tool_status_unavailable(command_path: &str, error: impl Into<String>) -> IosT
     }
 }
 
+fn binary_exists_in_path(program: &str) -> bool {
+    let candidate = std::path::Path::new(program);
+    if candidate.is_absolute() || candidate.components().count() > 1 {
+        return candidate.is_file();
+    }
+    let Some(path_env) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_env) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        if dir.join(program).is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            if !program.to_ascii_lowercase().ends_with(".exe")
+                && dir.join(format!("{program}.exe")).is_file()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn probe_command(command_path: &str, args: &[&str], trace_id: &str) -> IosToolStatus {
+    if !binary_exists_in_path(command_path) {
+        return tool_status_unavailable(command_path, format!("{command_path} not found in PATH"));
+    }
     let args = args.iter().map(|item| item.to_string()).collect::<Vec<_>>();
     match run_command_with_timeout(command_path, &args, IOS_TOOL_TIMEOUT, trace_id) {
         Ok(output) if output.exit_code.unwrap_or_default() == 0 => IosToolStatus {
@@ -62,6 +92,12 @@ fn probe_command(command_path: &str, args: &[&str], trace_id: &str) -> IosToolSt
 }
 
 fn probe_devicectl(trace_id: &str) -> IosToolStatus {
+    if !cfg!(target_os = "macos") {
+        return tool_status_unavailable(
+            "xcrun devicectl",
+            "devicectl is only available on macOS with Xcode",
+        );
+    }
     let args = vec!["--find".to_string(), "devicectl".to_string()];
     match run_command_with_timeout("xcrun", &args, IOS_TOOL_TIMEOUT, trace_id) {
         Ok(output) if output.exit_code.unwrap_or_default() == 0 => {
@@ -93,10 +129,19 @@ fn probe_devicectl(trace_id: &str) -> IosToolStatus {
 }
 
 fn probe_cfgutil(trace_id: &str) -> IosToolStatus {
+    if !cfg!(target_os = "macos") {
+        return tool_status_unavailable("cfgutil", "cfgutil is only available on macOS");
+    }
     probe_command("cfgutil", &["help"], trace_id)
 }
 
 fn probe_usbmuxd(trace_id: &str) -> IosToolStatus {
+    if cfg!(target_os = "windows") {
+        return tool_status_unavailable(
+            "usbmuxd",
+            "usbmuxd socket is not used on Windows (Apple Mobile Device Service is used instead)",
+        );
+    }
     // Best-effort: socket presence is enough for inventory guidance.
     let socket_candidates = ["/var/run/usbmuxd", "/run/usbmuxd", "/var/run/usbmuxd.sock"];
     for path in socket_candidates {
@@ -169,16 +214,46 @@ impl IfEmpty for &str {
 
 fn probe_all_tools(trace_id: &str) -> IosToolsInfo {
     let started = Instant::now();
-    let tools = IosToolsInfo {
-        devicectl: probe_devicectl(trace_id),
-        idevice_id: probe_command("idevice_id", &["--version"], trace_id),
-        ideviceinfo: probe_command("ideviceinfo", &["--version"], trace_id),
-        idevicesyslog: probe_command("idevicesyslog", &["--version"], trace_id),
-        idevicecrashreport: probe_command("idevicecrashreport", &["--version"], trace_id),
-        idevicescreenshot: probe_command("idevicescreenshot", &["--version"], trace_id),
-        cfgutil: probe_cfgutil(trace_id),
-        usbmuxd: probe_usbmuxd(trace_id),
-    };
+    let tools = std::thread::scope(|scope| {
+        let devicectl = scope.spawn(|| probe_devicectl(trace_id));
+        let idevice_id = scope.spawn(|| probe_command("idevice_id", &["--version"], trace_id));
+        let ideviceinfo = scope.spawn(|| probe_command("ideviceinfo", &["--version"], trace_id));
+        let idevicesyslog =
+            scope.spawn(|| probe_command("idevicesyslog", &["--version"], trace_id));
+        let idevicecrashreport =
+            scope.spawn(|| probe_command("idevicecrashreport", &["--version"], trace_id));
+        let idevicescreenshot =
+            scope.spawn(|| probe_command("idevicescreenshot", &["--version"], trace_id));
+        let cfgutil = scope.spawn(|| probe_cfgutil(trace_id));
+        let usbmuxd = scope.spawn(|| probe_usbmuxd(trace_id));
+
+        IosToolsInfo {
+            devicectl: devicectl.join().unwrap_or_else(|_| {
+                tool_status_unavailable("xcrun devicectl", "probe thread panicked")
+            }),
+            idevice_id: idevice_id
+                .join()
+                .unwrap_or_else(|_| tool_status_unavailable("idevice_id", "probe thread panicked")),
+            ideviceinfo: ideviceinfo.join().unwrap_or_else(|_| {
+                tool_status_unavailable("ideviceinfo", "probe thread panicked")
+            }),
+            idevicesyslog: idevicesyslog.join().unwrap_or_else(|_| {
+                tool_status_unavailable("idevicesyslog", "probe thread panicked")
+            }),
+            idevicecrashreport: idevicecrashreport.join().unwrap_or_else(|_| {
+                tool_status_unavailable("idevicecrashreport", "probe thread panicked")
+            }),
+            idevicescreenshot: idevicescreenshot.join().unwrap_or_else(|_| {
+                tool_status_unavailable("idevicescreenshot", "probe thread panicked")
+            }),
+            cfgutil: cfgutil
+                .join()
+                .unwrap_or_else(|_| tool_status_unavailable("cfgutil", "probe thread panicked")),
+            usbmuxd: usbmuxd
+                .join()
+                .unwrap_or_else(|_| tool_status_unavailable("usbmuxd", "probe thread panicked")),
+        }
+    });
     info!(
         trace_id = %trace_id,
         elapsed_ms = started.elapsed().as_millis() as u64,

@@ -455,6 +455,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_grep_filtered_dumpsys_package_versions() {
+        let output = "\
+            Package [com.example.alpha] (1234):\n\
+              versionCode=101 minSdk=26 targetSdk=34\n\
+              versionName=1.0.1\n\
+            Package [com.example.beta] (5678):\n\
+              versionCode=202\n\
+              versionName=2.0.2\n\
+        ";
+        let versions = parse_dumpsys_package_versions(output);
+        assert_eq!(versions.len(), 2);
+        assert_eq!(
+            versions
+                .get("com.example.alpha")
+                .and_then(|v| v.version_name.as_deref()),
+            Some("1.0.1")
+        );
+        assert_eq!(
+            versions
+                .get("com.example.beta")
+                .and_then(|v| v.version_code.as_deref()),
+            Some("202")
+        );
+    }
+
+    #[test]
     fn parses_dumpsys_install_times() {
         let output = "firstInstallTime=2026-01-02 03:04:05\nlastUpdateTime=2026-02-03 04:05:06\n";
         assert_eq!(

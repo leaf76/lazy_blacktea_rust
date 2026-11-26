@@ -17,7 +17,9 @@ use crate::app::adb::apk::{
     supports_push_and_pm_install,
 };
 use crate::app::adb::device_tracking::start_device_tracker;
-use crate::app::adb::locator::{normalize_command_path, resolve_adb_program, validate_adb_program};
+use crate::app::adb::locator::{
+    invalidate_adb_program_cache, normalize_command_path, resolve_adb_program, validate_adb_program,
+};
 use crate::app::adb::parse::{
     build_device_detail, parse_adb_devices, parse_audio_summary, parse_battery_level,
     parse_bluetooth_manager_state, parse_df_total_kb,
@@ -443,12 +445,17 @@ fn run_adb_transfer_with_progress(
     })
 }
 
-fn get_adb_program(trace_id: &str) -> Result<String, AppError> {
+fn get_config_and_adb_program(trace_id: &str) -> Result<(AppConfig, String), AppError> {
     let config = load_config(trace_id)?;
     let program = resolve_adb_program(&config.adb.command_path);
     if let Err(error) = validate_adb_program(&program) {
         return Err(AppError::validation(error.message, trace_id));
     }
+    Ok((config, program))
+}
+
+fn get_adb_program(trace_id: &str) -> Result<String, AppError> {
+    let (_config, program) = get_config_and_adb_program(trace_id)?;
     Ok(program)
 }
 
@@ -1230,6 +1237,7 @@ pub fn save_app_config(
     let trace_id = resolve_trace_id(trace_id);
     let config = normalize_config_for_save(config);
     save_config(&config, &trace_id)?;
+    invalidate_adb_program_cache();
     Ok(CommandResponse {
         trace_id,
         data: config,
@@ -1241,6 +1249,7 @@ pub fn reset_config(trace_id: Option<String>) -> Result<CommandResponse<AppConfi
     let trace_id = resolve_trace_id(trace_id);
     let config = normalize_config_for_save(AppConfig::default());
     save_config(&config, &trace_id)?;
+    invalidate_adb_program_cache();
     Ok(CommandResponse {
         trace_id,
         data: config,
@@ -1268,6 +1277,7 @@ pub fn check_adb(
     let trace_id = resolve_trace_id(trace_id);
     info!(trace_id = %trace_id, "check_adb");
 
+    invalidate_adb_program_cache();
     let config = load_config(&trace_id)?;
     let program = command_path
         .as_deref()
@@ -1673,110 +1683,122 @@ pub fn list_devices(
     let list_started = Instant::now();
 
     let need_detail = detailed.unwrap_or(true);
-    let android_result = (|| -> Result<Vec<DeviceInfo>, AppError> {
-        let adb_program = get_adb_program(&trace_id)?;
-        let args = vec!["devices".to_string(), "-l".to_string()];
-        let devices_cmd_started = Instant::now();
-        let output = run_adb(&adb_program, &args, &trace_id)?;
-        let devices_cmd_elapsed_ms = devices_cmd_started.elapsed().as_millis() as u64;
-        if profile_devices && (profile_slow_ms == 0 || devices_cmd_elapsed_ms >= profile_slow_ms) {
-            info!(
-                trace_id = %trace_id,
-                step = "devices",
-                elapsed_ms = devices_cmd_elapsed_ms,
-                exit_code = ?output.exit_code,
-                "adb host command timing"
-            );
-        }
-        if output.exit_code.unwrap_or_default() != 0 {
-            return Err(AppError::dependency(
-                format!("adb devices failed: {}", output.stderr),
-                &trace_id,
-            ));
-        }
-        let summaries = parse_adb_devices(&output.stdout);
-        let mut devices = Vec::with_capacity(summaries.len());
+    let (android_result, mut ios_devices) = std::thread::scope(|scope| {
+        let ios_handle = scope.spawn(|| ios_service::discover_ios_devices(&trace_id));
+        let android_result = (|| -> Result<Vec<DeviceInfo>, AppError> {
+            let adb_program = get_adb_program(&trace_id)?;
+            let args = vec!["devices".to_string(), "-l".to_string()];
+            let devices_cmd_started = Instant::now();
+            let output = run_adb(&adb_program, &args, &trace_id)?;
+            let devices_cmd_elapsed_ms = devices_cmd_started.elapsed().as_millis() as u64;
+            if profile_devices
+                && (profile_slow_ms == 0 || devices_cmd_elapsed_ms >= profile_slow_ms)
+            {
+                info!(
+                    trace_id = %trace_id,
+                    step = "devices",
+                    elapsed_ms = devices_cmd_elapsed_ms,
+                    exit_code = ?output.exit_code,
+                    "adb host command timing"
+                );
+            }
+            if output.exit_code.unwrap_or_default() != 0 {
+                return Err(AppError::dependency(
+                    format!("adb devices failed: {}", output.stderr),
+                    &trace_id,
+                ));
+            }
+            let summaries = parse_adb_devices(&output.stdout);
+            let mut devices = Vec::with_capacity(summaries.len());
 
-        if need_detail && summaries.iter().any(|summary| summary.state == "device") {
-            let scheduler = Arc::clone(&state.scheduler);
-            let detail_slots: Arc<Vec<OnceLock<Option<DeviceDetail>>>> = Arc::new(
-                (0..summaries.len())
-                    .map(|_| OnceLock::new())
-                    .collect::<Vec<_>>(),
-            );
+            if need_detail && summaries.iter().any(|summary| summary.state == "device") {
+                let scheduler = Arc::clone(&state.scheduler);
+                let detail_slots: Arc<Vec<OnceLock<Option<DeviceDetail>>>> = Arc::new(
+                    (0..summaries.len())
+                        .map(|_| OnceLock::new())
+                        .collect::<Vec<_>>(),
+                );
 
-            let mut handles = Vec::new();
-            for (index, summary) in summaries.iter().enumerate() {
-                if summary.state != "device" {
-                    continue;
-                }
+                let mut handles = Vec::new();
+                for (index, summary) in summaries.iter().enumerate() {
+                    if summary.state != "device" {
+                        continue;
+                    }
 
-                let serial = summary.serial.clone();
-                let adb_program_spawn = adb_program.clone();
-                let trace_spawn = trace_id.clone();
-                let scheduler_spawn = Arc::clone(&scheduler);
-                let detail_slots = Arc::clone(&detail_slots);
+                    let serial = summary.serial.clone();
+                    let adb_program_spawn = adb_program.clone();
+                    let trace_spawn = trace_id.clone();
+                    let scheduler_spawn = Arc::clone(&scheduler);
+                    let detail_slots = Arc::clone(&detail_slots);
 
-                handles.push(std::thread::spawn(move || {
-                    let run_scheduled = |args: &[String],
-                                         timeout: Duration,
-                                         _step: &'static str|
-                     -> Result<
-                        crate::app::adb::runner::CommandOutput,
-                        AppError,
-                    > {
-                        let _permit = scheduler_spawn.acquire_global();
-                        let device_lock = scheduler_spawn.device_lock(&serial);
-                        let _device_guard = device_lock.lock().map_err(|_| {
-                            warn!(trace_id = %trace_spawn, serial = %serial, "device lock poisoned");
-                            AppError::system(
-                                "Failed to access the device. Please try again.",
+                    handles.push(std::thread::spawn(move || {
+                        let run_scheduled = |args: &[String],
+                                             timeout: Duration,
+                                             _step: &'static str|
+                         -> Result<
+                            crate::app::adb::runner::CommandOutput,
+                            AppError,
+                        > {
+                            let _permit = scheduler_spawn.acquire_global();
+                            let device_lock = scheduler_spawn.device_lock(&serial);
+                            let _device_guard = device_lock.lock().map_err(|_| {
+                                warn!(trace_id = %trace_spawn, serial = %serial, "device lock poisoned");
+                                AppError::system(
+                                    "Failed to access the device. Please try again.",
+                                    &trace_spawn,
+                                )
+                            })?;
+                            run_command_with_timeout(
+                                &adb_program_spawn,
+                                args,
+                                timeout,
                                 &trace_spawn,
                             )
-                        })?;
-                        run_command_with_timeout(&adb_program_spawn, args, timeout, &trace_spawn)
-                    };
+                        };
 
-                    let detail = load_device_detail(
-                        &serial,
-                        &trace_spawn,
-                        profile_devices,
-                        profile_slow_ms,
-                        run_scheduled,
-                    );
+                        let detail = load_device_detail(
+                            &serial,
+                            &trace_spawn,
+                            profile_devices,
+                            profile_slow_ms,
+                            run_scheduled,
+                        );
 
-                    let _ = detail_slots[index].set(detail);
-                }));
-            }
+                        let _ = detail_slots[index].set(detail);
+                    }));
+                }
 
-            for handle in handles {
-                if handle.join().is_err() {
-                    warn!(
-                        trace_id = %trace_id,
-                        "device detail thread panicked"
-                    );
+                for handle in handles {
+                    if handle.join().is_err() {
+                        warn!(
+                            trace_id = %trace_id,
+                            "device detail thread panicked"
+                        );
+                    }
+                }
+
+                for (index, summary) in summaries.into_iter().enumerate() {
+                    let detail = detail_slots[index].get().cloned().unwrap_or(None);
+                    devices.push(DeviceInfo {
+                        summary,
+                        detail,
+                        capabilities: DeviceCapabilities::android_default(),
+                    });
+                }
+            } else {
+                for summary in summaries {
+                    devices.push(DeviceInfo {
+                        summary,
+                        detail: None,
+                        capabilities: DeviceCapabilities::android_default(),
+                    });
                 }
             }
-
-            for (index, summary) in summaries.into_iter().enumerate() {
-                let detail = detail_slots[index].get().cloned().unwrap_or(None);
-                devices.push(DeviceInfo {
-                    summary,
-                    detail,
-                    capabilities: DeviceCapabilities::android_default(),
-                });
-            }
-        } else {
-            for summary in summaries {
-                devices.push(DeviceInfo {
-                    summary,
-                    detail: None,
-                    capabilities: DeviceCapabilities::android_default(),
-                });
-            }
-        }
-        Ok(devices)
-    })();
+            Ok(devices)
+        })();
+        let ios_devices = ios_handle.join().unwrap_or_default();
+        (android_result, ios_devices)
+    });
 
     let mut devices = Vec::new();
     let mut android_error = None;
@@ -1788,7 +1810,6 @@ pub fn list_devices(
         }
     }
 
-    let mut ios_devices = ios_service::discover_ios_devices(&trace_id);
     devices.append(&mut ios_devices);
 
     if devices.is_empty() {
@@ -1952,8 +1973,7 @@ pub fn run_shell(
         return Err(AppError::validation("serials is required", &trace_id));
     }
 
-    let adb_program = get_adb_program(&trace_id)?;
-    let mut config = load_config(&trace_id)?;
+    let (mut config, adb_program) = get_config_and_adb_program(&trace_id)?;
     let timeout = Duration::from_secs(config.command.command_timeout.max(1) as u64);
     let use_parallel = parallel.unwrap_or(config.command.parallel_execution);
     let scheduler = Arc::clone(&state.scheduler);
@@ -3440,8 +3460,7 @@ pub fn capture_screenshot(
         }
     }
 
-    let adb_program = get_adb_program(&trace_id)?;
-    let config = load_config(&trace_id)?;
+    let (config, adb_program) = get_config_and_adb_program(&trace_id)?;
     let bytes = capture_validated_screenshot_bytes(
         &adb_program,
         &serial,
@@ -4238,7 +4257,7 @@ pub fn start_screen_record(
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
-    let adb_program = get_adb_program(&trace_id)?;
+    let (config, adb_program) = get_config_and_adb_program(&trace_id)?;
     let mut guard = state
         .recording_processes
         .lock()
@@ -4247,7 +4266,6 @@ pub fn start_screen_record(
         return Err(AppError::validation("Recording already active", &trace_id));
     }
 
-    let config = load_config(&trace_id)?;
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let scrcpy_availability = check_scrcpy_availability();
     let backend = select_screen_record_backend(
@@ -4633,8 +4651,7 @@ pub fn capture_ui_hierarchy(
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
-    let adb_program = get_adb_program(&trace_id)?;
-    let config = load_config(&trace_id)?;
+    let (config, adb_program) = get_config_and_adb_program(&trace_id)?;
     let temp_dir = tempfile::tempdir()
         .map_err(|err| AppError::system(format!("Failed to prepare temp dir: {err}"), &trace_id))?;
     let xml_temp_path = temp_dir.path().join("ui_inspector.xml");
@@ -4689,8 +4706,7 @@ pub fn export_ui_hierarchy(
     let trace_id = resolve_trace_id(trace_id);
     ensure_non_empty(&serial, "serial", &trace_id)?;
 
-    let adb_program = get_adb_program(&trace_id)?;
-    let config = load_config(&trace_id)?;
+    let (config, adb_program) = get_config_and_adb_program(&trace_id)?;
     let resolved_dir = output_dir
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| {
@@ -4843,6 +4859,50 @@ pub fn adb_server_control(
     })
 }
 
+fn run_for_serials_parallel<F>(
+    serials: Vec<String>,
+    scheduler: &crate::app::scheduler::TaskScheduler,
+    trace_id: &str,
+    panic_message: &'static str,
+    worker: F,
+) -> Result<Vec<CommandResult>, AppError>
+where
+    F: Fn(&str) -> Result<CommandResult, AppError> + Send + Sync,
+{
+    for serial in &serials {
+        ensure_non_empty(serial, "serial", trace_id)?;
+    }
+
+    std::thread::scope(|scope| {
+        let handles = serials
+            .into_iter()
+            .enumerate()
+            .map(|(index, serial)| {
+                let worker_ref = &worker;
+                scope.spawn(move || -> Result<(usize, CommandResult), AppError> {
+                    let _permit = scheduler.acquire_global();
+                    let device_lock = scheduler.device_lock(&serial);
+                    let _guard = device_lock
+                        .lock()
+                        .map_err(|_| AppError::system("Device lock poisoned", trace_id))?;
+                    let result = worker_ref(&serial)?;
+                    Ok((index, result))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut collected = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let pair = handle
+                .join()
+                .map_err(|_| AppError::system(panic_message, trace_id))??;
+            collected.push(pair);
+        }
+        collected.sort_by_key(|item| item.0);
+        Ok(collected.into_iter().map(|item| item.1).collect())
+    })
+}
+
 #[tauri::command(async)]
 pub fn adb_root_devices(
     serials: Vec<String>,
@@ -4854,26 +4914,23 @@ pub fn adb_root_devices(
         return Err(AppError::validation("serials is required", &trace_id));
     }
     let adb_program = get_adb_program(&trace_id)?;
-    let scheduler = Arc::clone(&state.scheduler);
-    let mut results = Vec::with_capacity(serials.len());
-
-    for serial in serials {
-        ensure_non_empty(&serial, "serial", &trace_id)?;
-        let _permit = scheduler.acquire_global();
-        let device_lock = scheduler.device_lock(&serial);
-        let _guard = device_lock
-            .lock()
-            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
-        let args = vec!["-s".to_string(), serial.clone(), "root".to_string()];
-        let out =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(20), &trace_id)?;
-        results.push(CommandResult {
-            serial,
-            stdout: out.stdout,
-            stderr: out.stderr,
-            exit_code: out.exit_code,
-        });
-    }
+    let results = run_for_serials_parallel(
+        serials,
+        state.scheduler.as_ref(),
+        &trace_id,
+        "ADB root thread panicked",
+        |serial| {
+            let args = vec!["-s".to_string(), serial.to_string(), "root".to_string()];
+            let out =
+                run_command_with_timeout(&adb_program, &args, Duration::from_secs(20), &trace_id)?;
+            Ok(CommandResult {
+                serial: serial.to_string(),
+                stdout: out.stdout,
+                stderr: out.stderr,
+                exit_code: out.exit_code,
+            })
+        },
+    )?;
 
     Ok(CommandResponse {
         trace_id,
@@ -4895,34 +4952,31 @@ pub fn set_logcat_buffer_size(
     let normalized_size =
         validate_logcat_buffer_size(&size).map_err(|msg| AppError::validation(msg, &trace_id))?;
     let adb_program = get_adb_program(&trace_id)?;
-    let scheduler = Arc::clone(&state.scheduler);
-    let mut results = Vec::with_capacity(serials.len());
-
-    for serial in serials {
-        ensure_non_empty(&serial, "serial", &trace_id)?;
-        let _permit = scheduler.acquire_global();
-        let device_lock = scheduler.device_lock(&serial);
-        let _guard = device_lock
-            .lock()
-            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
-        let args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "logcat".to_string(),
-            "-b".to_string(),
-            "main".to_string(),
-            "-G".to_string(),
-            normalized_size.to_string(),
-        ];
-        let out =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(15), &trace_id)?;
-        results.push(CommandResult {
-            serial,
-            stdout: out.stdout,
-            stderr: out.stderr,
-            exit_code: out.exit_code,
-        });
-    }
+    let results = run_for_serials_parallel(
+        serials,
+        state.scheduler.as_ref(),
+        &trace_id,
+        "Logcat buffer size thread panicked",
+        |serial| {
+            let args = vec![
+                "-s".to_string(),
+                serial.to_string(),
+                "logcat".to_string(),
+                "-b".to_string(),
+                "main".to_string(),
+                "-G".to_string(),
+                normalized_size.to_string(),
+            ];
+            let out =
+                run_command_with_timeout(&adb_program, &args, Duration::from_secs(15), &trace_id)?;
+            Ok(CommandResult {
+                serial: serial.to_string(),
+                stdout: out.stdout,
+                stderr: out.stderr,
+                exit_code: out.exit_code,
+            })
+        },
+    )?;
 
     Ok(CommandResponse {
         trace_id,
@@ -4951,50 +5005,46 @@ pub fn pull_device_dcim_batch(
     })?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    let scheduler = Arc::clone(&state.scheduler);
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let mut results = Vec::with_capacity(serials.len());
-
-    for serial in serials {
-        ensure_non_empty(&serial, "serial", &trace_id)?;
-        let safe_serial = sanitize_filename_component(&serial);
-        let dest_dir = base_dir.join(format!("{safe_serial}_dcim_{timestamp}"));
-        fs::create_dir_all(&dest_dir).map_err(|err| {
-            AppError::system(
-                format!("Failed to create DCIM output dir: {err}"),
-                &trace_id,
-            )
-        })?;
-        let dest_str = dest_dir.to_string_lossy().to_string();
-
-        let _permit = scheduler.acquire_global();
-        let device_lock = scheduler.device_lock(&serial);
-        let _guard = device_lock
-            .lock()
-            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
-        let args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "pull".to_string(),
-            "/sdcard/DCIM".to_string(),
-            dest_str.clone(),
-        ];
-        let out =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(300), &trace_id)?;
-        let stdout = if out.exit_code == Some(0) {
-            format!("{dest_str}\n{}", out.stdout.trim())
-                .trim()
-                .to_string()
-        } else {
-            out.stdout
-        };
-        results.push(CommandResult {
-            serial,
-            stdout,
-            stderr: out.stderr,
-            exit_code: out.exit_code,
-        });
-    }
+    let results = run_for_serials_parallel(
+        serials,
+        state.scheduler.as_ref(),
+        &trace_id,
+        "DCIM pull thread panicked",
+        |serial| {
+            let safe_serial = sanitize_filename_component(serial);
+            let dest_dir = base_dir.join(format!("{safe_serial}_dcim_{timestamp}"));
+            fs::create_dir_all(&dest_dir).map_err(|err| {
+                AppError::system(
+                    format!("Failed to create DCIM output dir: {err}"),
+                    &trace_id,
+                )
+            })?;
+            let dest_str = dest_dir.to_string_lossy().to_string();
+            let args = vec![
+                "-s".to_string(),
+                serial.to_string(),
+                "pull".to_string(),
+                "/sdcard/DCIM".to_string(),
+                dest_str.clone(),
+            ];
+            let out =
+                run_command_with_timeout(&adb_program, &args, Duration::from_secs(300), &trace_id)?;
+            let stdout = if out.exit_code == Some(0) {
+                format!("{dest_str}\n{}", out.stdout.trim())
+                    .trim()
+                    .to_string()
+            } else {
+                out.stdout
+            };
+            Ok(CommandResult {
+                serial: serial.to_string(),
+                stdout,
+                stderr: out.stderr,
+                exit_code: out.exit_code,
+            })
+        },
+    )?;
 
     Ok(CommandResponse {
         trace_id,
@@ -5023,52 +5073,49 @@ pub fn export_discovery_service_dump(
     })?;
 
     let adb_program = get_adb_program(&trace_id)?;
-    let scheduler = Arc::clone(&state.scheduler);
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let mut results = Vec::with_capacity(serials.len());
-
-    for serial in serials {
-        ensure_non_empty(&serial, "serial", &trace_id)?;
-        let _permit = scheduler.acquire_global();
-        let device_lock = scheduler.device_lock(&serial);
-        let _guard = device_lock
-            .lock()
-            .map_err(|_| AppError::system("Device lock poisoned", &trace_id))?;
-        let args = vec![
-            "-s".to_string(),
-            serial.clone(),
-            "shell".to_string(),
-            "dumpsys".to_string(),
-            "activity".to_string(),
-            "service".to_string(),
-            "DiscoveryService".to_string(),
-        ];
-        let out =
-            run_command_with_timeout(&adb_program, &args, Duration::from_secs(30), &trace_id)?;
-        if out.exit_code == Some(0) {
-            let safe_serial = sanitize_filename_component(&serial);
-            let out_file = base_dir.join(format!("{safe_serial}_discovery_{timestamp}.txt"));
-            fs::write(&out_file, &out.stdout).map_err(|err| {
-                AppError::system(
-                    format!("Failed to write DiscoveryService dump: {err}"),
-                    &trace_id,
-                )
-            })?;
-            results.push(CommandResult {
-                serial,
-                stdout: out_file.to_string_lossy().to_string(),
-                stderr: out.stderr,
-                exit_code: out.exit_code,
-            });
-        } else {
-            results.push(CommandResult {
-                serial,
-                stdout: out.stdout,
-                stderr: out.stderr,
-                exit_code: out.exit_code,
-            });
-        }
-    }
+    let results = run_for_serials_parallel(
+        serials,
+        state.scheduler.as_ref(),
+        &trace_id,
+        "DiscoveryService dump thread panicked",
+        |serial| {
+            let args = vec![
+                "-s".to_string(),
+                serial.to_string(),
+                "shell".to_string(),
+                "dumpsys".to_string(),
+                "activity".to_string(),
+                "service".to_string(),
+                "DiscoveryService".to_string(),
+            ];
+            let out =
+                run_command_with_timeout(&adb_program, &args, Duration::from_secs(30), &trace_id)?;
+            if out.exit_code == Some(0) {
+                let safe_serial = sanitize_filename_component(serial);
+                let out_file = base_dir.join(format!("{safe_serial}_discovery_{timestamp}.txt"));
+                fs::write(&out_file, &out.stdout).map_err(|err| {
+                    AppError::system(
+                        format!("Failed to write DiscoveryService dump: {err}"),
+                        &trace_id,
+                    )
+                })?;
+                Ok(CommandResult {
+                    serial: serial.to_string(),
+                    stdout: out_file.to_string_lossy().to_string(),
+                    stderr: out.stderr,
+                    exit_code: out.exit_code,
+                })
+            } else {
+                Ok(CommandResult {
+                    serial: serial.to_string(),
+                    stdout: out.stdout,
+                    stderr: out.stderr,
+                    exit_code: out.exit_code,
+                })
+            }
+        },
+    )?;
 
     Ok(CommandResponse {
         trace_id,

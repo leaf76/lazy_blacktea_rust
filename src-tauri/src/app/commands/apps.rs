@@ -36,6 +36,60 @@ fn cache_dir_for_app_icons() -> PathBuf {
     base.join("lazy_blacktea").join("app_icons")
 }
 
+fn prune_app_icon_cache(
+    cache_root: &std::path::Path,
+    keep_path: &std::path::Path,
+    max_files: usize,
+    max_total_bytes: u64,
+) {
+    let Ok(device_dirs) = fs::read_dir(cache_root) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total_bytes = 0u64;
+    for dir_entry in device_dirs.flatten() {
+        let dir_path = dir_entry.path();
+        if !dir_path.is_dir() {
+            continue;
+        }
+        let Ok(icon_entries) = fs::read_dir(&dir_path) else {
+            continue;
+        };
+        for icon_entry in icon_entries.flatten() {
+            let path = icon_entry.path();
+            let Ok(meta) = icon_entry.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let len = meta.len();
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            total_bytes = total_bytes.saturating_add(len);
+            files.push((path, len, mtime));
+        }
+    }
+
+    if files.len() <= max_files && total_bytes <= max_total_bytes {
+        return;
+    }
+
+    files.sort_by_key(|item| item.2);
+    let mut remaining = files.len();
+    for (path, len, _) in files {
+        if remaining <= max_files && total_bytes <= max_total_bytes {
+            break;
+        }
+        if path == keep_path {
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            remaining = remaining.saturating_sub(1);
+            total_bytes = total_bytes.saturating_sub(len);
+        }
+    }
+}
+
 fn density_rank(path: &str) -> i32 {
     let lower = path.to_lowercase();
     if lower.contains("xxxhdpi") {
@@ -177,43 +231,69 @@ pub fn list_apps(
         ));
     }
 
-    let versions_by_package = if include_versions.unwrap_or(false) {
-        let dump_args = vec![
+    let entries = parse_pm_list_packages_output(&output.stdout);
+
+    let versions_by_package = if include_versions.unwrap_or(false) && !entries.is_empty() {
+        let filtered_args = vec![
             "-s".to_string(),
             serial.clone(),
             "shell".to_string(),
-            "dumpsys".to_string(),
-            "package".to_string(),
+            "dumpsys package | grep -E '^[[:space:]]*(Package \\[|versionCode=|versionName=)'"
+                .to_string(),
         ];
-        match run_command_with_timeout(&adb_program, &dump_args, Duration::from_secs(30), &trace_id)
-        {
+        let mut parsed_versions = match run_command_with_timeout(
+            &adb_program,
+            &filtered_args,
+            Duration::from_secs(20),
+            &trace_id,
+        ) {
             Ok(out) if out.exit_code.unwrap_or_default() == 0 => {
                 parse_dumpsys_package_versions(&out.stdout)
             }
-            Ok(out) => {
-                warn!(
-                    trace_id = %trace_id,
-                    exit_code = ?out.exit_code,
-                    stderr = %out.stderr,
-                    "bulk dumpsys package failed while listing app versions"
-                );
-                HashMap::new()
-            }
-            Err(err) => {
-                warn!(
-                    trace_id = %trace_id,
-                    error = %err,
-                    "bulk dumpsys package command failed while listing app versions"
-                );
-                HashMap::new()
+            _ => HashMap::new(),
+        };
+
+        if parsed_versions.is_empty() {
+            let dump_args = vec![
+                "-s".to_string(),
+                serial.clone(),
+                "shell".to_string(),
+                "dumpsys".to_string(),
+                "package".to_string(),
+            ];
+            match run_command_with_timeout(
+                &adb_program,
+                &dump_args,
+                Duration::from_secs(30),
+                &trace_id,
+            ) {
+                Ok(out) if out.exit_code.unwrap_or_default() == 0 => {
+                    parsed_versions = parse_dumpsys_package_versions(&out.stdout);
+                }
+                Ok(out) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        exit_code = ?out.exit_code,
+                        stderr = %out.stderr,
+                        "bulk dumpsys package failed while listing app versions"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        trace_id = %trace_id,
+                        error = %err,
+                        "bulk dumpsys package command failed while listing app versions"
+                    );
+                }
             }
         }
+        parsed_versions
     } else {
         HashMap::new()
     };
 
     let mut apps = Vec::new();
-    for entry in parse_pm_list_packages_output(&output.stdout) {
+    for entry in entries {
         let version = versions_by_package.get(&entry.package_name);
         let version_name = version.and_then(|item| item.version_name.clone());
         let version_code = version.and_then(|item| item.version_code.clone());
@@ -233,6 +313,7 @@ pub fn get_app_icon(
     serial: String,
     package_name: String,
     apk_path: Option<String>,
+    state: State<'_, AppState>,
     trace_id: Option<String>,
 ) -> Result<CommandResponse<AppIcon>, AppError> {
     use base64::Engine as _;
@@ -325,8 +406,10 @@ pub fn get_app_icon(
         resolved_apk_path.clone(),
         local_apk_string.clone(),
     ];
-    let pull_output =
-        run_command_with_timeout(&adb_program, &pull_args, Duration::from_secs(60), &trace_id)?;
+    let pull_output = {
+        let _permit = state.scheduler.acquire_global();
+        run_command_with_timeout(&adb_program, &pull_args, Duration::from_secs(60), &trace_id)?
+    };
     if pull_output.exit_code.unwrap_or_default() != 0 {
         return Err(AppError::dependency(
             format!("Pull APK failed: {}", pull_output.stderr.trim()),
@@ -363,6 +446,12 @@ pub fn get_app_icon(
     fs::write(&cache_path, &icon_bytes).map_err(|err| {
         AppError::system(format!("Failed to write cached icon: {err}"), &trace_id)
     })?;
+    prune_app_icon_cache(
+        &cache_dir_for_app_icons(),
+        &cache_path,
+        500,
+        64 * 1024 * 1024,
+    );
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&icon_bytes);
     Ok(CommandResponse {

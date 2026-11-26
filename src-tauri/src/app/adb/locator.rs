@@ -1,5 +1,7 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub const ADB_ISSUE_MACOS_GATEKEEPER_QUARANTINE: &str = "macos_gatekeeper_quarantine";
 
@@ -46,13 +48,88 @@ pub fn normalize_command_path(value: &str) -> String {
     trimmed.to_string()
 }
 
+const ADB_RESOLVE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+type AdbResolveEnvKey = (
+    String,
+    Option<OsString>,
+    Option<OsString>,
+    Option<OsString>,
+    Option<OsString>,
+    Option<OsString>,
+    Option<OsString>,
+);
+
+struct AdbResolveCacheEntry {
+    key: AdbResolveEnvKey,
+    resolved: String,
+    fetched_at: Instant,
+}
+
+fn adb_resolve_cache() -> &'static Mutex<Option<AdbResolveCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Option<AdbResolveCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn invalidate_adb_program_cache() {
+    if let Ok(mut guard) = adb_resolve_cache().lock() {
+        *guard = None;
+    }
+}
+
 pub fn resolve_adb_program(config_command_path: &str) -> String {
     let normalized = normalize_command_path(config_command_path);
-    if is_default_adb_alias(&normalized) {
-        resolve_default_adb_program()
-    } else {
-        normalized
+    if !is_default_adb_alias(&normalized) {
+        return normalized;
     }
+
+    let path_env = std::env::var_os("PATH");
+    let home_env = std::env::var_os("HOME");
+    let local_app_data_env = std::env::var_os("LOCALAPPDATA");
+    let user_profile_env = std::env::var_os("USERPROFILE");
+    let android_sdk_root = std::env::var_os("ANDROID_SDK_ROOT");
+    let android_home = std::env::var_os("ANDROID_HOME");
+
+    let key: AdbResolveEnvKey = (
+        normalized,
+        path_env.clone(),
+        home_env.clone(),
+        local_app_data_env.clone(),
+        user_profile_env.clone(),
+        android_sdk_root.clone(),
+        android_home.clone(),
+    );
+
+    if let Ok(guard) = adb_resolve_cache().lock() {
+        if let Some(entry) = guard.as_ref() {
+            if entry.key == key
+                && entry.fetched_at.elapsed() < ADB_RESOLVE_CACHE_TTL
+                && (entry.resolved == "adb" || Path::new(&entry.resolved).is_file())
+            {
+                return entry.resolved.clone();
+            }
+        }
+    }
+
+    let resolved = resolve_default_adb_program_from_values(
+        path_env.as_deref(),
+        home_env.as_deref(),
+        local_app_data_env.as_deref(),
+        user_profile_env.as_deref(),
+        android_sdk_root.as_deref(),
+        android_home.as_deref(),
+        true,
+    );
+
+    if let Ok(mut guard) = adb_resolve_cache().lock() {
+        *guard = Some(AdbResolveCacheEntry {
+            key,
+            resolved: resolved.clone(),
+            fetched_at: Instant::now(),
+        });
+    }
+
+    resolved
 }
 
 pub fn validate_adb_program(program: &str) -> Result<(), AdbProgramValidationError> {
@@ -113,25 +190,6 @@ fn is_default_adb_alias(value: &str) -> bool {
         return trimmed.eq_ignore_ascii_case("adb") || trimmed.eq_ignore_ascii_case("adb.exe");
     }
     trimmed == "adb"
-}
-
-fn resolve_default_adb_program() -> String {
-    let path_env = std::env::var_os("PATH");
-    let home_env = std::env::var_os("HOME");
-    let local_app_data_env = std::env::var_os("LOCALAPPDATA");
-    let user_profile_env = std::env::var_os("USERPROFILE");
-    let android_sdk_root = std::env::var_os("ANDROID_SDK_ROOT");
-    let android_home = std::env::var_os("ANDROID_HOME");
-
-    resolve_default_adb_program_from_values(
-        path_env.as_deref(),
-        home_env.as_deref(),
-        local_app_data_env.as_deref(),
-        user_profile_env.as_deref(),
-        android_sdk_root.as_deref(),
-        android_home.as_deref(),
-        true,
-    )
 }
 
 fn resolve_default_adb_program_from_values(

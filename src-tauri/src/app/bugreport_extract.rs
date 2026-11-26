@@ -154,6 +154,15 @@ pub fn prepare_bugreport_extract_index(
         .map_err(|err| format!("Failed to serialize cache meta: {err}"))?;
     fs::write(&meta_path, payload).map_err(|err| format!("Failed to write cache meta: {err}"))?;
 
+    if let Some(cache_root) = cache_dir.parent() {
+        crate::app::bugreport_logcat::prune_bugreport_caches(
+            cache_root,
+            &report_id,
+            8,
+            512 * 1024 * 1024,
+        );
+    }
+
     Ok(meta_to_summary(meta, db_path))
 }
 
@@ -189,7 +198,7 @@ pub fn query_bugreport_extract(
         return Err("Bugreport extract index not found. Load a bugreport first.".to_string());
     }
 
-    let connection = Connection::open(db_path)
+    let connection = crate::app::bugreport_logcat::open_readonly_sqlite(&db_path)
         .map_err(|err| format!("Failed to open bugreport extract index: {err}"))?;
 
     let mut candidates = match query.kind {
@@ -251,8 +260,10 @@ fn build_extract_index(
     connection
         .execute_batch(
             "
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
+            PRAGMA journal_mode=MEMORY;
+            PRAGMA synchronous=OFF;
+            PRAGMA temp_store=MEMORY;
+            PRAGMA cache_size=-65536;
             CREATE TABLE sections (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               name TEXT NOT NULL,
@@ -266,8 +277,6 @@ fn build_extract_index(
               section_id INTEGER NOT NULL,
               text TEXT NOT NULL
             );
-            CREATE INDEX idx_lines_section_line ON lines(section_id, line_no);
-            CREATE INDEX idx_sections_kind_name ON sections(kind, name);
             CREATE VIRTUAL TABLE lines_fts USING fts5(text, section_name);
             ",
         )
@@ -380,6 +389,17 @@ fn build_extract_index(
 
     tx.commit()
         .map_err(|err| format!("Failed to commit extract index: {err}"))?;
+
+    connection
+        .execute_batch(
+            "
+            CREATE INDEX idx_lines_section_line ON lines(section_id, line_no);
+            CREATE INDEX idx_sections_kind_name ON sections(kind, name);
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            ",
+        )
+        .map_err(|err| format!("Failed to create extract indexes: {err}"))?;
 
     let total_sections: usize = section_stats.values().sum();
     let service_sections = section_stats.get("service").copied().unwrap_or(0);

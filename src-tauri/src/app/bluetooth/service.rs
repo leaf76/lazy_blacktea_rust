@@ -92,17 +92,21 @@ pub fn start_bluetooth_monitor(
                         last_snapshot_hash = Some(hash);
                         if changed {
                             last_activity = Some(Instant::now());
-                        }
-                        let snapshot = parser_snapshot.parse_snapshot(
-                            &serial_snapshot,
-                            &raw,
-                            current_timestamp(),
-                        );
-                        let update = apply_snapshot_update(&machine_snapshot, &snapshot, &trace_snapshot);
-                        emit_snapshot(&app_snapshot, snapshot, &trace_snapshot);
-                        if let Some(update) = update {
-                            if update.changed {
-                                emit_state(&app_snapshot, update.summary, &trace_snapshot);
+                            let snapshot = parser_snapshot.parse_snapshot(
+                                &serial_snapshot,
+                                &raw,
+                                current_timestamp(),
+                            );
+                            let update = apply_snapshot_update(
+                                &machine_snapshot,
+                                &snapshot,
+                                &trace_snapshot,
+                            );
+                            emit_snapshot(&app_snapshot, snapshot, &trace_snapshot);
+                            if let Some(update) = update {
+                                if update.changed {
+                                    emit_state(&app_snapshot, update.summary, &trace_snapshot);
+                                }
                             }
                         }
                         current_interval =
@@ -131,7 +135,7 @@ pub fn start_bluetooth_monitor(
             "-b".to_string(),
             "all".to_string(),
         ];
-        let child = match new_background_command(&adb_program_logcat)
+        let mut child = match new_background_command(&adb_program_logcat)
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -148,6 +152,8 @@ pub fn start_bluetooth_monitor(
             *guard = Some(child);
         } else {
             warn!(trace_id = %trace_logcat, "failed to lock bluetooth logcat child handle");
+            let _ = child.kill();
+            let _ = child.wait();
             return;
         }
 

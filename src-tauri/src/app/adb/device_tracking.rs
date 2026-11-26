@@ -68,13 +68,19 @@ pub fn start_device_tracker(
 
         let mut backoff_ms = 200u64;
         let backoff_max_ms = 5_000u64;
+        let mut use_fallback = false;
 
         loop {
             if stop_thread.load(Ordering::Relaxed) {
                 return;
             }
 
-            let mut child = match try_spawn(&args_primary) {
+            let spawn_args: &[&str] = if use_fallback {
+                &args_fallback
+            } else {
+                &args_primary
+            };
+            let child = match try_spawn(spawn_args) {
                 Some(child) => child,
                 None => {
                     thread::sleep(Duration::from_millis(backoff_ms));
@@ -87,93 +93,10 @@ pub fn start_device_tracker(
             {
                 let mut guard = match child_thread.lock() {
                     Ok(guard) => guard,
-                    Err(_) => {
-                        let _ = child.kill();
-                        return;
-                    }
+                    Err(_) => return,
                 };
                 if let Some(mut previous) = guard.take() {
                     // Reap any stale child before replacing the slot.
-                    let _ = previous.wait();
-                }
-                *guard = Some(child);
-            }
-
-            // If `-l` is unsupported, adb tends to exit quickly with a non-zero code.
-            // Detect that and retry without `-l` to keep basic tracking functional.
-            let start = Instant::now();
-            let mut did_fallback = false;
-            let mut should_respawn = false;
-            loop {
-                if stop_thread.load(Ordering::Relaxed) {
-                    return;
-                }
-                let exit = {
-                    let mut guard = match child_thread.lock() {
-                        Ok(guard) => guard,
-                        Err(_) => return,
-                    };
-                    let Some(child) = guard.as_mut() else {
-                        return;
-                    };
-                    child.try_wait().ok().flatten()
-                };
-                if let Some(status) = exit {
-                    if status.code().unwrap_or_default() != 0
-                        && start.elapsed() < Duration::from_secs(1)
-                    {
-                        warn!(
-                            trace_id = %trace_id,
-                            "adb track-devices -l exited quickly; retrying without -l"
-                        );
-                        did_fallback = true;
-                        break;
-                    }
-                    warn!(
-                        trace_id = %trace_id,
-                        exit_code = ?status.code(),
-                        "adb device tracker exited"
-                    );
-                    should_respawn = true;
-                    break;
-                }
-                if start.elapsed() >= Duration::from_secs(1) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-
-            if should_respawn {
-                if let Ok(mut guard) = child_thread.lock() {
-                    if let Some(mut child) = guard.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                }
-                thread::sleep(Duration::from_millis(backoff_ms));
-                backoff_ms = (backoff_ms * 2).min(backoff_max_ms);
-                continue;
-            }
-
-            if did_fallback {
-                let mut child = match try_spawn(&args_fallback) {
-                    Some(child) => child,
-                    None => {
-                        thread::sleep(Duration::from_millis(backoff_ms));
-                        backoff_ms = (backoff_ms * 2).min(backoff_max_ms);
-                        continue;
-                    }
-                };
-                let mut guard = match child_thread.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        let _ = child.kill();
-                        return;
-                    }
-                };
-                if let Some(mut previous) = guard.take() {
-                    // `-l` fallback replaces an already-exited child; wait() reaps it
-                    // so we do not leak a zombie process on Unix.
                     let _ = previous.wait();
                 }
                 *guard = Some(child);
@@ -224,8 +147,8 @@ pub fn start_device_tracker(
                 None
             };
 
-            // Successful spawn: reset backoff for the next unexpected exit.
-            backoff_ms = 200;
+            let started = Instant::now();
+            let mut emitted_any = false;
 
             let mut reader = std::io::BufReader::new(stdout);
             let mut parser = TrackDevicesStreamParser::new();
@@ -250,6 +173,8 @@ pub fn start_device_tracker(
                 }
 
                 for snapshot in parser.push_chunk(&chunk[..bytes_read]) {
+                    emitted_any = true;
+                    backoff_ms = 200;
                     let devices = snapshot
                         .into_iter()
                         .map(|summary| DeviceInfo {
@@ -268,6 +193,8 @@ pub fn start_device_tracker(
 
             // Emit the last buffered snapshot (if any) before exiting.
             for snapshot in parser.flush() {
+                emitted_any = true;
+                backoff_ms = 200;
                 let devices = snapshot
                     .into_iter()
                     .map(|summary| DeviceInfo {
@@ -283,12 +210,18 @@ pub fn start_device_tracker(
                 let _ = app.emit(DEVICE_TRACKING_SNAPSHOT_EVENT, payload);
             }
 
-            if let Ok(mut guard) = child_thread.lock() {
+            let exit_status = if let Ok(mut guard) = child_thread.lock() {
                 if let Some(mut child) = guard.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    if stop_thread.load(Ordering::Relaxed) {
+                        let _ = child.kill();
+                    }
+                    child.wait().ok()
+                } else {
+                    None
                 }
-            }
+            } else {
+                None
+            };
             if let Some(join) = stderr_join {
                 let _ = join.join();
             }
@@ -296,6 +229,30 @@ pub fn start_device_tracker(
             if stop_thread.load(Ordering::Relaxed) {
                 return;
             }
+
+            // If `-l` is unsupported, adb exits quickly with a non-zero code before emitting.
+            // Retry immediately without `-l` to keep basic tracking functional without a 1s stall.
+            if !use_fallback
+                && !emitted_any
+                && started.elapsed() < Duration::from_secs(2)
+                && exit_status
+                    .and_then(|status| status.code())
+                    .unwrap_or_default()
+                    != 0
+            {
+                warn!(
+                    trace_id = %trace_id,
+                    "adb track-devices -l exited quickly; retrying without -l"
+                );
+                use_fallback = true;
+                continue;
+            }
+
+            warn!(
+                trace_id = %trace_id,
+                exit_code = ?exit_status.and_then(|status| status.code()),
+                "adb device tracker exited"
+            );
 
             // Unexpected exit: bounded exponential backoff restart.
             thread::sleep(Duration::from_millis(backoff_ms));
