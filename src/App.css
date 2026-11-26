@@ -8539,3 +8539,33 @@ textarea:disabled {
   text-align: center;
   font-family: var(--font-code);
 }
+
+.app-shell[data-has-wallpaper="false"] .sidebar,
+.app-shell[data-has-wallpaper="false"] .top-bar,
+.app-shell[data-has-wallpaper="false"] .panel,
+.app-shell[data-has-wallpaper="false"] .device-popover,
+.app-shell[data-has-wallpaper="false"] .modal,
+.app-shell[data-has-wallpaper="false"] .context-menu,
+.app-shell[data-has-wallpaper="false"] .toast,
+.app-shell[data-has-wallpaper="false"] .file-drop-overlay-inner,
+.app-shell[data-has-wallpaper="false"] .net-profiler-chart-overlay,
+.app-shell[data-has-wallpaper="false"] .bugreport-log-findbar,
+.app-shell[data-has-wallpaper="false"] .logcat-search-overlay {
+  backdrop-filter: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .app-shell .sidebar,
+  .app-shell .top-bar,
+  .app-shell .panel,
+  .app-shell .device-popover,
+  .app-shell .modal,
+  .app-shell .context-menu,
+  .app-shell .toast,
+  .app-shell .file-drop-overlay-inner,
+  .app-shell .net-profiler-chart-overlay,
+  .app-shell .bugreport-log-findbar,
+  .app-shell .logcat-search-overlay {
+    backdrop-filter: none;
+  }
+}

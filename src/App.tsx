@@ -175,9 +175,7 @@ import {
   buildSearchRegex,
   defaultLogcatLevels,
   filterLogcatEntriesByBaseFilters,
-  filterLogcatEntriesBySearch,
   isLogcatBaseFilterActive,
-  mergeLogcatEntriesById,
   parsePidOutput,
   type LogcatBaseFilterState,
   type LogcatLevelsState,
@@ -418,31 +416,35 @@ import {
   type DeveloperOptionsMatrixState,
 } from "./developerOptionsUiState";
 import { BugreportLogOutput } from "./components/BugreportLogOutput";
+import { getAppDisplayName, getAppIconKey } from "./appsUtils";
+import { getFileKind } from "./filesUtils";
+import type { NetProfilerState } from "./netProfilerState";
+import type { PerfMonitorState } from "./perfState";
 import {
-  DeviceTerminalPanel,
   appendTerminalBuffer,
+  createDefaultTerminalState,
   type TerminalDeviceState,
-} from "./components/DeviceTerminalPanel";
-import {
-  LOGCAT_LINE_HEIGHT_PX,
-  LOGCAT_OUTPUT_PADDING_PX,
-  type LogcatLineEntry,
-} from "./components/LogcatOutput";
+} from "./terminalBuffer";
+import type { LogcatLineEntry } from "./components/LogcatOutput";
 import { AdvancedToggleButton, LogLiveFilterBar } from "./components/LogLiveFilterBar";
 import { renderHighlightedSnippet } from "./components/logHighlighting";
 import {
-  EMPTY_NET_PROFILER_STATE,
-  NetworkBreakdownPanel,
-  type NetProfilerState,
-} from "./components/NetworkBreakdownPanel";
+  LogcatRouteSection,
+  NetworkRouteConnector,
+  PerformanceRouteConnector,
+  SelectedTerminalCountText,
+  TerminalWorkspaceConnector,
+} from "./components/StreamRouteConnectors";
 import {
-  EMPTY_PERF_MONITOR_STATE,
-  PerformancePage,
-  type PerfMonitorState,
-} from "./components/PerformancePage";
-import { AppsPage, getAppDisplayName, getAppIconKey } from "./pages/AppsPage";
+  getStreamState,
+  setLogcatLinesState,
+  setLogcatRetainedState,
+  setNetBySerialState,
+  setPerfBySerialState,
+  setTerminalBySerialState,
+  useStreamStatusSummary,
+} from "./streamStore";
 import type { DeviceCatalogActionEntry } from "./pages/DevicesPage";
-import { FilesPage, getFileKind } from "./pages/FilesPage";
 import type { UpdateUiStatus } from "./pages/SettingsPage";
 import appPackage from "../package.json";
 import "./App.css";
@@ -597,9 +599,13 @@ const LazyDevicesPage = lazy(async () => {
   const module = await import("./pages/DevicesPage");
   return { default: module.DevicesPage };
 });
-const LazyLogcatPage = lazy(async () => {
-  const module = await import("./pages/LogcatPage");
-  return { default: module.LogcatPage };
+const LazyAppsPage = lazy(async () => {
+  const module = await import("./pages/AppsPage");
+  return { default: module.AppsPage };
+});
+const LazyFilesPage = lazy(async () => {
+  const module = await import("./pages/FilesPage");
+  return { default: module.FilesPage };
 });
 const LazySettingsPage = lazy(async () => {
   const module = await import("./pages/SettingsPage");
@@ -828,13 +834,11 @@ function App() {
       return [...DEFAULT_DEVICE_ITEM_INFO_FIELD_IDS];
     }
   });
-  const [terminalBySerial, setTerminalBySerial] = useState<Record<string, TerminalDeviceState>>({});
   const [terminalBroadcast, setTerminalBroadcast] = useState("");
   const [terminalActiveSerials, setTerminalActiveSerials] = useState<string[]>([]);
   const [activeActionsShellTab, setActiveActionsShellTab] = useState<ActionsShellTabId>("adb-shell");
   const terminalSessionIdBySerialRef = useRef<Record<string, string | null>>({});
   const terminalActiveSerialsRef = useRef<string[]>([]);
-  const terminalBySerialRef = useRef<Record<string, TerminalDeviceState>>({});
   const terminalPendingRef = useRef<Record<string, string>>({});
   const terminalFlushTimerRef = useRef<number | null>(null);
   const terminalPersistTimerRef = useRef<number | null>(null);
@@ -910,8 +914,6 @@ function App() {
     setUpdateStatus(source === "manual" ? "up_to_date" : "idle");
     setUpdateError(null);
   };
-  const [logcatLines, setLogcatLines] = useState<Record<string, LogcatLineEntry[]>>({});
-  const [logcatRetainedBySerial, setLogcatRetainedBySerial] = useState<Record<string, LogcatLineEntry[]>>({});
   const [logcatSourceMode, setLogcatSourceMode] = useState<LogcatSourceMode>("tag");
   const [logcatSourceValue, setLogcatSourceValue] = useState("");
   const [logLevels, setLogLevels] = useState<LogcatLevelsState>(() => loadSharedLogFiltersFromStorage().levels);
@@ -946,10 +948,6 @@ function App() {
   const [sharedLogTextChips, setSharedLogTextChips] = useState<LogTextChip[]>(
     () => loadSharedLogFiltersFromStorage().textChips,
   );
-  const [perfBySerial, setPerfBySerial] = useState<Record<string, PerfMonitorState>>({});
-  const perfBySerialRef = useRef<Record<string, PerfMonitorState>>({});
-  const [netBySerial, setNetBySerial] = useState<Record<string, NetProfilerState>>({});
-  const netBySerialRef = useRef<Record<string, NetProfilerState>>({});
   const [netProfilerIntervalMs, setNetProfilerIntervalMs] = useState(2000);
   const [netProfilerTopN, setNetProfilerTopN] = useState(20);
   const [netProfilerSearch, setNetProfilerSearch] = useState("");
@@ -1369,7 +1367,6 @@ function App() {
   useEffect(() => {
     errorStateRef.current = errorState;
   }, [errorState]);
-  const [logcatMatchIndex, setLogcatMatchIndex] = useState(0);
   const logcatOutputRef = useRef<HTMLDivElement>(null);
   const uiScreenshotImgRef = useRef<HTMLImageElement | null>(null);
   const uiBoundsCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1684,10 +1681,6 @@ function App() {
         : "Not loaded yet",
     [developerOptionsMatrixLogBufferLastReadAt],
   );
-  const selectedConnectedCount = selectedSerials.reduce(
-    (total, serial) => total + (terminalBySerial[serial]?.connected ? 1 : 0),
-    0,
-  );
   const selectedOnlineCount = useMemo(
     () =>
       selectedSerials.reduce((total, serial) => {
@@ -1708,33 +1701,23 @@ function App() {
       }),
     [devices, selectedSerials],
   );
+  const streamStatusSummary = useStreamStatusSummary();
   const perfRunningSerialsSignature = useMemo(
-    () =>
-      Object.entries(perfBySerial)
-        .filter(([, state]) => state.running)
-        .map(([serial]) => serial)
-        .sort()
-        .join("|"),
-    [perfBySerial],
+    () => streamStatusSummary.perfRunningSerials.join("|"),
+    [streamStatusSummary.perfRunningSerials],
   );
   const netProfilerRunningSerialsSignature = useMemo(
-    () =>
-      Object.entries(netBySerial)
-        .filter(([, state]) => state.running)
-        .map(([serial]) => serial)
-        .sort()
-        .join("|"),
-    [netBySerial],
+    () => streamStatusSummary.netRunningSerials.join("|"),
+    [streamStatusSummary.netRunningSerials],
   );
   const terminalConnectedSerialsSignature = useMemo(
-    () =>
-      Object.entries(terminalBySerial)
-        .filter(([, state]) => state.connected)
-        .map(([serial]) => serial)
-        .sort()
-        .join("|"),
-    [terminalBySerial],
+    () => streamStatusSummary.terminalConnectedSerials.join("|"),
+    [streamStatusSummary.terminalConnectedSerials],
   );
+  const selectedConnectedCount = useMemo(() => {
+    const connectedSet = new Set(streamStatusSummary.terminalConnectedSerials);
+    return selectedSerials.reduce((total, serial) => total + (connectedSet.has(serial) ? 1 : 0), 0);
+  }, [selectedSerials, streamStatusSummary.terminalConnectedSerials]);
   const logcatRunningSerialsSignature = useMemo(
     () => getRunningLogcatSerials(logcatRunningBySerial).sort().join("|"),
     [logcatRunningBySerial],
@@ -1848,11 +1831,11 @@ function App() {
     const nextPerfSerial = isPerformanceView ? activeSerial ?? null : null;
     const nextNetSerial = isPerformanceView || isNetworkView ? activeSerial ?? null : null;
     if (prevSerial && prevSerial !== nextPerfSerial) {
-      const running = perfBySerialRef.current[prevSerial]?.running ?? false;
+      const running = getStreamState().perfBySerial[prevSerial]?.running ?? false;
       if (running) {
         void stopPerfMonitor(prevSerial)
           .then(() => {
-            setPerfBySerial((prev) => {
+            setPerfBySerialState((prev) => {
               const existing = prev[prevSerial];
               if (!existing) {
                 return prev;
@@ -1871,11 +1854,11 @@ function App() {
     }
 
     if (prevNetSerial && prevNetSerial !== nextNetSerial) {
-      const running = netBySerialRef.current[prevNetSerial]?.running ?? false;
+      const running = getStreamState().netBySerial[prevNetSerial]?.running ?? false;
       if (running) {
         void stopNetProfiler(prevNetSerial)
           .then(() => {
-            setNetBySerial((prev) => {
+            setNetBySerialState((prev) => {
               const existing = prev[prevNetSerial];
               if (!existing) {
                 return prev;
@@ -2505,11 +2488,6 @@ function App() {
     };
   }, [apkBundlePath, apkInstallMode, apkPath, apkPaths]);
 
-  const rawLogcatLines = useMemo<LogcatLineEntry[]>(
-    () => (activeSerial ? logcatLines[activeSerial] ?? [] : []),
-    [activeSerial, logcatLines],
-  );
-
   const logcatSearchPattern = useMemo(
     () =>
       buildSearchRegex(logcatSearchTerm, {
@@ -2552,49 +2530,6 @@ function App() {
       state: logcatBaseFilterState,
     };
   }, [logcatBaseFilterActive, logcatBaseFilterState]);
-
-  const logcatRawBaseFiltered = useMemo(
-    () => filterLogcatEntriesByBaseFilters(rawLogcatLines, logcatBaseFilterState),
-    [rawLogcatLines, logcatBaseFilterState],
-  );
-
-  const logcatRetainedEntries = useMemo<LogcatLineEntry[]>(
-    () => (activeSerial ? logcatRetainedBySerial[activeSerial] ?? [] : []),
-    [activeSerial, logcatRetainedBySerial],
-  );
-
-  const logcatBaseDisplayLines = useMemo(
-    () =>
-      logcatBaseFilterActive
-        ? mergeLogcatEntriesById(logcatRetainedEntries, logcatRawBaseFiltered)
-        : rawLogcatLines,
-    [logcatBaseFilterActive, logcatRetainedEntries, logcatRawBaseFiltered, rawLogcatLines],
-  );
-
-  const logcatFiltered = useMemo(
-    () =>
-      filterLogcatEntriesBySearch(logcatBaseDisplayLines, {
-        searchTerm: logcatSearchTerm,
-        searchCaseSensitive: logcatSearchCaseSensitive,
-        searchRegex: logcatSearchRegex,
-        searchOnly: logcatSearchOnly,
-      }),
-    [
-      logcatBaseDisplayLines,
-      logcatSearchTerm,
-      logcatSearchCaseSensitive,
-      logcatSearchRegex,
-      logcatSearchOnly,
-    ],
-  );
-
-  const logcatLineIndexById = useMemo(() => {
-    const map = new Map<number, number>();
-    logcatFiltered.lines.forEach((entry, index) => {
-      map.set(entry.id, index);
-    });
-    return map;
-  }, [logcatFiltered.lines]);
 
   const selectedLogcatPreset = useMemo(
     () => logcatPresets.find((preset) => preset.name === logcatPresetSelected) ?? null,
@@ -3996,7 +3931,7 @@ function App() {
       const restoreSessions = response.data.terminal?.restore_sessions ?? [];
       const buffers = response.data.terminal?.buffers ?? {};
       setTerminalActiveSerials(restoreSessions);
-      setTerminalBySerial((prev) => {
+      setTerminalBySerialState((prev) => {
         const next: Record<string, TerminalDeviceState> = { ...prev };
         restoreSessions.forEach((serial) => {
           const existing = next[serial] ?? createDefaultTerminalState();
@@ -4081,18 +4016,6 @@ function App() {
   useEffect(() => {
     terminalActiveSerialsRef.current = terminalActiveSerials;
   }, [terminalActiveSerials]);
-
-  useEffect(() => {
-    terminalBySerialRef.current = terminalBySerial;
-  }, [terminalBySerial]);
-
-  useEffect(() => {
-    perfBySerialRef.current = perfBySerial;
-  }, [perfBySerial]);
-
-  useEffect(() => {
-    netBySerialRef.current = netBySerial;
-  }, [netBySerial]);
 
 	  useEffect(() => {
       if (!config) {
@@ -4278,7 +4201,7 @@ function App() {
       return;
     }
     schedulePersistTerminalState();
-  }, [terminalActiveSerials, terminalBySerial]);
+  }, [terminalActiveSerials]);
 
   useEffect(() => {
     return () => {
@@ -4603,21 +4526,6 @@ function App() {
   }, [groupMap]);
 
   useEffect(() => {
-    setLogcatMatchIndex(0);
-  }, [logcatSearchTerm, logcatSearchRegex, logcatSearchCaseSensitive, logcatSearchOnly]);
-
-
-  useEffect(() => {
-    if (logcatFiltered.matchIds.length === 0) {
-      setLogcatMatchIndex(0);
-      return;
-    }
-    if (logcatMatchIndex >= logcatFiltered.matchIds.length) {
-      setLogcatMatchIndex(logcatFiltered.matchIds.length - 1);
-    }
-  }, [logcatFiltered.matchIds.length, logcatMatchIndex]);
-
-  useEffect(() => {
     if (!isTauriRuntime()) {
       return;
     }
@@ -4642,7 +4550,7 @@ function App() {
         appendedEntriesBySerial[serial] = appendedEntries;
       });
 
-      setLogcatLines((prev) => {
+      setLogcatLinesState((prev) => {
         const next: Record<string, LogcatLineEntry[]> = { ...prev };
         serials.forEach((serial) => {
           const existing = next[serial] ?? [];
@@ -4657,7 +4565,7 @@ function App() {
         return;
       }
 
-      setLogcatRetainedBySerial((prev) => {
+      setLogcatRetainedState((prev) => {
         let next = prev;
         serials.forEach((serial) => {
           const appendedEntries = appendedEntriesBySerial[serial] ?? [];
@@ -4703,7 +4611,7 @@ function App() {
         return;
       }
       perfPendingRef.current = [];
-      setPerfBySerial((prev) => {
+      setPerfBySerialState((prev) => {
         const next = { ...prev };
         for (const payload of pending) {
           const existing =
@@ -4737,7 +4645,7 @@ function App() {
         return;
       }
       netPendingRef.current = [];
-      setNetBySerial((prev) => {
+      setNetBySerialState((prev) => {
         const next = { ...prev };
         for (const payload of pending) {
           const unsupported = payload.snapshot?.unsupported === true;
@@ -4785,11 +4693,8 @@ function App() {
 
     const unlistenPerf = listen<PerfEvent>("perf-snapshot", (event) => {
       const payload = event.payload;
-      // Error toasts stay immediate (and deduped against the last committed state); only the
-      // sample accumulation is batched. The poll cadence (>=500ms) exceeds the 250ms flush
-      // window, so the ref stays current for dedup.
       if (payload.error) {
-        const prevError = perfBySerialRef.current[payload.serial]?.lastError ?? null;
+        const prevError = getStreamState().perfBySerial[payload.serial]?.lastError ?? null;
         if (payload.error !== prevError) {
           pushToast(payload.error, "error");
         }
@@ -4803,18 +4708,18 @@ function App() {
       const payload = event.payload;
       const unsupported = payload.snapshot?.unsupported === true;
       if (payload.error) {
-        const prevError = netBySerialRef.current[payload.serial]?.lastError ?? null;
+        const prevError = getStreamState().netBySerial[payload.serial]?.lastError ?? null;
         if (payload.error !== prevError) {
           pushToast(payload.error, "error");
         }
       }
 
       if (unsupported) {
-        const running = netBySerialRef.current[payload.serial]?.running ?? false;
+        const running = getStreamState().netBySerial[payload.serial]?.running ?? false;
         if (running) {
           void stopNetProfiler(payload.serial)
             .then(() => {
-              setNetBySerial((prev) => {
+              setNetBySerialState((prev) => {
                 const existing = prev[payload.serial];
                 if (!existing) {
                   return prev;
@@ -4844,7 +4749,7 @@ function App() {
         return;
       }
       terminalPendingRef.current = {};
-      setTerminalBySerial((prev) => {
+      setTerminalBySerialState((prev) => {
         const next: Record<string, TerminalDeviceState> = { ...prev };
         serials.forEach((serial) => {
           const chunk = pending[serial] ?? "";
@@ -4874,6 +4779,9 @@ function App() {
         });
         return next;
       });
+      if (terminalLoadedRef.current) {
+        schedulePersistTerminalState();
+      }
     };
 
     const scheduleTerminalFlush = () => {
@@ -4903,7 +4811,10 @@ function App() {
 
       if (payload.event === "exit" || payload.event === "stopped") {
         terminalSessionIdBySerialRef.current[payload.serial] = null;
-        setTerminalBySerial((prev) => {
+        if (terminalLoadedRef.current) {
+          schedulePersistTerminalState();
+        }
+        setTerminalBySerialState((prev) => {
           const existing =
             prev[payload.serial] ??
             ({
@@ -5068,7 +4979,7 @@ function App() {
     if (!selectedSerials.length) {
       return;
     }
-    setTerminalBySerial((prev) => {
+    setTerminalBySerialState((prev) => {
       let next = prev;
       for (const serial of selectedSerials) {
         if (next[serial]) {
@@ -5424,14 +5335,6 @@ function App() {
     await handleAssignGroupWithName("");
   };
 
-  const createDefaultTerminalState = (): TerminalDeviceState => ({
-    connected: false,
-    sessionId: null,
-    lines: [],
-    tail: "",
-    autoScroll: true,
-  });
-
   const flushPersistTerminalState = async () => {
     if (terminalPersistInFlightRef.current) {
       terminalPersistTimerRef.current = window.setTimeout(() => {
@@ -5443,7 +5346,7 @@ function App() {
     terminalPersistInFlightRef.current = true;
     try {
       const restoreSessions = terminalActiveSerialsRef.current;
-      const bySerial = terminalBySerialRef.current;
+      const bySerial = getStreamState().terminalBySerial;
       const buffers: Record<string, string[]> = {};
       restoreSessions.forEach((serial) => {
         const state = bySerial[serial];
@@ -5478,7 +5381,7 @@ function App() {
     const response = await startTerminalSession(serial);
     terminalSessionIdBySerialRef.current[serial] = response.data.session_id;
     setTerminalActiveSerials((prev) => (prev.includes(serial) ? prev : [...prev, serial]));
-    setTerminalBySerial((prev) => {
+    setTerminalBySerialState((prev) => {
       const existing = prev[serial] ?? createDefaultTerminalState();
       return {
         ...prev,
@@ -5489,13 +5392,16 @@ function App() {
         },
       };
     });
+    if (terminalLoadedRef.current) {
+      schedulePersistTerminalState();
+    }
     return response.data.session_id;
   };
 
   const disconnectTerminalInternal = async (serial: string) => {
     await stopTerminalSession(serial);
     terminalSessionIdBySerialRef.current[serial] = null;
-    setTerminalBySerial((prev) => {
+    setTerminalBySerialState((prev) => {
       const existing = prev[serial] ?? createDefaultTerminalState();
       return {
         ...prev,
@@ -5506,10 +5412,13 @@ function App() {
         },
       };
     });
+    if (terminalLoadedRef.current) {
+      schedulePersistTerminalState();
+    }
   };
 
   const appendTerminal = (serial: string, chunk: string) => {
-    setTerminalBySerial((prev) => {
+    setTerminalBySerialState((prev) => {
       const existing = prev[serial] ?? createDefaultTerminalState();
       const updated = appendTerminalBuffer(
         existing.lines,
@@ -5526,10 +5435,13 @@ function App() {
         },
       };
     });
+    if (terminalLoadedRef.current) {
+      schedulePersistTerminalState();
+    }
   };
 
   const clearTerminal = (serial: string) => {
-    setTerminalBySerial((prev) => {
+    setTerminalBySerialState((prev) => {
       const existing = prev[serial] ?? createDefaultTerminalState();
       return {
         ...prev,
@@ -5540,10 +5452,13 @@ function App() {
         },
       };
     });
+    if (terminalLoadedRef.current) {
+      schedulePersistTerminalState();
+    }
   };
 
   const setTerminalAutoScroll = (serial: string, enabled: boolean) => {
-    setTerminalBySerial((prev) => {
+    setTerminalBySerialState((prev) => {
       const existing = prev[serial] ?? createDefaultTerminalState();
       return {
         ...prev,
@@ -5553,6 +5468,9 @@ function App() {
         },
       };
     });
+    if (terminalLoadedRef.current) {
+      schedulePersistTerminalState();
+    }
   };
 
   const handleConnectTerminal = async (serial: string) => {
@@ -5584,7 +5502,7 @@ function App() {
   const handleRemoveTerminalSession = async (serial: string) => {
     setBusy(true);
     try {
-      if (terminalBySerial[serial]?.connected) {
+      if (getStreamState().terminalBySerial[serial]?.connected) {
         await disconnectTerminalInternal(serial);
       }
       setTerminalActiveSerials((prev) => prev.filter((value) => value !== serial));
@@ -5631,7 +5549,7 @@ function App() {
     try {
       for (const serial of selectedSerials) {
         setTerminalActiveSerials((prev) => (prev.includes(serial) ? prev : [...prev, serial]));
-        const existing = terminalBySerial[serial];
+        const existing = getStreamState().terminalBySerial[serial];
         if (existing?.connected) {
           continue;
         }
@@ -5654,7 +5572,7 @@ function App() {
     setBusy(true);
     try {
       for (const serial of selectedSerials) {
-        const existing = terminalBySerial[serial];
+        const existing = getStreamState().terminalBySerial[serial];
         if (!existing?.connected) {
           continue;
         }
@@ -5675,6 +5593,7 @@ function App() {
       pushToast("Please enter a command to broadcast.", "error");
       return;
     }
+    const terminalBySerial = getStreamState().terminalBySerial;
     const targets = terminalActiveSerials.filter((serial) => terminalBySerial[serial]?.connected);
     if (!targets.length) {
       pushToast("No connected terminal sessions.", "error");
@@ -8316,20 +8235,26 @@ function App() {
       Object.entries(value)
         .filter(([, state]) => state.connected)
         .map(([serial]) => serial);
-    const collectTargetsFromState = () => ({
-      logcat: getRunningLogcatSerials(logcatRunningBySerial),
-      perf: listRunningPerfSerials(perfBySerial),
-      netProfiler: listRunningNetProfilerSerials(netBySerial),
-      terminal: listConnectedTerminalSerials(terminalBySerial),
-      bluetooth: getRunningLogcatSerials(bluetoothMonitorRunningBySerial),
-    });
-    const collectTargetsFromRefs = () => ({
-      logcat: getRunningLogcatSerials(logcatRunningBySerialRef.current),
-      perf: listRunningPerfSerials(perfBySerialRef.current),
-      netProfiler: listRunningNetProfilerSerials(netBySerialRef.current),
-      terminal: listConnectedTerminalSerials(terminalBySerialRef.current),
-      bluetooth: getRunningLogcatSerials(bluetoothMonitorRunningBySerialRef.current),
-    });
+    const collectTargetsFromState = () => {
+      const store = getStreamState();
+      return {
+        logcat: getRunningLogcatSerials(logcatRunningBySerial),
+        perf: listRunningPerfSerials(store.perfBySerial),
+        netProfiler: listRunningNetProfilerSerials(store.netBySerial),
+        terminal: listConnectedTerminalSerials(store.terminalBySerial),
+        bluetooth: getRunningLogcatSerials(bluetoothMonitorRunningBySerial),
+      };
+    };
+    const collectTargetsFromRefs = () => {
+      const store = getStreamState();
+      return {
+        logcat: getRunningLogcatSerials(logcatRunningBySerialRef.current),
+        perf: listRunningPerfSerials(store.perfBySerial),
+        netProfiler: listRunningNetProfilerSerials(store.netBySerial),
+        terminal: listConnectedTerminalSerials(store.terminalBySerial),
+        bluetooth: getRunningLogcatSerials(bluetoothMonitorRunningBySerialRef.current),
+      };
+    };
     const countTargets = (targets: {
       logcat: string[];
       perf: string[];
@@ -8476,7 +8401,7 @@ function App() {
       }
 
       if (perfResult.succeeded.length) {
-        setPerfBySerial((prev) => {
+        setPerfBySerialState((prev) => {
           const next = { ...prev };
           perfResult.succeeded.forEach((serial) => {
             const existing = next[serial];
@@ -8490,7 +8415,7 @@ function App() {
       }
 
       if (netProfilerResult.succeeded.length) {
-        setNetBySerial((prev) => {
+        setNetBySerialState((prev) => {
           const next = { ...prev };
           netProfilerResult.succeeded.forEach((serial) => {
             const existing = next[serial];
@@ -8504,7 +8429,7 @@ function App() {
       }
 
       if (terminalResult.succeeded.length) {
-        setTerminalBySerial((prev) => {
+        setTerminalBySerialState((prev) => {
           const next = { ...prev };
           terminalResult.succeeded.forEach((serial) => {
             const existing = next[serial];
@@ -8515,6 +8440,9 @@ function App() {
           });
           return next;
         });
+        if (terminalLoadedRef.current) {
+          schedulePersistTerminalState();
+        }
         const nextTerminalSessions = { ...terminalSessionIdBySerialRef.current };
         terminalResult.succeeded.forEach((serial) => {
           nextTerminalSessions[serial] = null;
@@ -8705,8 +8633,8 @@ function App() {
   };
 
   const clearLogcatLocalCache = (serial: string) => {
-    setLogcatLines((prev) => ({ ...prev, [serial]: [] }));
-    setLogcatRetainedBySerial((prev) => ({ ...prev, [serial]: [] }));
+    setLogcatLinesState((prev) => ({ ...prev, [serial]: [] }));
+    setLogcatRetainedState((prev) => ({ ...prev, [serial]: [] }));
   };
 
   const closeLogcatClearBufferModal = () => setLogcatClearBufferModal(null);
@@ -8757,12 +8685,12 @@ function App() {
     clearLogcatLocalCache(serial);
   };
 
-  const handleLogcatExport = async () => {
+  const handleLogcatExport = async (lines: LogcatLineEntry[]) => {
     const serial = ensureSingleSelection("logcat export");
     if (!serial) {
       return;
     }
-    if (!logcatFiltered.lines.length) {
+    if (!lines.length) {
       pushToast("No logcat lines to export.", "error");
       return;
     }
@@ -8770,7 +8698,7 @@ function App() {
     try {
       const response = await exportLogcat(
         serial,
-        logcatFiltered.lines.map((entry) => entry.text),
+        lines.map((entry) => entry.text),
         config?.file_gen_output_path || config?.output_path,
       );
       setLogcatLastExport(response.data.output_path);
@@ -8818,7 +8746,8 @@ function App() {
             segment_count: 1,
           },
         }));
-        const session = createLogcatRecordingSyncSession(serial, rawLogcatLines);
+        const currentRawLines = getStreamState().logcatLines[serial] ?? [];
+        const session = createLogcatRecordingSyncSession(serial, currentRawLines);
         setLogcatSyncSessionBySerial((prev) => ({ ...prev, [serial]: session }));
         pushToast(`Recording started with logcat sync for ${serial}.`, "info");
       } else {
@@ -8833,6 +8762,7 @@ function App() {
             segment_count: stopResponse.data.segment_count,
           },
         }));
+        const currentRawLines = getStreamState().logcatLines[serial] ?? [];
         setLogcatSyncSessionBySerial((prev) => {
           const existing = prev[serial];
           if (!existing) {
@@ -8840,7 +8770,7 @@ function App() {
           }
           return {
             ...prev,
-            [serial]: finalizeLogcatRecordingSyncSession(existing, rawLogcatLines),
+            [serial]: finalizeLogcatRecordingSyncSession(existing, currentRawLines),
           };
         });
         pushToast(
@@ -8865,7 +8795,8 @@ function App() {
       pushToast("No synced recording session recorded for this device.", "error");
       return;
     }
-    const sliced = sliceLogcatLinesForRecording(rawLogcatLines, session);
+    const currentRawLines = getStreamState().logcatLines[serial] ?? [];
+    const sliced = sliceLogcatLinesForRecording(currentRawLines, session);
     if (!sliced.length) {
       pushToast("No logcat lines captured during that recording window.", "error");
       return;
@@ -9069,14 +9000,14 @@ function App() {
     if (!serial) {
       return;
     }
-    if (perfBySerialRef.current[serial]?.running) {
+    if (getStreamState().perfBySerial[serial]?.running) {
       pushToast("Performance monitor already running.", "info");
       return;
     }
     setBusy(true);
     try {
       const response = await startPerfMonitor(serial, 1000);
-      setPerfBySerial((prev) => {
+      setPerfBySerialState((prev) => {
         const existing =
           prev[serial] ??
           ({
@@ -9108,14 +9039,14 @@ function App() {
     if (!serial) {
       return;
     }
-    if (!perfBySerialRef.current[serial]?.running) {
+    if (!getStreamState().perfBySerial[serial]?.running) {
       pushToast("Performance monitor is not running.", "info");
       return;
     }
     setBusy(true);
     try {
       await stopPerfMonitor(serial);
-      setPerfBySerial((prev) => {
+      setPerfBySerialState((prev) => {
         const existing = prev[serial];
         if (!existing) {
           return prev;
@@ -9141,7 +9072,7 @@ function App() {
     if (!serial) {
       return;
     }
-    if (netBySerialRef.current[serial]?.running) {
+    if (getStreamState().netBySerial[serial]?.running) {
       pushToast("Network profiler already running.", "info");
       return;
     }
@@ -9150,7 +9081,7 @@ function App() {
       const pinnedUidsRaw = netProfilerPinnedUidsBySerial[serial] ?? [];
       const pinnedUids = pinnedUidsRaw.length ? pinnedUidsRaw : undefined;
       const response = await startNetProfiler(serial, netProfilerIntervalMs, netProfilerTopN, pinnedUids);
-      setNetBySerial((prev) => {
+      setNetBySerialState((prev) => {
         const existing =
           prev[serial] ??
           ({
@@ -9183,14 +9114,14 @@ function App() {
     if (!serial) {
       return;
     }
-    if (!netBySerialRef.current[serial]?.running) {
+    if (!getStreamState().netBySerial[serial]?.running) {
       pushToast("Network profiler is not running.", "info");
       return;
     }
     setBusy(true);
     try {
       await stopNetProfiler(serial);
-      setNetBySerial((prev) => {
+      setNetBySerialState((prev) => {
         const existing = prev[serial];
         if (!existing) {
           return prev;
@@ -9209,46 +9140,6 @@ function App() {
     } finally {
       setBusy(false);
     }
-  };
-
-  const scrollToLogcatMatch = (index: number) => {
-    const container = logcatOutputRef.current;
-    if (!container) {
-      return;
-    }
-    const matchId = logcatFiltered.matchIds[index];
-    if (matchId == null) {
-      return;
-    }
-    const matchIndex = logcatLineIndexById.get(matchId);
-    if (matchIndex == null) {
-      return;
-    }
-    const target = matchIndex * LOGCAT_LINE_HEIGHT_PX;
-    const offset = Math.max(
-      0,
-      target - container.clientHeight / 2 + LOGCAT_OUTPUT_PADDING_PX,
-    );
-    container.scrollTop = offset;
-  };
-
-  const handleLogcatNextMatch = () => {
-    if (!logcatFiltered.matchIds.length) {
-      return;
-    }
-    const nextIndex = (logcatMatchIndex + 1) % logcatFiltered.matchIds.length;
-    setLogcatMatchIndex(nextIndex);
-    scrollToLogcatMatch(nextIndex);
-  };
-
-  const handleLogcatPrevMatch = () => {
-    if (!logcatFiltered.matchIds.length) {
-      return;
-    }
-    const prevIndex =
-      (logcatMatchIndex - 1 + logcatFiltered.matchIds.length) % logcatFiltered.matchIds.length;
-    setLogcatMatchIndex(prevIndex);
-    scrollToLogcatMatch(prevIndex);
   };
 
   const basenameFromHostPath = (value: string) => {
@@ -13028,7 +12919,7 @@ function App() {
         };
       });
 
-      if (!netBySerialRef.current[serial]?.running) {
+      if (!getStreamState().netBySerial[serial]?.running) {
         pushToast(toastMessage, "info");
         return;
       }
@@ -13055,103 +12946,68 @@ function App() {
     [pushToast],
   );
 
-  const activePerfState = activeSerial
-    ? perfBySerial[activeSerial] ?? EMPTY_PERF_MONITOR_STATE
-    : EMPTY_PERF_MONITOR_STATE;
-  const activeNetState = activeSerial
-    ? netBySerial[activeSerial] ?? EMPTY_NET_PROFILER_STATE
-    : EMPTY_NET_PROFILER_STATE;
+  const bugreportLogNearBottomRef = useRef<() => void>(() => {});
+  bugreportLogNearBottomRef.current = () => {
+    if (!bugreportLogSummary) {
+      return;
+    }
+    void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
+  };
+  const handleBugreportLogNearBottom = useCallback(() => {
+    bugreportLogNearBottomRef.current();
+  }, []);
+
   const activeNetFocusUid = activeSerial ? netProfilerFocusUidBySerial[activeSerial] ?? null : null;
   const activeNetPinnedUids = activeSerial
     ? netProfilerPinnedUidsBySerial[activeSerial] ?? EMPTY_PINNED_UIDS
     : EMPTY_PINNED_UIDS;
 
-  const renderNetworkBreakdownPanel = () => (
-    <NetworkBreakdownPanel
-      serial={activeSerial}
-      deviceStatus={deviceStatus}
-      busy={busy}
-      netState={activeNetState}
-      intervalMs={netProfilerIntervalMs}
-      topN={netProfilerTopN}
-      search={netProfilerSearch}
-      windowMs={netProfilerWindowMs}
-      focusUid={activeNetFocusUid}
-      pinnedUids={activeNetPinnedUids}
-      onIntervalChange={setNetProfilerIntervalMs}
-      onTopNChange={setNetProfilerTopN}
-      onSearchChange={setNetProfilerSearch}
-      onWindowMsChange={setNetProfilerWindowMs}
-      onStart={handleNetProfilerStart}
-      onStop={handleNetProfilerStop}
-      onFocusUidChange={handleNetFocusUidChange}
-      onToggleFocusUid={handleNetToggleFocusUid}
-      onApplyPinnedUids={handleApplyNetPinnedUids}
-      onNotifyInfo={handleNotifyInfo}
-    />
-  );
+  const networkConnectorProps = {
+    activeSerial,
+    deviceStatus,
+    busy,
+    intervalMs: netProfilerIntervalMs,
+    topN: netProfilerTopN,
+    search: netProfilerSearch,
+    windowMs: netProfilerWindowMs,
+    focusUid: activeNetFocusUid,
+    pinnedUids: activeNetPinnedUids,
+    onIntervalChange: setNetProfilerIntervalMs,
+    onTopNChange: setNetProfilerTopN,
+    onSearchChange: setNetProfilerSearch,
+    onWindowMsChange: setNetProfilerWindowMs,
+    onStart: handleNetProfilerStart,
+    onStop: handleNetProfilerStop,
+    onFocusUidChange: handleNetFocusUidChange,
+    onToggleFocusUid: handleNetToggleFocusUid,
+    onApplyPinnedUids: handleApplyNetPinnedUids,
+    onNotifyInfo: handleNotifyInfo,
+  };
 
   const PerformanceView = () => (
-    <PerformancePage
+    <PerformanceRouteConnector
       activeSerial={activeSerial}
       deviceStatus={deviceStatus}
       busy={busy}
-      perfState={activePerfState}
       singleSelectionWarning={singleSelectionWarning}
       singleSelectionWarningMessage={singleSelectionWarningMessage}
       selectedSummaryLabel={selectedSummaryLabel}
       onGoToDevices={handleGoToDevices}
       onPerfStart={handlePerfStart}
       onPerfStop={handlePerfStop}
-      networkBreakdown={renderNetworkBreakdownPanel()}
+      networkProps={networkConnectorProps}
     />
   );
 
-  const NetworkView = () => {
-    if (!activeSerial) {
-      return (
-        <div className="page-section">
-          <div className="page-header">
-            <div>
-              <h1>Network</h1>
-              <p className="muted">Per-app network throughput snapshots.</p>
-            </div>
-          </div>
-          <section className="panel empty-state">
-            <div>
-              <h2>Select a device</h2>
-              <p className="muted">Choose an online device to start profiling.</p>
-            </div>
-            <div className="button-row">
-              <button className="ghost" onClick={handleGoToDevices}>
-                Go to Device Manager
-              </button>
-            </div>
-          </section>
-        </div>
-      );
-    }
-
-    return (
-      <div className="page-section">
-        <div className="page-header">
-          <div>
-            <h1>Network</h1>
-            <p className="muted">Per-app network throughput snapshots.</p>
-          </div>
-        </div>
-
-        {singleSelectionWarning && (
-          <div className="inline-alert info">
-            <strong>Primary device in use</strong>
-            <span>{singleSelectionWarningMessage}</span>
-          </div>
-        )}
-
-        {renderNetworkBreakdownPanel()}
-      </div>
-    );
-  };
+  const NetworkView = () => (
+    <NetworkRouteConnector
+      activeSerial={activeSerial}
+      singleSelectionWarning={singleSelectionWarning}
+      singleSelectionWarningMessage={singleSelectionWarningMessage}
+      onGoToDevices={handleGoToDevices}
+      networkProps={networkConnectorProps}
+    />
+  );
 
   const ProfilesView = () => {
     const eligibleSerials = new Set(iosProfileCapableDevices.map((device) => device.summary.serial));
@@ -13557,12 +13413,17 @@ function App() {
   const handleOpenLogcatPresetDeleteModal = useCallback((name: string) => {
     openPresetDeleteModal("logcat", name);
   }, [openPresetDeleteModal]);
-  const themeCssVariables = (config
+  const themeCssVariablesMap = config
     ? buildThemeCssVariables(config.ui, {
         isTauriRuntime: isTauriRuntime(),
         convertFileSrc,
       })
-    : {}) as CSSProperties;
+    : {};
+  const hasWallpaper = Boolean(
+    themeCssVariablesMap["--theme-background-image"] &&
+      themeCssVariablesMap["--theme-background-image"] !== "none",
+  );
+  const themeCssVariables = themeCssVariablesMap as CSSProperties;
   const activeUiDensity = normalizeUiDensity(config?.ui.density);
 
   useEffect(() => {
@@ -13714,6 +13575,7 @@ function App() {
     <div
       className={`app-shell${isDetachedPopupWindow ? " logcat-popup-shell" : ""}`}
       data-density={activeUiDensity}
+      data-has-wallpaper={hasWallpaper ? "true" : "false"}
       style={themeCssVariables}
     >
       {!isDetachedPopupWindow && (
@@ -14564,9 +14426,7 @@ function App() {
                           >
                             Disconnect Selected
                           </button>
-                          <span className="muted shell-terminal-toolbar-meta">
-                            {selectedCount ? `${selectedConnectedCount}/${selectedCount} connected` : "No selection"}
-                          </span>
+                          <SelectedTerminalCountText selectedSerials={selectedSerials} />
                         </div>
                         <div className="shell-terminal-toolbar-right">
                           <input
@@ -14592,116 +14452,21 @@ function App() {
                       </div>
                     </section>
 
-                    <div className="shell-terminal-layout">
-                      <aside className="panel shell-terminal-sessions">
-                        <div className="panel-header">
-                          <h3>Active Sessions</h3>
-                          <span className="muted">{terminalActiveSerials.length}</span>
-                        </div>
-                        {terminalActiveSerials.length === 0 ? (
-                          <p className="muted">
-                            No active sessions yet. Select devices and click Connect Selected.
-                          </p>
-                        ) : (
-                          <div className="shell-terminal-sessions-list">
-                            {terminalActiveSerials.map((serial) => {
-                              const device = devices.find((item) => item.summary.serial === serial) ?? null;
-                              const adbState = device?.summary.state ?? "unknown";
-                              const terminalState = terminalBySerial[serial] ?? createDefaultTerminalState();
-                              const tone =
-                                adbState === "device"
-                                  ? terminalState.connected
-                                    ? "ok"
-                                    : "warn"
-                                  : "error";
-                              const label =
-                                adbState === "device"
-                                  ? terminalState.connected
-                                    ? "Connected"
-                                    : "Disconnected"
-                                  : adbState === "unauthorized"
-                                    ? "Unauthorized"
-                                    : adbState === "offline"
-                                      ? "Offline"
-                                      : "Missing";
-                              return (
-                                <div key={serial} className="shell-terminal-session-row">
-                                  <button
-                                    type="button"
-                                    className="shell-terminal-session-main"
-                                    onClick={() => setSelectedSerials([serial])}
-                                  >
-                                    <div className="shell-terminal-session-title">
-                                      <span className="shell-terminal-session-serial">{serial}</span>
-                                      <span className="muted shell-terminal-session-model">
-                                        {device?.detail?.model ?? device?.summary.model ?? ""}
-                                      </span>
-                                    </div>
-                                    <span className={`status-pill ${tone}`}>{label}</span>
-                                  </button>
-                                  <div className="shell-terminal-session-actions">
-                                    <button
-                                      type="button"
-                                      className="ghost"
-                                      onClick={() =>
-                                        terminalState.connected
-                                          ? void handleDisconnectTerminal(serial)
-                                          : void handleConnectTerminal(serial)
-                                      }
-                                      disabled={busy}
-                                    >
-                                      {terminalState.connected ? "Disconnect" : "Connect"}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="ghost"
-                                      onClick={() => void handleRemoveTerminalSession(serial)}
-                                      disabled={busy}
-                                    >
-                                      Remove
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </aside>
-
-                      <div className="shell-terminal-content">
-                        {terminalActiveSerials.length === 0 ? (
-                          <section className="panel terminal-empty">
-                            <h3>Start a session</h3>
-                            <p className="muted">
-                              Use the Device Context selector to choose devices, then Connect Selected to pin and restore
-                              sessions across restarts.
-                            </p>
-                          </section>
-                        ) : (
-                          <div className="terminal-grid">
-                            {terminalActiveSerials.map((serial) => {
-                              const state = terminalBySerial[serial] ?? createDefaultTerminalState();
-                              return (
-                                <DeviceTerminalPanel
-                                  key={serial}
-                                  serial={serial}
-                                  state={state}
-                                  disabled={busy}
-                                  onConnect={handleConnectTerminal}
-                                  onDisconnect={handleDisconnectTerminal}
-                                  onSend={(targetSerial, command) =>
-                                    void handleWriteTerminal(targetSerial, command, true)
-                                  }
-                                  onInterrupt={(targetSerial) => void handleInterruptTerminal(targetSerial)}
-                                  onClear={clearTerminal}
-                                  onToggleAutoScroll={setTerminalAutoScroll}
-                                />
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    <TerminalWorkspaceConnector
+                      terminalActiveSerials={terminalActiveSerials}
+                      devices={devices}
+                      busy={busy}
+                      onSelectSerial={(serial) => setSelectedSerials([serial])}
+                      onConnect={handleConnectTerminal}
+                      onDisconnect={handleDisconnectTerminal}
+                      onRemoveSession={handleRemoveTerminalSession}
+                      onSend={(targetSerial, command) =>
+                        void handleWriteTerminal(targetSerial, command, true)
+                      }
+                      onInterrupt={(targetSerial) => void handleInterruptTerminal(targetSerial)}
+                      onClear={clearTerminal}
+                      onToggleAutoScroll={setTerminalAutoScroll}
+                    />
                       </div>
                     )}
                   </div>
@@ -15060,7 +14825,8 @@ function App() {
             <Route
               path="/files"
               element={
-                <FilesPage
+                <Suspense fallback={null}>
+                  <LazyFilesPage
                   activeSerial={activeSerial}
                   selectedSummaryLabel={selectedSummaryLabel}
                   singleSelectionWarning={singleSelectionWarning}
@@ -15110,14 +14876,14 @@ function App() {
                   onOpenFilesDeleteModal={openFilesDeleteModal}
                   onCopyText={handleCopyTextWithToast}
                   onNotifyInfo={handleNotifyInfo}
-                />
+                  />
+                </Suspense>
               }
             />
             <Route
               path="/logcat"
               element={
-                <Suspense fallback={null}>
-                  <LazyLogcatPage
+                <LogcatRouteSection
                   activeSerial={activeSerial}
                   activeDeviceIsIos={activeDeviceIsIos}
                   selectedSummaryLabel={selectedSummaryLabel}
@@ -15136,14 +14902,13 @@ function App() {
                   onLogcatStart={handleLogcatStart}
                   onLogcatStop={handleLogcatStop}
                   onLogcatClearBuffer={handleLogcatClearBuffer}
-                  onLogcatExport={handleLogcatExport}
+                  onLogcatExportLines={handleLogcatExport}
                   logcatAutoScroll={logcatAutoScroll}
                   onLogcatAutoScrollChange={setLogcatAutoScroll}
                   onLogcatMirrorLaunch={handleLogcatMirrorLaunch}
                   onLogcatToggleSyncedRecording={handleLogcatToggleSyncedRecording}
                   screenRecordStatusBySerial={screenRecordStatusBySerial}
                   logcatSyncSessionBySerial={logcatSyncSessionBySerial}
-                  rawLogcatLines={rawLogcatLines}
                   onExportSyncedLogcatSlice={handleExportSyncedLogcatSlice}
                   logcatActiveFilterSummary={logcatActiveFilterSummary}
                   logcatSourceMode={logcatSourceMode}
@@ -15182,18 +14947,14 @@ function App() {
                   logcatLastExport={logcatLastExport}
                   activeLogcatRunning={activeLogcatRunning}
                   activeLogcatStatusLoading={activeLogcatStatusLoading}
-                  logcatFilteredLines={logcatFiltered.lines}
-                  logcatMatchCount={logcatFiltered.matchIds.length}
-                  logcatMatchIndex={logcatMatchIndex}
+                  logcatBaseFilterState={logcatBaseFilterState}
+                  logcatBaseFilterActive={logcatBaseFilterActive}
                   logcatSearchTerm={logcatSearchTerm}
                   onLogcatSearchTermChange={setLogcatSearchTerm}
                   onLogcatClearView={handleLogcatClearView}
-                  onLogcatPrevMatch={handleLogcatPrevMatch}
-                  onLogcatNextMatch={handleLogcatNextMatch}
                   logcatSearchPattern={logcatSearchPattern}
                   logcatOutputRef={logcatOutputRef}
                 />
-                </Suspense>
               }
             />
             <Route
@@ -15270,7 +15031,8 @@ function App() {
             <Route
               path="/apps"
               element={
-                <AppsPage
+                <Suspense fallback={null}>
+                  <LazyAppsPage
                   activeSerial={activeSerial}
                   appsSerial={appsSerial}
                   selectedSummaryLabel={selectedSummaryLabel}
@@ -15306,7 +15068,8 @@ function App() {
                   appsContextMenuPosition={appsContextMenuPosition}
                   appsContextMenuRef={appsContextMenuRef}
                   onCloseAppsContextMenu={handleCloseAppsContextMenu}
-                />
+                  />
+                </Suspense>
               }
             />
             <Route
@@ -16067,12 +15830,7 @@ function App() {
                         highlightPattern={bugreportLogSearchPattern}
                         canLoadMore={Boolean(bugreportLogSummary) && bugreportLogHasMore && !bugreportLogLoadAllRunning}
                         busy={bugreportLogBusy || bugreportLogLoadAllRunning}
-                        onNearBottom={() => {
-                          if (!bugreportLogSummary) {
-                            return;
-                          }
-                          void runBugreportLogQuery(bugreportLogSummary.report_id, bugreportLogOffset, true);
-                        }}
+                        onNearBottom={handleBugreportLogNearBottom}
                       />
                     ) : (
                       <div className="logcat-output bugreport-log-output bugreport-log-output-empty">

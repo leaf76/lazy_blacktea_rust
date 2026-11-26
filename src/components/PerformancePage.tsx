@@ -7,21 +7,10 @@ import {
   formatKhz,
   formatPerSecX100,
 } from "../perf";
+import { EMPTY_PERF_MONITOR_STATE, type PerfMonitorState } from "../perfState";
 import type { PerfSnapshot } from "../types";
 
-export type PerfMonitorState = {
-  running: boolean;
-  traceId: string | null;
-  samples: PerfSnapshot[];
-  lastError: string | null;
-};
-
-export const EMPTY_PERF_MONITOR_STATE: PerfMonitorState = {
-  running: false,
-  traceId: null,
-  samples: [],
-  lastError: null,
-};
+export { EMPTY_PERF_MONITOR_STATE, type PerfMonitorState };
 
 function renderPerfSparkline(values: number[]) {
   const width = 220;

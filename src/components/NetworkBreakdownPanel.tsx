@@ -1,22 +1,11 @@
 import { memo, useMemo } from "react";
 import { buildNetTotalSeriesByUid } from "../netProfiler";
 import { buildSparklinePoints, formatBps, formatBytes } from "../perf";
+import { EMPTY_NET_PROFILER_STATE, type NetProfilerState } from "../netProfilerState";
 import type { NetProfilerSnapshot } from "../types";
 import { NetProfilerLineChart } from "./NetProfilerLineChart";
 
-export type NetProfilerState = {
-  running: boolean;
-  traceId: string | null;
-  samples: NetProfilerSnapshot[];
-  lastError: string | null;
-};
-
-export const EMPTY_NET_PROFILER_STATE: NetProfilerState = {
-  running: false,
-  traceId: null,
-  samples: [],
-  lastError: null,
-};
+export { EMPTY_NET_PROFILER_STATE, type NetProfilerState };
 
 const MAX_PINNED_UIDS = 5;
 

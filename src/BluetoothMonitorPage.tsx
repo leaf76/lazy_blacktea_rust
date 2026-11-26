@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { isTauriRuntime } from "./tauriEnv";
@@ -67,6 +67,48 @@ type Props = {
 
 const EVENT_LIMIT = 200;
 const SESSION_EVENT_LIMIT = 500;
+const EVENT_BATCH_FLUSH_MS = 150;
+
+let bluetoothClockNowMs = Date.now();
+const bluetoothClockListeners = new Set<() => void>();
+let bluetoothClockTimer: number | null = null;
+
+const subscribeBluetoothClock1s = (listener: () => void): (() => void) => {
+  bluetoothClockListeners.add(listener);
+  if (
+    bluetoothClockListeners.size === 1 &&
+    bluetoothClockTimer == null &&
+    typeof window !== "undefined"
+  ) {
+    bluetoothClockNowMs = Date.now();
+    bluetoothClockTimer = window.setInterval(() => {
+      bluetoothClockNowMs = Date.now();
+      for (const notify of bluetoothClockListeners) {
+        notify();
+      }
+    }, 1000);
+  }
+  return () => {
+    bluetoothClockListeners.delete(listener);
+    if (
+      bluetoothClockListeners.size === 0 &&
+      bluetoothClockTimer != null &&
+      typeof window !== "undefined"
+    ) {
+      window.clearInterval(bluetoothClockTimer);
+      bluetoothClockTimer = null;
+    }
+  };
+};
+
+const getBluetoothClockSnapshot = (): number => bluetoothClockNowMs;
+
+const useBluetoothClock1s = (): number =>
+  useSyncExternalStore(
+    subscribeBluetoothClock1s,
+    getBluetoothClockSnapshot,
+    getBluetoothClockSnapshot,
+  );
 
 const sessionToneByState = {
   stopped: "idle",
@@ -83,6 +125,119 @@ const sessionLabelByState = {
   live: "Live",
   stale: "Data stale",
 } as const;
+
+const RelativeTimeText = memo(
+  ({ prefix, timestampMs }: { prefix: string; timestampMs: number | null }) => {
+    const nowMs = useBluetoothClock1s();
+    return (
+      <span className="muted">
+        {prefix}
+        {formatRelativeFromMs(nowMs, timestampMs)}
+      </span>
+    );
+  },
+);
+
+const BluetoothSessionStatusPill = memo(
+  ({
+    serial,
+    monitoringDesired,
+    lastAnyDataAtMs,
+  }: {
+    serial: string | null;
+    monitoringDesired: boolean;
+    lastAnyDataAtMs: number | null;
+  }) => {
+    const nowMs = useBluetoothClock1s();
+    const sessionState = resolveBluetoothMonitorSessionState({
+      serial,
+      monitoringDesired,
+      lastAnyDataAtMs,
+      nowMs,
+      recentDataMs: BLUETOOTH_MONITOR_RECENT_DATA_MS,
+    });
+    return (
+      <span className={`status-pill ${sessionToneByState[sessionState]}`}>
+        {sessionLabelByState[sessionState]}
+      </span>
+    );
+  },
+);
+
+const BluetoothSnapshotFreshnessPill = memo(
+  ({
+    serial,
+    monitoringDesired,
+    lastAnyDataAtMs,
+  }: {
+    serial: string | null;
+    monitoringDesired: boolean;
+    lastAnyDataAtMs: number | null;
+  }) => {
+    const nowMs = useBluetoothClock1s();
+    const sessionState = resolveBluetoothMonitorSessionState({
+      serial,
+      monitoringDesired,
+      lastAnyDataAtMs,
+      nowMs,
+      recentDataMs: BLUETOOTH_MONITOR_RECENT_DATA_MS,
+    });
+    return (
+      <span
+        className={`status-pill ${
+          sessionState === "live" ? "ok" : sessionState === "starting" ? "busy" : "idle"
+        }`}
+      >
+        {sessionState === "live" ? "Fresh" : sessionState === "starting" ? "Loading" : "Snapshot"}
+      </span>
+    );
+  },
+);
+
+const BluetoothSessionStateAlerts = memo(
+  ({
+    serial,
+    monitoringDesired,
+    lastAnyDataAtMs,
+    commandError,
+    bluetoothOff,
+  }: {
+    serial: string | null;
+    monitoringDesired: boolean;
+    lastAnyDataAtMs: number | null;
+    commandError: string | null;
+    bluetoothOff: boolean;
+  }) => {
+    const nowMs = useBluetoothClock1s();
+    const sessionState = resolveBluetoothMonitorSessionState({
+      serial,
+      monitoringDesired,
+      lastAnyDataAtMs,
+      nowMs,
+      recentDataMs: BLUETOOTH_MONITOR_RECENT_DATA_MS,
+    });
+    if (commandError || bluetoothOff) {
+      return null;
+    }
+    if (sessionState === "paused") {
+      return (
+        <div className="inline-alert info">
+          <strong>Monitoring paused</strong>
+          <span>Resume monitoring to stream live Bluetooth snapshots and events for this device.</span>
+        </div>
+      );
+    }
+    if (sessionState === "stale") {
+      return (
+        <div className="inline-alert warn">
+          <strong>Bluetooth data is stale</strong>
+          <span>No recent snapshots or events have arrived. Verify device connectivity or wait for the next poll.</span>
+        </div>
+      );
+    }
+    return null;
+  },
+);
 
 const eventCategoryOptions: Array<[BluetoothEventCategory, string]> = [
   ["scan", "Scan"],
@@ -184,9 +339,10 @@ export const BluetoothMonitorPage = ({
   const ownedSerialRef = useRef<string | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const pendingEventsRef = useRef<BluetoothMonitorEventEntry[]>([]);
+  const incomingEventsRef = useRef<BluetoothMonitorEventEntry[]>([]);
+  const eventFlushTimerRef = useRef<number | null>(null);
   const timelinePausedRef = useRef(false);
   const eventIdRef = useRef(0);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [pendingMonitoringDesired, setPendingMonitoringDesired] = useState<boolean | null>(null);
   const [snapshot, setSnapshot] = useState<BluetoothParsedSnapshot | null>(null);
   const [snapshotReceivedAtMs, setSnapshotReceivedAtMs] = useState<number | null>(null);
@@ -215,17 +371,13 @@ export const BluetoothMonitorPage = ({
   const [snapshotCollapsed, setSnapshotCollapsed] = useState(true);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 1000);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
     serialRef.current = serial;
     pendingEventsRef.current = [];
+    incomingEventsRef.current = [];
+    if (eventFlushTimerRef.current != null) {
+      window.clearTimeout(eventFlushTimerRef.current);
+      eventFlushTimerRef.current = null;
+    }
     setSnapshot(null);
     setSnapshotReceivedAtMs(null);
     setStateSummary(null);
@@ -275,6 +427,32 @@ export const BluetoothMonitorPage = ({
       setStateReceivedAtMs(receivedAtMs);
     });
 
+    const flushIncomingEvents = () => {
+      eventFlushTimerRef.current = null;
+      const batch = incomingEventsRef.current;
+      if (!batch.length) {
+        return;
+      }
+      incomingEventsRef.current = [];
+      const newestFirst = [...batch].reverse();
+      const latestAtMs = newestFirst[0]?.receivedAtMs ?? Date.now();
+      setLastEventReceivedAtMs(latestAtMs);
+      setSessionEvents((prev) => [...newestFirst, ...prev].slice(0, SESSION_EVENT_LIMIT));
+      if (timelinePausedRef.current) {
+        pendingEventsRef.current = [...newestFirst, ...pendingEventsRef.current].slice(0, EVENT_LIMIT);
+        setTimelineNewCount((prev) => prev + newestFirst.length);
+        return;
+      }
+      setEvents((prev) => [...newestFirst, ...prev].slice(0, EVENT_LIMIT));
+    };
+
+    const scheduleIncomingEventsFlush = () => {
+      if (eventFlushTimerRef.current != null) {
+        return;
+      }
+      eventFlushTimerRef.current = window.setTimeout(flushIncomingEvents, EVENT_BATCH_FLUSH_MS);
+    };
+
     const unlistenEvent = listen<BluetoothEventEvent>("bluetooth-event", (event) => {
       const payload = event.payload;
       const currentSerial = serialRef.current;
@@ -282,18 +460,17 @@ export const BluetoothMonitorPage = ({
         return;
       }
       const receivedAtMs = Date.now();
-      setLastEventReceivedAtMs(receivedAtMs);
       const nextEntry = { id: eventIdRef.current++, event: payload.event, receivedAtMs };
-      setSessionEvents((prev) => [nextEntry, ...prev].slice(0, SESSION_EVENT_LIMIT));
-      if (timelinePausedRef.current) {
-        pendingEventsRef.current = [nextEntry, ...pendingEventsRef.current].slice(0, EVENT_LIMIT);
-        setTimelineNewCount((prev) => prev + 1);
-        return;
-      }
-      setEvents((prev) => [nextEntry, ...prev].slice(0, EVENT_LIMIT));
+      incomingEventsRef.current.push(nextEntry);
+      scheduleIncomingEventsFlush();
     });
 
     return () => {
+      if (eventFlushTimerRef.current != null) {
+        window.clearTimeout(eventFlushTimerRef.current);
+        eventFlushTimerRef.current = null;
+      }
+      incomingEventsRef.current = [];
       void unlistenSnapshot.then((unlisten) => unlisten());
       void unlistenState.then((unlisten) => unlisten());
       void unlistenEvent.then((unlisten) => unlisten());
@@ -364,14 +541,6 @@ export const BluetoothMonitorPage = ({
     return Math.max(...timestamps);
   }, [lastEventReceivedAtMs, snapshotReceivedAtMs, stateReceivedAtMs]);
 
-  const sessionState = resolveBluetoothMonitorSessionState({
-    serial,
-    monitoringDesired: effectiveMonitoringDesired,
-    lastAnyDataAtMs,
-    nowMs,
-    recentDataMs: BLUETOOTH_MONITOR_RECENT_DATA_MS,
-  });
-
   const filteredEvents = useMemo(() => {
     const query = filterSearch.trim().toLowerCase();
     return events.filter(({ event }) => {
@@ -434,11 +603,6 @@ export const BluetoothMonitorPage = ({
     hasSearch: bondSearch.trim().length > 0,
   });
 
-  const statusTone = sessionToneByState[sessionState];
-  const statusLabel = sessionLabelByState[sessionState];
-  const lastSnapshotText = formatRelativeFromMs(nowMs, snapshotReceivedAtMs);
-  const lastEventText = formatRelativeFromMs(nowMs, lastEventReceivedAtMs);
-  const lastActivityText = formatRelativeFromMs(nowMs, lastAnyDataAtMs);
   const bluetoothOff = adapterEnabled === false || activeStates.includes("Off");
   const advertisingActive = (snapshot?.advertising.is_advertising ?? false) || activeStates.includes("Advertising");
   const scanningActive = (snapshot?.scanning.is_scanning ?? false) || activeStates.includes("Scanning");
@@ -556,6 +720,11 @@ export const BluetoothMonitorPage = ({
   };
 
   const handleClearEvents = () => {
+    if (eventFlushTimerRef.current != null) {
+      window.clearTimeout(eventFlushTimerRef.current);
+      eventFlushTimerRef.current = null;
+    }
+    incomingEventsRef.current = [];
     pendingEventsRef.current = [];
     setTimelineNewCount(0);
     setEvents([]);
@@ -627,24 +796,22 @@ export const BluetoothMonitorPage = ({
         </div>
       ) : null}
 
-      {!commandError && !bluetoothOff && sessionState === "starting" ? (
-        <div className="inline-alert info">
-          <strong>Preparing monitor</strong>
-          <span>Connecting to the selected device and waiting for the first Bluetooth snapshot.</span>
-        </div>
-      ) : null}
-
-      {!commandError && !bluetoothOff && sessionState === "stale" ? (
-        <div className="inline-alert warn">
-          <strong>Data is stale</strong>
-          <span>Monitoring is on, but no recent Bluetooth data arrived. Check the device or resume monitoring.</span>
-        </div>
-      ) : null}
+      <BluetoothSessionStateAlerts
+        serial={serial}
+        monitoringDesired={effectiveMonitoringDesired}
+        lastAnyDataAtMs={lastAnyDataAtMs}
+        commandError={commandError}
+        bluetoothOff={bluetoothOff}
+      />
 
       <section className="panel bluetooth-monitor-hero">
         <div className="bluetooth-monitor-hero-main">
           <div className="bluetooth-monitor-status-row">
-            <span className={`status-pill ${statusTone}`}>{statusLabel}</span>
+            <BluetoothSessionStatusPill
+              serial={serial}
+              monitoringDesired={effectiveMonitoringDesired}
+              lastAnyDataAtMs={lastAnyDataAtMs}
+            />
             <span className={`status-pill ${adapterEnabled == null ? "warn" : adapterEnabled ? "ok" : "error"}`}>
               {adapterEnabled == null
                 ? "Adapter unknown"
@@ -668,9 +835,9 @@ export const BluetoothMonitorPage = ({
             <span className="muted">
               Adapter address: <code>{snapshot?.address ?? "—"}</code>
             </span>
-            <span className="muted">Updated: {lastActivityText}</span>
-            <span className="muted">Snapshot: {lastSnapshotText}</span>
-            <span className="muted">Events: {lastEventText}</span>
+            <RelativeTimeText prefix="Updated: " timestampMs={lastAnyDataAtMs} />
+            <RelativeTimeText prefix="Snapshot: " timestampMs={snapshotReceivedAtMs} />
+            <RelativeTimeText prefix="Events: " timestampMs={lastEventReceivedAtMs} />
           </div>
 
           <div className="bluetooth-monitor-current-activity" aria-label="Current Bluetooth activity">
@@ -830,9 +997,11 @@ export const BluetoothMonitorPage = ({
           <div className="card-header">
             <h2>Activity Snapshot</h2>
             <div className="bluetooth-monitor-card-actions">
-              <span className={`status-pill ${sessionState === "live" ? "ok" : sessionState === "starting" ? "busy" : "idle"}`}>
-                {sessionState === "live" ? "Fresh" : sessionState === "starting" ? "Loading" : "Snapshot"}
-              </span>
+              <BluetoothSnapshotFreshnessPill
+                serial={serial}
+                monitoringDesired={effectiveMonitoringDesired}
+                lastAnyDataAtMs={lastAnyDataAtMs}
+              />
               <button
                 type="button"
                 className="ghost bluetooth-monitor-collapse-button"
@@ -1020,7 +1189,7 @@ export const BluetoothMonitorPage = ({
                       <span className="muted">
                         <code>{device.address}</code>
                       </span>
-                      <span className="muted">Last seen {formatRelativeFromMs(nowMs, device.last_seen_at_ms)}</span>
+                      <RelativeTimeText prefix="Last seen " timestampMs={device.last_seen_at_ms} />
                     </div>
                   </div>
                 ))}

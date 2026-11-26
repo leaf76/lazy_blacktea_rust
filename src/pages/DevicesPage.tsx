@@ -43,7 +43,7 @@ import {
   type ScreenRecordPendingAction,
 } from "../screenRecord";
 import type { AppConfig, DeviceInfo, ScreenRecordStatus } from "../types";
-import type { ContextMenuPosition } from "./AppsPage";
+import type { ContextMenuPosition } from "../appsUtils";
 
 export type DeviceSelectionMode = "single" | "multi";
 
