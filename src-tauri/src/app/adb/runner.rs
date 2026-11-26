@@ -10,14 +10,19 @@ pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Creates a `Command` configured not to flash a console window on Windows.
+#[cfg(windows)]
 pub fn new_background_command(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+
     let mut cmd = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
+}
+
+/// Creates a `Command` configured not to flash a console window on Windows.
+#[cfg(not(windows))]
+pub fn new_background_command(program: &str) -> Command {
+    Command::new(program)
 }
 
 #[derive(Debug, Clone)]
